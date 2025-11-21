@@ -155,7 +155,7 @@ if uploaded_file and st.button("🚀 Generate Summary"):
             prompt = build_prompt(safe_text, language)
 
             # ⚡ Best multilingual model for Hindi/Bengali/Urdu
-            model_id = "qwen/qwen-2.5-7b-instruct"
+            model_id = "meta-llama/llama-3.1-8b-instruct"
 
 
             # -----------------------------
@@ -167,8 +167,8 @@ if uploaded_file and st.button("🚀 Generate Summary"):
                     {"role": "system", "content": "You are an expert legal simplification engine."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=350,
-                temperature=0.12,
+                max_tokens=280,
+                temperature=0.05,
             )
 
             summary = response.choices[0].message.content.strip()
@@ -185,8 +185,8 @@ if uploaded_file and st.button("🚀 Generate Summary"):
                         {"role": "system", "content": "Strict multilingual rewriting engine."},
                         {"role": "user", "content": retry_prompt}
                     ],
-                    max_tokens=320,
-                    temperature=0.05
+                    max_tokens=260,
+                    temperature=0.03,
                 )
 
                 retry_summary = response2.choices[0].message.content.strip()
