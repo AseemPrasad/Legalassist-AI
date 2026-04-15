@@ -23,7 +23,7 @@ def get_client():
 
 try:
     client = get_client()
-except:
+except Exception:
     client = None
 
 # -----------------------------
@@ -167,6 +167,7 @@ Output in numbered form like:
 def parse_remedies_response(response_text):
     """
     Extract structured info from LLM response using numbered-line parsing.
+    Supports both 5-section (old) and 7-section (new) formats.
     """
     remedies = {
         "what_happened": "",
@@ -183,15 +184,29 @@ def parse_remedies_response(response_text):
     if not text:
         return remedies
 
-    key_map = [
-        (1, "what_happened"),
-        (2, "can_appeal"),
-        (3, "appeal_days"),
-        (4, "appeal_court"),
-        (5, "cost"),
-        (6, "first_action"),
-        (7, "deadline"),
-    ]
+    # Detect format: 7-section if markers 6. or 7. exist, else 5-section
+    is_7section = "6." in text or "7." in text
+
+    if is_7section:
+        key_map = [
+            (1, "what_happened"),
+            (2, "can_appeal"),
+            (3, "appeal_days"),
+            (4, "appeal_court"),
+            (5, "cost"),
+            (6, "first_action"),
+            (7, "deadline"),
+        ]
+        total = 8
+    else:
+        key_map = [
+            (1, "what_happened"),
+            (2, "can_appeal"),
+            (3, "appeal_details"),
+            (4, "first_action"),
+            (5, "deadline"),
+        ]
+        total = 6
 
     for i, key in key_map:
         marker = f"{i}."
@@ -199,15 +214,21 @@ def parse_remedies_response(response_text):
             continue
         start = text.index(marker) + len(marker)
         end = len(text)
-        for j in range(i + 1, 8):
+        for j in range(i + 1, total):
             next_marker = f"{j}."
             if next_marker in text[start:]:
                 end = text.index(next_marker, start)
                 break
-        answer = text[start:end].strip()
-        remedies[key] = answer
-        if i in (3, 4, 5):
-            remedies["appeal_details"] += answer + " "
+        chunk = text[start:end].strip()
+        # Strip inline header text on same line as marker (e.g. "WHAT HAPPENED?")
+        # Split on first newline; if the first line has no lowercase letters it's a header
+        if "\n" in chunk:
+            first_line, rest = chunk.split("\n", 1)
+            if not any(c.islower() for c in first_line):
+                chunk = rest.strip()
+        remedies[key] = chunk
+        if is_7section and i in (3, 4, 5):
+            remedies["appeal_details"] += chunk + " "
 
     return remedies
 
