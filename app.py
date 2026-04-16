@@ -166,14 +166,18 @@ Output in numbered form like:
 
 def parse_remedies_response(response_text):
     """
-    Extract structured info from LLM response using numbered-line parsing.
-    Supports both 5-section (old) and 7-section (new) formats.
+    Extract structured info from LLM response using flexible numbered-line parsing.
+    Supports multiple separators: . ) : - 
+    Handles both 5-section (old) and 7-section (new) formats.
     """
+    import re
+    
     remedies = {
         "what_happened": "",
         "can_appeal": "",
         "appeal_days": "",
         "appeal_court": "",
+        "cost_estimate": "",
         "cost": "",
         "first_action": "",
         "deadline": "",
@@ -184,51 +188,69 @@ def parse_remedies_response(response_text):
     if not text:
         return remedies
 
-    # Detect format: 7-section if markers 6. or 7. exist, else 5-section
-    is_7section = "6." in text or "7." in text
-
+    # Detect all numbered sections (flexible separators: . ) : -)
+    # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
+    pattern = r'^([1-9]\d?)\s*[.):‐-]\s*(.*?)$'
+    sections = {}
+    
+    for line in text.split('\n'):
+        match = re.match(pattern, line.strip())
+        if match:
+            num = int(match.group(1))
+            header = match.group(2).strip()
+            sections[num] = {"header": header, "content": ""}
+    
+    # Extract content for each section
+    lines = text.split('\n')
+    current_section = None
+    
+    for line in lines:
+        match = re.match(pattern, line.strip())
+        if match:
+            current_section = int(match.group(1))
+        elif current_section is not None and current_section in sections:
+            if line.strip():  # Only add non-empty lines
+                sections[current_section]["content"] += line.strip() + " "
+    
+    # Clean up content
+    for num in sections:
+        sections[num]["content"] = sections[num]["content"].strip()
+    
+    # Map sections to keys based on count
+    is_7section = len(sections) >= 7
+    
     if is_7section:
-        key_map = [
-            (1, "what_happened"),
-            (2, "can_appeal"),
-            (3, "appeal_days"),
-            (4, "appeal_court"),
-            (5, "cost"),
-            (6, "first_action"),
-            (7, "deadline"),
-        ]
-        total = 8
+        if 1 in sections:
+            remedies["what_happened"] = sections[1]["content"]
+        if 2 in sections:
+            can_appeal_text = sections[2]["content"].lower()
+            remedies["can_appeal"] = "yes" if "yes" in can_appeal_text else "no"
+        if 3 in sections:
+            # Extract just the number from "30 days"
+            appeal_days_text = sections[3]["content"]
+            match = re.search(r'\d+', appeal_days_text)
+            remedies["appeal_days"] = match.group() if match else appeal_days_text
+        if 4 in sections:
+            remedies["appeal_court"] = sections[4]["content"]
+        if 5 in sections:
+            remedies["cost_estimate"] = sections[5]["content"]
+            remedies["cost"] = sections[5]["content"]  # Support both keys
+        if 6 in sections:
+            remedies["first_action"] = sections[6]["content"]
+        if 7 in sections:
+            remedies["deadline"] = sections[7]["content"]
     else:
-        key_map = [
-            (1, "what_happened"),
-            (2, "can_appeal"),
-            (3, "appeal_details"),
-            (4, "first_action"),
-            (5, "deadline"),
-        ]
-        total = 6
-
-    for i, key in key_map:
-        marker = f"{i}."
-        if marker not in text:
-            continue
-        start = text.index(marker) + len(marker)
-        end = len(text)
-        for j in range(i + 1, total):
-            next_marker = f"{j}."
-            if next_marker in text[start:]:
-                end = text.index(next_marker, start)
-                break
-        chunk = text[start:end].strip()
-        # Strip inline header text on same line as marker (e.g. "WHAT HAPPENED?")
-        # Split on first newline; if the first line has no lowercase letters it's a header
-        if "\n" in chunk:
-            first_line, rest = chunk.split("\n", 1)
-            if not any(c.islower() for c in first_line):
-                chunk = rest.strip()
-        remedies[key] = chunk
-        if is_7section and i in (3, 4, 5):
-            remedies["appeal_details"] += chunk + " "
+        # 5-section format (old)
+        if 1 in sections:
+            remedies["what_happened"] = sections[1]["content"]
+        if 2 in sections:
+            remedies["can_appeal"] = sections[2]["content"]
+        if 3 in sections:
+            remedies["appeal_details"] = sections[3]["content"]
+        if 4 in sections:
+            remedies["first_action"] = sections[4]["content"]
+        if 5 in sections:
+            remedies["deadline"] = sections[5]["content"]
 
     return remedies
 
@@ -418,4 +440,4 @@ def main():
                     st.error(f"An error occurred: {err}")
 
 if __name__ == "__main__":
-    main()
+    main()
