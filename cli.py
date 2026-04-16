@@ -1,7 +1,9 @@
 import argparse
 import csv
 import json
+import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -28,6 +30,19 @@ LANG_CODE_TO_NAME = {
 }
 DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+LOGGER = logging.getLogger(__name__)
+
+KNOWN_COURTS = {
+    "supreme court",
+    "high court",
+    "district court",
+    "sessions court",
+    "session court",
+    "civil court",
+    "family court",
+    "consumer court",
+    "tribunal",
+}
 
 
 class CLIError(Exception):
@@ -182,20 +197,66 @@ Output in numbered form like:
 """
 
 
-def parse_remedies_response(response_text: str) -> Dict[str, str]:
-    remedies = {
-        "what_happened": "",
-        "can_appeal": "",
-        "appeal_days": "",
-        "appeal_court": "",
-        "cost_estimate": "",
-        "first_action": "",
-        "deadline": "",
-    }
+def _clean_answer(value: str) -> Optional[str]:
+    cleaned = re.sub(r"\s+", " ", (value or "")).strip(" -:\t\n")
+    return cleaned or None
 
-    text = response_text.strip()
+
+def _strip_question_label(key: str, value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+
+    patterns = {
+        "what_happened": r"^(what happened\??)\s*",
+        "can_appeal": r"^(can the loser appeal\??)\s*",
+        "appeal_days": r"^(appeal timeline\??|how many days\??)\s*",
+        "appeal_court": r"^(appeal court\??|which court(?: should they go to)?\??)\s*",
+        "cost_estimate": r"^(cost estimate\??|rough cost(?: in rupees)?\??)\s*",
+        "first_action": r"^(first action\??|what should they do first\??)\s*",
+        "deadline": r"^(important deadline\??|important dates?\??)\s*",
+    }
+    pattern = patterns.get(key)
+    if pattern:
+        value = re.sub(pattern, "", value, flags=re.IGNORECASE).strip()
+    return value or None
+
+
+def _normalize_yes_no(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    lower = value.lower()
+    if re.search(r"\byes\b", lower):
+        return "yes"
+    if re.search(r"\bno\b", lower):
+        return "no"
+    return None
+
+
+def _extract_number(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    match = re.search(r"\b(\d{1,4})\b", value)
+    return match.group(1) if match else None
+
+
+def _validate_court_name(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    cleaned = _clean_answer(value)
+    if not cleaned:
+        return None
+
+    normalized = cleaned.lower()
+    if normalized in KNOWN_COURTS or any(court in normalized for court in KNOWN_COURTS):
+        return cleaned
+    return None
+
+
+def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[str]]]:
+    text = (response_text or "").strip()
     if not text:
-        return remedies
+        LOGGER.warning("parse_remedies_response: empty response text")
+        return None
 
     mapping = {
         1: "what_happened",
@@ -206,21 +267,65 @@ def parse_remedies_response(response_text: str) -> Dict[str, str]:
         6: "first_action",
         7: "deadline",
     }
+    remedies: Dict[str, Optional[str]] = {key: None for key in mapping.values()}
 
-    for i, key in mapping.items():
-        marker = f"{i}."
-        if marker not in text:
+    marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
+    matches = list(marker_pattern.finditer(text))
+
+    if not matches:
+        LOGGER.warning("parse_remedies_response: no numbered sections found")
+        return None
+
+    parsed_sections = 0
+    for idx, match in enumerate(matches):
+        section_num = int(match.group(1))
+        key = mapping.get(section_num)
+        if not key:
             continue
-        start = text.index(marker) + len(marker)
-        end = len(text)
-        for j in range(i + 1, 8):
-            next_marker = f"{j}."
-            idx = text.find(next_marker, start)
-            if idx != -1:
-                end = idx
-                break
-        remedies[key] = text[start:end].strip()
 
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        inline_text = _clean_answer(match.group(2))
+        block_text = _clean_answer(text[start:end])
+        section_text = _clean_answer(" ".join(part for part in [inline_text, block_text] if part))
+        cleaned = _strip_question_label(key, section_text)
+        if cleaned is not None:
+            remedies[key] = cleaned
+            parsed_sections += 1
+
+    if parsed_sections == 0:
+        LOGGER.warning("parse_remedies_response: numbered markers found but no parseable content")
+        return None
+
+    normalized_can_appeal = _normalize_yes_no(remedies.get("can_appeal"))
+    if remedies.get("can_appeal") and normalized_can_appeal is None:
+        LOGGER.warning(
+            "parse_remedies_response: invalid can_appeal value=%r",
+            remedies.get("can_appeal"),
+        )
+    remedies["can_appeal"] = normalized_can_appeal
+
+    normalized_days = _extract_number(remedies.get("appeal_days"))
+    if remedies.get("appeal_days") and normalized_days is None:
+        LOGGER.warning(
+            "parse_remedies_response: invalid appeal_days value=%r",
+            remedies.get("appeal_days"),
+        )
+    remedies["appeal_days"] = normalized_days
+
+    validated_court = _validate_court_name(remedies.get("appeal_court"))
+    if remedies.get("appeal_court") and validated_court is None:
+        LOGGER.warning(
+            "parse_remedies_response: unknown appeal_court value=%r",
+            remedies.get("appeal_court"),
+        )
+    remedies["appeal_court"] = validated_court
+
+    LOGGER.info(
+        "parse_remedies_response: parsed_sections=%d extracted_keys=%s",
+        parsed_sections,
+        [key for key, value in remedies.items() if value is not None],
+    )
     return remedies
 
 
@@ -351,6 +456,20 @@ def process_one_pdf(
         )
         remedies_text = (resp_remedies.choices[0].message.content or "").strip()
         remedies = parse_remedies_response(remedies_text)
+        if remedies is None:
+            LOGGER.warning(
+                "process_one_pdf: remedies parsing failed for file=%s",
+                pdf_path.name,
+            )
+            remedies = {
+                "what_happened": None,
+                "can_appeal": None,
+                "appeal_days": None,
+                "appeal_court": None,
+                "cost_estimate": None,
+                "first_action": None,
+                "deadline": None,
+            }
 
         p3, c3, t3 = _usage_tokens(resp_remedies)
         prompt_tokens = p1 + p3
@@ -366,13 +485,13 @@ def process_one_pdf(
         result.update(
             {
                 "summary": summary,
-                "what_happened": remedies.get("what_happened", ""),
-                "can_appeal": remedies.get("can_appeal", ""),
-                "appeal_days": remedies.get("appeal_days", ""),
-                "appeal_court": remedies.get("appeal_court", ""),
-                "cost_estimate": remedies.get("cost_estimate", ""),
-                "first_action": remedies.get("first_action", ""),
-                "deadline": remedies.get("deadline", ""),
+                "what_happened": remedies.get("what_happened") or "",
+                "can_appeal": remedies.get("can_appeal") or "",
+                "appeal_days": remedies.get("appeal_days") or "",
+                "appeal_court": remedies.get("appeal_court") or "",
+                "cost_estimate": remedies.get("cost_estimate") or "",
+                "first_action": remedies.get("first_action") or "",
+                "deadline": remedies.get("deadline") or "",
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,

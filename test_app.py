@@ -43,27 +43,33 @@ def test_english_leakage():
 def test_parse_remedies_response():
     """Test parsing of LLM response for remedies"""
     mock_response = """
-    1. WHAT HAPPENED?
+    1. What happened?
     The plaintiff won the property dispute case.
-    
-    2. CAN THE LOSER APPEAL?
-    Yes, they can appeal to the High Court.
-    
-    3. IF YES TO APPEAL:
-    30
+
+    2) Can the loser appeal?
+    Yes, they can appeal.
+
+    3: Appeal timeline
+    30 days
+
+    4- Appeal court
     High Court
+
+    5. Cost estimate
     5000-10000
-    
-    4. WHAT SHOULD THEY DO FIRST?
+
+    6. First action
     File a certified copy request.
-    
-    5. IMPORTANT DATES:
+
+    7. Important deadline
     The 30 day deadline.
     """
     remedies = app.parse_remedies_response(mock_response)
     assert remedies["what_happened"] == "The plaintiff won the property dispute case."
-    assert "Yes" in remedies["can_appeal"]
-    assert "30" in remedies["appeal_details"] # Current parser combines these into appeal_details
+    assert remedies["can_appeal"] == "yes"
+    assert remedies["appeal_days"] == "30"
+    assert remedies["appeal_court"] == "High Court"
+    assert remedies["cost_estimate"] == "5000-10000"
     assert remedies["first_action"] == "File a certified copy request."
     assert remedies["deadline"] == "The 30 day deadline."
 
@@ -80,23 +86,29 @@ def test_get_remedies_advice_flow(mock_openai):
     # Setup mock
     mock_choice = MagicMock()
     mock_choice.message.content = """
-    1. WHAT HAPPENED?
+    1. What happened?
     Defendant was convicted.
-    2. CAN THE LOSER APPEAL?
+    2. Can the loser appeal?
     Yes.
-    3. IF YES:
+    3. Appeal timeline
     30
-    Session Court
+    4. Appeal court
+    Sessions Court
+    5. Cost estimate
     5000
-    4. WHAT SHOULD THEY DO FIRST?
+    6. What should they do first?
     Apply for bail.
-    5. IMPORTANT DATES:
+    7. Important deadline
     Next 30 days.
     """
     mock_openai.return_value.choices = [mock_choice]
     
     remedies = app.get_remedies_advice("Some judgment text", "English")
     assert remedies["what_happened"] == "Defendant was convicted."
+    assert remedies["can_appeal"] == "yes"
+    assert remedies["appeal_days"] == "30"
+    assert remedies["appeal_court"] == "Sessions Court"
+    assert remedies["cost"] == "5000"
     assert mock_openai.called
 
 def test_judgment_summary_quality_manual():

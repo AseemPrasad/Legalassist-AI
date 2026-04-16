@@ -1,8 +1,23 @@
 import streamlit as st
 from openai import OpenAI
 import PyPDF2
+import logging
 import re
 import time
+
+LOGGER = logging.getLogger(__name__)
+
+KNOWN_COURTS = {
+    "supreme court",
+    "high court",
+    "district court",
+    "sessions court",
+    "session court",
+    "civil court",
+    "family court",
+    "consumer court",
+    "tribunal",
+}
 
 # -----------------------------
 # App Config
@@ -172,60 +187,130 @@ Format your answer clearly with each question number and answer.
 """
 
 
+def _clean_answer(value):
+    cleaned = re.sub(r"\s+", " ", (value or "")).strip(" -:\t\n")
+    return cleaned or None
+
+
+def _strip_question_label(key, value):
+    if not value:
+        return None
+
+    patterns = {
+        "what_happened": r"^(what happened\??)\s*",
+        "can_appeal": r"^(can the loser appeal\??)\s*",
+        "appeal_days": r"^(appeal timeline\??|how many days\??)\s*",
+        "appeal_court": r"^(appeal court\??|which court(?: should they go to)?\??)\s*",
+        "cost_estimate": r"^(cost estimate\??|rough cost(?: in rupees)?\??)\s*",
+        "first_action": r"^(first action\??|what should they do first\??)\s*",
+        "deadline": r"^(important deadline\??|important dates?\??)\s*",
+    }
+    pattern = patterns.get(key)
+    if pattern:
+        value = re.sub(pattern, "", value, flags=re.IGNORECASE).strip()
+    return value or None
+
+
+def _normalize_yes_no(value):
+    if not value:
+        return None
+    lower = value.lower()
+    if re.search(r"\byes\b", lower):
+        return "yes"
+    if re.search(r"\bno\b", lower):
+        return "no"
+    return None
+
+
+def _extract_number(value):
+    if not value:
+        return None
+    match = re.search(r"\b(\d{1,4})\b", value)
+    return match.group(1) if match else None
+
+
+def _validate_court_name(value):
+    if not value:
+        return None
+    cleaned = _clean_answer(value)
+    if not cleaned:
+        return None
+
+    normalized = cleaned.lower()
+    if normalized in KNOWN_COURTS or any(court in normalized for court in KNOWN_COURTS):
+        return cleaned
+    return None
+
+
 def parse_remedies_response(response_text):
     """
-    Extract structured info from LLM response
+    Extract structured info from LLM response.
+    Returns None if no numbered sections can be parsed.
     """
-    remedies = {
-        "what_happened": "",
-        "can_appeal": "",
-        "appeal_days": "",
-        "appeal_court": "",
-        "cost": "",
-        "first_action": "",
-        "deadline": ""
+    text = (response_text or "").strip()
+    if not text:
+        LOGGER.warning("parse_remedies_response: empty response text")
+        return None
+
+    mapping = {
+        1: "what_happened",
+        2: "can_appeal",
+        3: "appeal_days",
+        4: "appeal_court",
+        5: "cost_estimate",
+        6: "first_action",
+        7: "deadline",
     }
-    
-    lines = response_text.split("\n")
-    current_section = None
-    current_answer = ""
-    
-    for line in lines:
-        # Detect question headers
-        if "1. WHAT HAPPENED" in line or "1. What happened" in line:
-            if current_section and current_answer:
-                remedies[current_section] = current_answer.strip()
-            current_section = "what_happened"
-            current_answer = ""
-        elif "2. CAN THE LOSER" in line or "2. Can the" in line:
-            if current_section and current_answer:
-                remedies[current_section] = current_answer.strip()
-            current_section = "can_appeal"
-            current_answer = ""
-        elif "3. IF YES" in line:
-            if current_section and current_answer:
-                remedies[current_section] = current_answer.strip()
-            current_section = "appeal_details"
-            current_answer = ""
-        elif "4. WHAT SHOULD" in line:
-            if current_section and current_answer:
-                remedies[current_section] = current_answer.strip()
-            current_section = "first_action"
-            current_answer = ""
-        elif "5. IMPORTANT" in line:
-            if current_section and current_answer:
-                remedies[current_section] = current_answer.strip()
-            current_section = "deadline"
-            current_answer = ""
-        else:
-            # Collect answer text
-            if current_section and line.strip():
-                current_answer += line + " "
-    
-    # Save last section
-    if current_section and current_answer:
-        remedies[current_section] = current_answer.strip()
-    
+    remedies = {key: None for key in mapping.values()}
+
+    marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
+    matches = list(marker_pattern.finditer(text))
+
+    if not matches:
+        LOGGER.warning("parse_remedies_response: no numbered sections found")
+        return None
+
+    parsed_sections = 0
+    for idx, match in enumerate(matches):
+        section_num = int(match.group(1))
+        key = mapping.get(section_num)
+        if not key:
+            continue
+
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        inline_text = _clean_answer(match.group(2))
+        block_text = _clean_answer(text[start:end])
+        section_text = _clean_answer(" ".join(part for part in [inline_text, block_text] if part))
+        cleaned = _strip_question_label(key, section_text)
+        if cleaned is not None:
+            remedies[key] = cleaned
+            parsed_sections += 1
+
+    if parsed_sections == 0:
+        LOGGER.warning("parse_remedies_response: numbered markers found but no parseable content")
+        return None
+
+    normalized_can_appeal = _normalize_yes_no(remedies.get("can_appeal"))
+    if remedies.get("can_appeal") and normalized_can_appeal is None:
+        LOGGER.warning("parse_remedies_response: invalid can_appeal value=%r", remedies.get("can_appeal"))
+    remedies["can_appeal"] = normalized_can_appeal
+
+    normalized_days = _extract_number(remedies.get("appeal_days"))
+    if remedies.get("appeal_days") and normalized_days is None:
+        LOGGER.warning("parse_remedies_response: invalid appeal_days value=%r", remedies.get("appeal_days"))
+    remedies["appeal_days"] = normalized_days
+
+    validated_court = _validate_court_name(remedies.get("appeal_court"))
+    if remedies.get("appeal_court") and validated_court is None:
+        LOGGER.warning("parse_remedies_response: unknown appeal_court value=%r", remedies.get("appeal_court"))
+    remedies["appeal_court"] = validated_court
+
+    LOGGER.info(
+        "parse_remedies_response: parsed_sections=%d extracted_keys=%s",
+        parsed_sections,
+        [key for key, value in remedies.items() if value is not None],
+    )
     return remedies
 
 
@@ -253,7 +338,20 @@ def get_remedies_advice(judgment_text, language):
     
     response_text = response.choices[0].message.content.strip()
     remedies = parse_remedies_response(response_text)
-    
+    if remedies is None:
+        LOGGER.warning("get_remedies_advice: remedies parsing failed")
+        return {
+            "what_happened": None,
+            "can_appeal": None,
+            "appeal_days": None,
+            "appeal_court": None,
+            "cost_estimate": None,
+            "cost": None,
+            "first_action": None,
+            "deadline": None,
+        }
+
+    remedies["cost"] = remedies.get("cost_estimate")
     return remedies
 
 # -----------------------------
@@ -414,4 +512,4 @@ def main():
                     st.error(f"An error occurred: {err}")
 
 if __name__ == "__main__":
-    main()
+    main()
