@@ -1,6 +1,7 @@
 import streamlit as st
 from openai import OpenAI
 import PyPDF2
+import re
 
 # -----------------------------
 # App Config
@@ -77,11 +78,47 @@ def extract_text_from_pdf(uploaded_pdf):
 # Compress text for token safety
 # -----------------------------
 def compress_text(text, limit=6000):
+    """
+    Truncates text by taking the first and last portions, 
+    ensuring we break at sentence or paragraph boundaries.
+    """
     if len(text) <= limit:
         return text
-    head = text[:3000]
-    tail = text[-3000:]
-    return head + "\n\n... [TRUNCATED] ...\n\n" + tail
+
+    half = limit // 2
+    
+    # 1. Process Head: Try to find the last sentence/para boundary in the first half
+    head_raw = text[:half]
+    # Look for . ! ? followed by space/newline, or multiple newlines
+    match_head = list(re.finditer(r'([.!?]\s+|\n+)', head_raw))
+    if match_head:
+        head_end = match_head[-1].end()
+        # Only truncate at the boundary if it doesn't discard too much (at least 70% of half)
+        if head_end > half * 0.7:
+            head = head_raw[:head_end]
+        else:
+            head = head_raw
+    else:
+        # Fallback: search for last space to avoid cutting a word
+        last_space = head_raw.rfind(' ')
+        head = head_raw[:last_space] if last_space != -1 else head_raw
+
+    # 2. Process Tail: Try to find the first sentence/para boundary in the last half
+    tail_raw = text[-half:]
+    match_tail = list(re.finditer(r'([.!?]\s+|\n+)', tail_raw))
+    if match_tail:
+        # Start after the first boundary found in the first 30% of the tail segment
+        tail_start = match_tail[0].end()
+        if tail_start < half * 0.3:
+            tail = tail_raw[tail_start:]
+        else:
+            tail = tail_raw
+    else:
+        # Fallback: search for first space
+        first_space = tail_raw.find(' ')
+        tail = tail_raw[first_space+1:] if first_space != -1 else tail_raw
+
+    return head.strip() + "\n\n... [TRUNCATED] ...\n\n" + tail.strip()
 
 # -----------------------------
 # Detect English leakage
