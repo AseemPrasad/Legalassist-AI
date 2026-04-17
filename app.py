@@ -16,16 +16,14 @@ st.set_page_config(
 # -----------------------------
 # Load API Keys (OpenRouter)
 # -----------------------------
+@st.cache_resource
 def get_client():
     return OpenAI(
         api_key=st.secrets["OPENROUTER_API_KEY"],
         base_url=st.secrets["OPENROUTER_BASE_URL"]
     )
 
-try:
-    client = get_client()
-except Exception:
-    client = None
+client = None  # Lazy initialized
 
 # -----------------------------
 # Retro Styling
@@ -68,6 +66,10 @@ def get_remedies_advice(judgment_text, language):
     """
     Call LLM to get remedies for this judgment
     """
+    global client
+    if client is None:
+        client = get_client()
+
     prompt = core.build_remedies_prompt(core.compress_text(judgment_text), language)
     
     response = client.chat.completions.create(
@@ -125,6 +127,10 @@ def main():
     st.markdown("---")
 
     if uploaded_file and st.button("🚀 Generate Summary"):
+        global client
+        if client is None:
+            client = get_client()
+
         with st.spinner("Processing judgment…"):
             try:
                 raw_text = core.extract_text_from_pdf(uploaded_file)
