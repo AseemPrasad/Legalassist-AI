@@ -1,6 +1,6 @@
-﻿streamlit
-openai
-PyPDF2
-pytest
-tqdm
-langdetect
+streamlit==1.56.0
+openai==2.30.0
+PyPDF2==3.0.1
+pytest==9.0.2
+tqdm==4.67.1
+langdetect==1.0.9

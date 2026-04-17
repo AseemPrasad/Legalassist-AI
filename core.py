@@ -1,7 +1,10 @@
 import PyPDF2
 import re
+import logging
 from pathlib import Path
 from typing import Dict, Optional, List
+
+LOGGER = logging.getLogger(__name__)
 
 # -----------------------------
 # PDF to text
@@ -218,6 +221,8 @@ def _validate_court_name(value: Optional[str]) -> Optional[str]:
     normalized = cleaned.lower()
     if normalized in KNOWN_COURTS or any(court in normalized for court in KNOWN_COURTS):
         return cleaned
+    
+    # NEW: Log as warning and return None if not a known court
     return None
 
 def parse_remedies_response(response_text: str) -> Dict[str, Optional[str]]:
@@ -235,28 +240,29 @@ def parse_remedies_response(response_text: str) -> Dict[str, Optional[str]]:
         7: "deadline",
     }
     remedies: Dict[str, Optional[str]] = {
-        "what_happened": "",
-        "can_appeal": "",
-        "appeal_days": "",
-        "appeal_court": "",
-        "cost_estimate": "",
-        "cost": "", # For backward compatibility in app.py
-        "first_action": "",
-        "deadline": "",
-        "appeal_details": "" # For backward compatibility in app.py
+        "what_happened": None,
+        "can_appeal": None,
+        "appeal_days": None,
+        "appeal_court": None,
+        "cost_estimate": None,
+        "cost": None, # For backward compatibility in app.py
+        "first_action": None,
+        "deadline": None,
+        "appeal_details": None # For backward compatibility in app.py
     }
 
     text = response_text.strip()
     if not text:
-        return remedies
+        LOGGER.warning("parse_remedies_response: empty response text")
+        return None
 
     # Use the more robust parsing from cli.py
     marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
     matches = list(marker_pattern.finditer(text))
 
     if not matches:
-        # Fallback to simple line split if no markers found (unlikely but safe)
-        return remedies
+        LOGGER.warning("parse_remedies_response: no numbered sections found")
+        return None
 
     parsed_sections = 0
     for idx, match in enumerate(matches):
@@ -278,10 +284,25 @@ def parse_remedies_response(response_text: str) -> Dict[str, Optional[str]]:
 
     # Normalization & Compatibility
     if remedies["can_appeal"]:
-        remedies["can_appeal"] = _normalize_yes_no(remedies["can_appeal"]) or remedies["can_appeal"]
+        orig = remedies["can_appeal"]
+        normalized = _normalize_yes_no(orig)
+        if normalized is None:
+            LOGGER.warning("parse_remedies_response: invalid can_appeal value: %s", orig)
+        remedies["can_appeal"] = normalized
     
     if remedies["appeal_days"]:
-        remedies["appeal_days"] = _extract_number(remedies["appeal_days"]) or remedies["appeal_days"]
+        orig = remedies["appeal_days"]
+        normalized = _extract_number(orig)
+        if normalized is None:
+            LOGGER.warning("parse_remedies_response: invalid appeal_days value: %s", orig)
+        remedies["appeal_days"] = normalized
+    
+    if remedies["appeal_court"]:
+        orig = remedies["appeal_court"]
+        normalized = _validate_court_name(orig)
+        if normalized is None:
+            LOGGER.warning("parse_remedies_response: unknown appeal_court: %s", orig)
+        remedies["appeal_court"] = normalized
     
     # Map 'cost_estimate' to 'cost' for app.py
     if remedies["cost_estimate"]:

@@ -2,7 +2,7 @@ import logging
 
 import pytest
 
-from cli import parse_remedies_response
+from core import parse_remedies_response
 
 
 def test_parse_well_formatted_response():

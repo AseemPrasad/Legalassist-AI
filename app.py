@@ -89,33 +89,17 @@ def get_remedies_advice(judgment_text, language):
     response_text = response.choices[0].message.content.strip()
     remedies = core.parse_remedies_response(response_text)
     
-    return remedies
-
-
-def get_remedies_advice(judgment_text, language):
-    """
-    Call LLM to get remedies for this judgment
-    """
-    prompt = build_remedies_prompt(compress_text(judgment_text), language)
-    
-    response = client.chat.completions.create(
-        model="meta-llama/llama-3.1-8b-instruct",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful legal advisor. Answer questions about legal remedies in India."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        max_tokens=500,  # Longer for detailed answers
-        temperature=0.1,  # Low temp = more consistent
-    )
-    
-    response_text = response.choices[0].message.content.strip()
-    remedies = parse_remedies_response(response_text)
+    if remedies is None:
+        return {
+            "what_happened": None,
+            "can_appeal": None,
+            "appeal_days": None,
+            "appeal_court": None,
+            "cost_estimate": None,
+            "cost": None,
+            "first_action": None,
+            "deadline": None,
+        }
     
     return remedies
 
