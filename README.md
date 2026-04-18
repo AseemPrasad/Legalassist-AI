@@ -150,3 +150,119 @@ python cli.py batch --folder ./tests/samples --output ./outputs/results.csv --wo
 This command is suitable for validating a 10+ file run with concurrency, checkpoint resume, and export outputs.
 
 
+## 📊 Analytics Dashboard
+
+LegalEase AI now includes a comprehensive analytics dashboard that tracks case outcomes and helps users make informed appeal decisions.
+
+### Features
+
+📈 **Case Analytics**
+- Track all processed cases (anonymized)
+- Monitor success rates by jurisdiction, court, and judge
+- Identify trends and patterns in case outcomes
+
+🎯 **Appeal Success Estimator**
+- Estimate your appeal success probability based on similar cases
+- Get cost and time estimates
+- See confidence levels based on data quantity
+
+📝 **Outcome Feedback Form**
+- Report your case results and appeal outcomes
+- Help improve predictions for future users
+- Anonymous and confidential
+
+📊 **Judge Performance Analytics**
+- See which judges have higher appeal success rates
+- Regional comparisons
+- Identify high-performing courts
+
+### Getting Started
+
+#### 1. Initialize Analytics Database
+```bash
+python -c "from database import init_db; init_db()"
+```
+
+#### 2. Generate Sample Data (Optional, for testing)
+```bash
+# Generate 100 sample cases
+python scripts/generate_sample_analytics_data.py 100
+
+# Generate more cases for better estimates
+python scripts/generate_sample_analytics_data.py 500
+
+# Clear sample data when done
+python scripts/generate_sample_analytics_data.py clear
+```
+
+#### 3. Start the App
+```bash
+streamlit run app.py
+```
+
+#### 4. Access the Pages
+
+After uploading a judgment:
+- **Analytics Dashboard** → View case statistics and trends
+- **Appeal Estimator** → Get your appeal success probability
+- **Report Outcome** → Submit feedback about your case
+
+### How Appeal Success Estimation Works
+
+1. **Enter your case details** (type, jurisdiction, court, judge)
+2. **System finds similar cases** from the database
+3. **Calculates success rate** based on similar cases
+4. **Adjusts for your specifics** (decision clarity, case value, etc.)
+5. **Returns probability** with confidence level
+
+**Example:**
+```
+Case: Civil case in Delhi High Court before Justice Sharma
+
+Similar Cases Found: 23
+Appeal Success Rate: 22%
+Confidence: Medium
+
+Estimated Cost: ₹12,000 - ₹25,000
+Typical Duration: 12-24 months
+```
+
+### Privacy & Anonymization
+
+✅ **What's protected:**
+- No case numbers or party names stored
+- No identifiable personal information
+- User feedback is anonymous
+- Data aggregated before display
+
+✅ **What's tracked (anonymized):**
+- Case type, jurisdiction, court, judge
+- Outcomes (won/lost/settlement)
+- Appeal filing and success rates
+- Timeline data
+
+### Data Available
+
+The analytics dashboard works best with real case data. Sample data is provided for testing:
+- 100+ sample cases across 10 jurisdictions
+- Realistic success rates and timelines
+- Multiple case types (Civil, Criminal, Family, Commercial, Labor)
+
+### Analytics Engine
+
+The system uses:
+- **Similarity Matching**: Finds cases similar to yours (50+ parameters)
+- **Statistical Analysis**: Calculates success rates by demographics
+- **Confidence Scoring**: Rates estimate reliability based on data quantity
+- **Trend Analysis**: Identifies regional and judge-specific patterns
+
+### For Developers
+
+See [ANALYTICS.md](ANALYTICS.md) for:
+- Detailed architecture
+- API reference
+- Database schema
+- Sample data generation
+- Integration examples
+
+

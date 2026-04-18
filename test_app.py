@@ -2,7 +2,7 @@
 import pytest
 import os
 import json
-import PyPDF2
+from pypdf import PdfReader
 from unittest.mock import MagicMock, patch
 import app
 import core

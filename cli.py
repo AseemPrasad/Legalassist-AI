@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import PyPDF2
+from pypdf import PdfReader
 from langdetect import DetectorFactory, LangDetectException, detect
 from openai import OpenAI
 from tqdm import tqdm

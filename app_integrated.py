@@ -1,13 +1,14 @@
+"""
+Integrated LegalEase AI app with deadline notification system.
+This file coordinates between the original app and the notification UI.
+"""
+
 import streamlit as st
-from openai import OpenAI
-from pypdf import PdfReader
 import logging
 import os
-import re
-import core
 
 # ==================== Notification System Setup ====================
-from database import init_db, SessionLocal, get_db
+from database import init_db, SessionLocal
 from scheduler import start_scheduler, stop_scheduler
 
 # Initialize database
@@ -29,113 +30,105 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
-# ==================== App Config ====================
+# ==================== Page Configuration ====================
 st.set_page_config(
     page_title="LegalEase AI",
     page_icon="⚖",
-    layout="wide" if st.query_params.get("page") == "deadlines" else "centered"
+    layout="wide"
 )
 
-
-# -----------------------------
-# Load API Keys (OpenRouter)
-# -----------------------------
-def get_client():
-    return OpenAI(
-        api_key=st.secrets["OPENROUTER_API_KEY"],
-        base_url=st.secrets["OPENROUTER_BASE_URL"]
-    )
-
+# ==================== Import UI Modules ====================
 try:
+    from notifications_ui import (
+        page_notification_preferences,
+        page_manage_deadlines,
+        page_notification_history,
+    )
+    # Import original app components
+    from app import (
+        get_client,
+        extract_text_from_pdf,
+        compress_text,
+        english_leakage_detected,
+        build_prompt,
+        build_retry_prompt,
+        get_remedies_advice,
+        parse_remedies_response,
+    )
     client = get_client()
-except Exception:
+    all_features_available = True
+except ImportError as e:
+    logging.error(f"Failed to import UI modules: {e}")
+    all_features_available = False
     client = None
 
-# -----------------------------
-# Retro Styling
-# -----------------------------
-st.markdown("""
-<style>
-    body {
-        background-color: #0d0d0f;
-        color: #e0e0e0;
-        font-family: 'Inter', sans-serif;
-    }
-    .main {
-        background-color: #0d0d0f;
-    }
-    .stButton>button {
-        background: linear-gradient(90deg, #2d2dff, #8a2be2);
-        border-radius: 8px;
-        color: white;
-        font-weight: 600;
-        border: none;
-        padding: 0.6rem 1.2rem;
-    }
-    .stSelectbox>div>div {
-        background-color: #1a1a1d;
-        color: #e0e0e0;
-        border-radius: 6px;
-    }
-    .stTextArea>div>textarea {
-        background-color: #121214;
-        color: #e0e0e0;
-    }
-</style>
-""", unsafe_allow_html=True)
 
-# -----------------------------
-# LLM Interaction Helpers (using core)
-# -----------------------------
-
-
-def get_remedies_advice(judgment_text, language):
-    """
-    Call LLM to get remedies for this judgment
-    """
-    prompt = core.build_remedies_prompt(core.compress_text(judgment_text), language)
+# ==================== Main UI ====================
+def main():
+    # Sidebar navigation
+    st.sidebar.markdown("# ⚖️ LegalEase AI")
+    st.sidebar.markdown("**Convert Judgments to Simple Language**")
+    st.sidebar.divider()
     
-    response = client.chat.completions.create(
-        model="meta-llama/llama-3.1-8b-instruct",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful legal advisor. Answer questions about legal remedies in India."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
+    page = st.sidebar.radio(
+        "📌 Choose Feature",
+        [
+            "Judgment Analysis",
+            "Case Deadlines",
+            "Notification History",
+            "Preferences"
         ],
-        max_tokens=500,  # Longer for detailed answers
-        temperature=0.1,  # Low temp = more consistent
+        help="Select what you'd like to do"
     )
     
-    response_text = response.choices[0].message.content.strip()
-    remedies = core.parse_remedies_response(response_text)
+    st.sidebar.divider()
     
-    if remedies is None:
-        return {
-            "what_happened": None,
-            "can_appeal": None,
-            "appeal_days": None,
-            "appeal_court": None,
-            "cost_estimate": None,
-            "cost": None,
-            "first_action": None,
-            "deadline": None,
+    # Display scheduler status
+    if st.session_state.get("scheduler_started"):
+        st.sidebar.success("✅ Notifications: Active")
+    else:
+        st.sidebar.warning("⚠️ Notifications: Offline")
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        """
+        **Need Help?**
+        - 📞 National Legal Services: 1800-180-8111
+        - 🌐 nalsa.gov.in
+        """
+    )
+    
+    # Route to appropriate page
+    if page == "Judgment Analysis":
+        show_judgment_analysis()
+    elif page == "Case Deadlines":
+        page_manage_deadlines()
+    elif page == "Notification History":
+        page_notification_history()
+    elif page == "Preferences":
+        page_notification_preferences()
+
+
+def show_judgment_analysis():
+    """Original app UI for judgment analysis"""
+    
+    # Retro Styling (from original app)
+    st.markdown("""
+    <style>
+        .main {
+            background-color: #0d0d0f;
         }
+        .stButton>button {
+            background: linear-gradient(90deg, #2d2dff, #8a2be2);
+            border-radius: 8px;
+            color: white;
+            font-weight: 600;
+            border: none;
+            padding: 0.6rem 1.2rem;
+        }
+    </style>
+    """, unsafe_allow_html=True)
     
-    return remedies
-
-# -----------------------------
-# UI
-# -----------------------------
-
-# -----------------------------
-# Main Action Wrapper
-# -----------------------------
-def main():
     st.title("⚡ LegalEase AI")
     st.subheader("Legal Judgment Simplifier")
 
@@ -145,25 +138,25 @@ def main():
     """)
     st.markdown("---")
 
-    language = st.selectbox("🌐 Select your language", ["English", "Hindi", "Bengali", "Urdu"])
+    language = st.selectbox("🌐 Select your language", 
+                          ["English", "Hindi", "Bengali", "Urdu"])
     uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
     st.markdown("---")
 
-    if uploaded_file and st.button("🚀 Generate Summary"):
+    if uploaded_file and st.button("🚀 Generate Summary", use_container_width=True):
         with st.spinner("Processing judgment…"):
             try:
-                raw_text = core.extract_text_from_pdf(uploaded_file)
-                safe_text = core.compress_text(raw_text)
+                if not client:
+                    st.error("❌ OpenRouter client not configured. Check your API keys.")
+                    return
 
-                prompt = core.build_summary_prompt(safe_text, language)
+                raw_text = extract_text_from_pdf(uploaded_file)
+                safe_text = compress_text(raw_text)
 
-                # ⚡ Best multilingual model for Hindi/Bengali/Urdu
+                prompt = build_prompt(safe_text, language)
                 model_id = "meta-llama/llama-3.1-8b-instruct"
 
-
-                # -----------------------------
-                # FIRST ATTEMPT
-                # -----------------------------
+                # First attempt
                 response = client.chat.completions.create(
                     model=model_id,
                     messages=[
@@ -176,12 +169,9 @@ def main():
 
                 summary = response.choices[0].message.content.strip()
 
-                # -----------------------------
-                # RETRY IF ENGLISH LEAKAGE
-                # -----------------------------
-                if language.lower() != "english" and core.english_leakage_detected(summary):
-                    retry_prompt = core.build_retry_prompt(safe_text, language)
-
+                # Retry if English leakage detected
+                if language.lower() != "english" and english_leakage_detected(summary):
+                    retry_prompt = build_retry_prompt(safe_text, language)
                     response2 = client.chat.completions.create(
                         model=model_id,
                         messages=[
@@ -191,10 +181,8 @@ def main():
                         max_tokens=260,
                         temperature=0.03,
                     )
-
                     retry_summary = response2.choices[0].message.content.strip()
-
-                    if len(retry_summary) > 0 and not core.english_leakage_detected(retry_summary):
+                    if len(retry_summary) > 0 and not english_leakage_detected(retry_summary):
                         summary = retry_summary
 
                 if not summary:
@@ -212,7 +200,6 @@ def main():
                         try:
                             remedies = get_remedies_advice(raw_text, language)
                             
-                            # Show each answer
                             if remedies.get("what_happened"):
                                 st.subheader("What Happened?")
                                 st.write(remedies["what_happened"])
@@ -221,17 +208,14 @@ def main():
                                 st.subheader("Can You Appeal?")
                                 st.write(remedies["can_appeal"])
                                 
-                                # Only show appeal details if they can appeal
                                 if "yes" in remedies["can_appeal"].lower():
                                     st.subheader("Appeal Details")
-                                    
                                     col1, col2 = st.columns(2)
                                     with col1:
                                         if remedies.get("appeal_days"):
                                             st.metric("Days to File Appeal", remedies["appeal_days"])
                                         if remedies.get("appeal_court"):
                                             st.write(f"**Appeal to:** {remedies['appeal_court']}")
-                                    
                                     with col2:
                                         if remedies.get("cost"):
                                             st.write(f"**Estimated Cost:** {remedies['cost']}")
@@ -246,58 +230,6 @@ def main():
                             
                         except Exception as e:
                             st.error(f"Could not get remedies advice: {str(e)}")
-                    
-                    # ===== ANALYTICS & TRACKING SECTION =====
-                    st.markdown("---")
-                    st.markdown("## 📊 Track Your Case & See Statistics")
-                    
-                    st.info("""
-                    **Help us build better predictions!**
-                    
-                    By tracking your case, you help us understand appeal success rates in your jurisdiction.
-                    Later, when you know the outcome of your appeal, you can report it back.
-                    """)
-                    
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        if st.button("📈 View Analytics", key="view_analytics"):
-                            st.session_state.show_analytics = True
-                    
-                    with col2:
-                        if st.button("🎯 Estimate Appeal Chances", key="estimate_chances"):
-                            st.session_state.show_estimator = True
-                    
-                    with col3:
-                        if st.button("📝 Report Outcome", key="report_outcome"):
-                            st.session_state.show_feedback = True
-                    
-                    # Show analytics if requested
-                    if st.session_state.get("show_analytics"):
-                        st.subheader("📊 Quick Analytics Preview")
-                        try:
-                            from analytics_engine import AnalyticsAggregator
-                            from database import SessionLocal, CaseRecord
-                            
-                            db = SessionLocal()
-                            summary = AnalyticsAggregator.get_dashboard_summary(db)
-                            
-                            if summary["total_cases_processed"] > 0:
-                                col1, col2, col3 = st.columns(3)
-                                with col1:
-                                    st.metric("Total Cases Tracked", summary["total_cases_processed"])
-                                with col2:
-                                    st.metric("Appeals Success Rate", f"{AnalyticsAggregator.get_regional_trends(db)[0]['appeal_success_rate'] if AnalyticsAggregator.get_regional_trends(db) else 'N/A'}%")
-                                with col3:
-                                    st.metric("Appeals Filed", summary["appeals_filed"])
-                                
-                                st.write("📌 **Visit Analytics Dashboard for detailed insights** ➡️ [See Full Dashboard]()")
-                            else:
-                                st.info("Analytics will be available as more cases are tracked.")
-                            
-                            db.close()
-                        except Exception as e:
-                            st.info("Analytics module not ready yet.")
                     
                     # ===== FREE LEGAL HELP SECTION =====
                     st.markdown("---")
@@ -331,11 +263,11 @@ def main():
 
             except Exception as e:
                 err = str(e)
-
                 if "402" in err or "credits" in err.lower():
                     st.error("❌ Not enough OpenRouter credits. Please top up.")
                 else:
                     st.error(f"An error occurred: {err}")
+
 
 if __name__ == "__main__":
     main()

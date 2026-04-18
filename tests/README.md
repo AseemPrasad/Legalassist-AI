@@ -14,7 +14,7 @@ This test suite ensures that the legal judgment simplification and remedies extr
 
 1. Install dependencies:
    ```bash
-   pip install pytest fpdf2 PyPDF2 openai streamlit
+   pip install pytest fpdf2 pypdf openai streamlit
    ```
 
 2. Run tests:
