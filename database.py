@@ -116,6 +116,110 @@ class NotificationLog(Base):
         return f"<NotificationLog(user_id={self.user_id}, status={self.status}, channel={self.channel})>"
 
 
+class CaseRecord(Base):
+    """Model for tracking individual case records (anonymized)"""
+    __tablename__ = "case_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    case_id = Column(String, unique=True, nullable=False, index=True)  # Hashed ID for privacy
+    case_type = Column(String, nullable=False, index=True)  # civil, criminal, family, etc.
+    jurisdiction = Column(String, nullable=False, index=True)  # Delhi, Maharashtra, etc.
+    court_name = Column(String, nullable=True, index=True)  # District court, High court, etc.
+    judge_name = Column(String, nullable=True, index=True)  # Anonymized judge reference
+    plaintiff_type = Column(String, nullable=True)  # individual, organization, government
+    defendant_type = Column(String, nullable=True)
+    case_value = Column(String, nullable=True)  # value range: <1L, 1-5L, 5-10L, >10L
+    outcome = Column(String, nullable=False, index=True)  # plaintiff_won, defendant_won, settlement, dismissal
+    judgment_summary = Column(Text, nullable=True)  # Brief summary of judgment
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # Relationships
+    outcome_data = relationship("CaseOutcome", back_populates="case_record", uselist=False, cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<CaseRecord(case_type={self.case_type}, jurisdiction={self.jurisdiction}, outcome={self.outcome})>"
+
+
+class CaseOutcome(Base):
+    """Model for tracking appeal outcomes and follow-ups"""
+    __tablename__ = "case_outcomes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    case_id = Column(Integer, ForeignKey("case_records.id"), nullable=False, unique=True, index=True)
+    appeal_filed = Column(Boolean, default=False, nullable=False)
+    appeal_date = Column(DateTime, nullable=True)
+    appeal_outcome = Column(String, nullable=True)  # appeal_allowed, appeal_rejected, withdrawn, pending
+    appeal_success = Column(Boolean, nullable=True)  # True = won, False = lost, None = pending
+    time_to_appeal_verdict = Column(Integer, nullable=True)  # days
+    appeal_cost = Column(String, nullable=True)  # estimated cost range
+    additional_notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # Relationships
+    case_record = relationship("CaseRecord", back_populates="outcome_data")
+
+    def __repr__(self):
+        return f"<CaseOutcome(case_id={self.case_id}, appeal_filed={self.appeal_filed}, appeal_success={self.appeal_success})>"
+
+
+class CaseAnalytics(Base):
+    """Model for aggregated analytics (refreshed periodically)"""
+    __tablename__ = "case_analytics"
+
+    id = Column(Integer, primary_key=True, index=True)
+    case_type = Column(String, nullable=False)  # civil, criminal, etc.
+    jurisdiction = Column(String, nullable=False, index=True)
+    court_name = Column(String, nullable=True)
+    judge_name = Column(String, nullable=True)
+    
+    # Metrics
+    total_cases = Column(Integer, default=0)
+    plaintiff_win_count = Column(Integer, default=0)
+    defendant_win_count = Column(Integer, default=0)
+    settlement_count = Column(Integer, default=0)
+    
+    appeals_filed = Column(Integer, default=0)
+    appeals_successful = Column(Integer, default=0)
+    appeal_success_rate = Column(String, default="0%")  # e.g., "22%"
+    
+    avg_case_duration = Column(Integer, nullable=True)  # days
+    avg_appeal_duration = Column(Integer, nullable=True)  # days
+    avg_appeal_cost = Column(Integer, nullable=True)  # rupees
+    
+    last_updated = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def __repr__(self):
+        return f"<CaseAnalytics(jurisdiction={self.jurisdiction}, appeal_success_rate={self.appeal_success_rate})>"
+
+
+class UserFeedback(Base):
+    """Model for tracking user feedback on case outcomes"""
+    __tablename__ = "user_feedback"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    case_id = Column(Integer, ForeignKey("case_records.id"), nullable=True)
+    
+    # Feedback fields
+    did_appeal = Column(Boolean, nullable=True)
+    appeal_outcome = Column(String, nullable=True)  # won, lost, pending, withdrawn
+    appeal_cost = Column(Integer, nullable=True)  # actual cost in rupees
+    time_to_verdict = Column(Integer, nullable=True)  # days
+    case_type = Column(String, nullable=True)
+    jurisdiction = Column(String, nullable=True)
+    
+    # Satisfaction feedback
+    satisfaction_rating = Column(Integer, nullable=True)  # 1-5
+    feedback_text = Column(Text, nullable=True)  # User's notes
+    
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    def __repr__(self):
+        return f"<UserFeedback(user_id={self.user_id}, appeal_outcome={self.appeal_outcome})>"
+
+
 # Database initialization
 def init_db():
     """Create all tables"""
@@ -261,3 +365,144 @@ def get_notification_history(db: Session, user_id: str, limit: int = 50) -> List
     return db.query(NotificationLog).filter(
         NotificationLog.user_id == user_id
     ).order_by(NotificationLog.created_at.desc()).limit(limit).all()
+
+
+# ==================== Analytics & Case Tracking Helper Functions ====================
+
+
+def create_case_record(
+    db: Session,
+    case_id: str,
+    case_type: str,
+    jurisdiction: str,
+    court_name: Optional[str] = None,
+    judge_name: Optional[str] = None,
+    plaintiff_type: Optional[str] = None,
+    defendant_type: Optional[str] = None,
+    case_value: Optional[str] = None,
+    outcome: str = "pending",
+    judgment_summary: Optional[str] = None,
+) -> CaseRecord:
+    """Create a new case record for analytics"""
+    case = CaseRecord(
+        case_id=case_id,
+        case_type=case_type,
+        jurisdiction=jurisdiction,
+        court_name=court_name,
+        judge_name=judge_name,
+        plaintiff_type=plaintiff_type,
+        defendant_type=defendant_type,
+        case_value=case_value,
+        outcome=outcome,
+        judgment_summary=judgment_summary,
+    )
+    db.add(case)
+    db.commit()
+    db.refresh(case)
+    return case
+
+
+def update_case_outcome(
+    db: Session,
+    case_id: str,
+    appeal_filed: bool = False,
+    appeal_date: Optional[datetime] = None,
+    appeal_outcome: Optional[str] = None,
+    appeal_success: Optional[bool] = None,
+    time_to_appeal_verdict: Optional[int] = None,
+    appeal_cost: Optional[str] = None,
+) -> CaseOutcome:
+    """Update case outcome with appeal information"""
+    case = db.query(CaseRecord).filter(CaseRecord.case_id == case_id).first()
+    if not case:
+        raise ValueError(f"Case {case_id} not found")
+    
+    outcome = db.query(CaseOutcome).filter(CaseOutcome.case_id == case.id).first()
+    if not outcome:
+        outcome = CaseOutcome(case_id=case.id)
+        db.add(outcome)
+    
+    outcome.appeal_filed = appeal_filed
+    if appeal_date:
+        outcome.appeal_date = appeal_date
+    if appeal_outcome:
+        outcome.appeal_outcome = appeal_outcome
+    if appeal_success is not None:
+        outcome.appeal_success = appeal_success
+    if time_to_appeal_verdict:
+        outcome.time_to_appeal_verdict = time_to_appeal_verdict
+    if appeal_cost:
+        outcome.appeal_cost = appeal_cost
+    
+    db.commit()
+    db.refresh(outcome)
+    return outcome
+
+
+def get_case_record(db: Session, case_id: str) -> Optional[CaseRecord]:
+    """Get a case record by ID"""
+    return db.query(CaseRecord).filter(CaseRecord.case_id == case_id).first()
+
+
+def get_cases_by_criteria(
+    db: Session,
+    case_type: Optional[str] = None,
+    jurisdiction: Optional[str] = None,
+    court_name: Optional[str] = None,
+    judge_name: Optional[str] = None,
+    outcome: Optional[str] = None,
+    limit: int = 100,
+) -> List[CaseRecord]:
+    """Get cases matching specific criteria"""
+    query = db.query(CaseRecord)
+    
+    if case_type:
+        query = query.filter(CaseRecord.case_type == case_type)
+    if jurisdiction:
+        query = query.filter(CaseRecord.jurisdiction == jurisdiction)
+    if court_name:
+        query = query.filter(CaseRecord.court_name == court_name)
+    if judge_name:
+        query = query.filter(CaseRecord.judge_name == judge_name)
+    if outcome:
+        query = query.filter(CaseRecord.outcome == outcome)
+    
+    return query.order_by(CaseRecord.created_at.desc()).limit(limit).all()
+
+
+def submit_user_feedback(
+    db: Session,
+    user_id: str,
+    did_appeal: Optional[bool] = None,
+    appeal_outcome: Optional[str] = None,
+    appeal_cost: Optional[int] = None,
+    time_to_verdict: Optional[int] = None,
+    case_type: Optional[str] = None,
+    jurisdiction: Optional[str] = None,
+    satisfaction_rating: Optional[int] = None,
+    feedback_text: Optional[str] = None,
+) -> UserFeedback:
+    """Submit feedback from user about case outcome"""
+    feedback = UserFeedback(
+        user_id=user_id,
+        did_appeal=did_appeal,
+        appeal_outcome=appeal_outcome,
+        appeal_cost=appeal_cost,
+        time_to_verdict=time_to_verdict,
+        case_type=case_type,
+        jurisdiction=jurisdiction,
+        satisfaction_rating=satisfaction_rating,
+        feedback_text=feedback_text,
+    )
+    db.add(feedback)
+    db.commit()
+    db.refresh(feedback)
+    return feedback
+
+
+def get_user_feedback(db: Session, user_id: str, limit: int = 50) -> List[UserFeedback]:
+    """Get feedback submitted by a user"""
+    return db.query(UserFeedback).filter(
+        UserFeedback.user_id == user_id
+    ).order_by(UserFeedback.created_at.desc()).limit(limit).all()
+

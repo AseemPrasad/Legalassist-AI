@@ -424,6 +424,58 @@ def main():
                         except Exception as e:
                             st.error(f"Could not get remedies advice: {str(e)}")
                     
+                    # ===== ANALYTICS & TRACKING SECTION =====
+                    st.markdown("---")
+                    st.markdown("## 📊 Track Your Case & See Statistics")
+                    
+                    st.info("""
+                    **Help us build better predictions!**
+                    
+                    By tracking your case, you help us understand appeal success rates in your jurisdiction.
+                    Later, when you know the outcome of your appeal, you can report it back.
+                    """)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        if st.button("📈 View Analytics", key="view_analytics"):
+                            st.session_state.show_analytics = True
+                    
+                    with col2:
+                        if st.button("🎯 Estimate Appeal Chances", key="estimate_chances"):
+                            st.session_state.show_estimator = True
+                    
+                    with col3:
+                        if st.button("📝 Report Outcome", key="report_outcome"):
+                            st.session_state.show_feedback = True
+                    
+                    # Show analytics if requested
+                    if st.session_state.get("show_analytics"):
+                        st.subheader("📊 Quick Analytics Preview")
+                        try:
+                            from analytics_engine import AnalyticsAggregator
+                            from database import SessionLocal, CaseRecord
+                            
+                            db = SessionLocal()
+                            summary = AnalyticsAggregator.get_dashboard_summary(db)
+                            
+                            if summary["total_cases_processed"] > 0:
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("Total Cases Tracked", summary["total_cases_processed"])
+                                with col2:
+                                    st.metric("Appeals Success Rate", f"{AnalyticsAggregator.get_regional_trends(db)[0]['appeal_success_rate'] if AnalyticsAggregator.get_regional_trends(db) else 'N/A'}%")
+                                with col3:
+                                    st.metric("Appeals Filed", summary["appeals_filed"])
+                                
+                                st.write("📌 **Visit Analytics Dashboard for detailed insights** ➡️ [See Full Dashboard]()")
+                            else:
+                                st.info("Analytics will be available as more cases are tracked.")
+                            
+                            db.close()
+                        except Exception as e:
+                            st.info("Analytics module not ready yet.")
+                    
                     # ===== FREE LEGAL HELP SECTION =====
                     st.markdown("---")
                     st.markdown("## 📞 Free Legal Help")
