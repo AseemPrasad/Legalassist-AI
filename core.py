@@ -7,6 +7,11 @@ from typing import Dict, Optional, List
 LOGGER = logging.getLogger(__name__)
 
 # -----------------------------
+# Configuration
+# -----------------------------
+DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
+
+# -----------------------------
 # PDF to text
 # -----------------------------
 def extract_text_from_pdf(pdf_input) -> str:

@@ -29,7 +29,7 @@ LANG_CODE_TO_NAME = {
     "bn": "Bengali",
     "ur": "Urdu",
 }
-DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", core.DEFAULT_MODEL)
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 LOGGER = logging.getLogger(__name__)
 

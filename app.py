@@ -14,7 +14,7 @@ from scheduler import start_scheduler, stop_scheduler
 init_db()
 
 # Constants
-DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
+DEFAULT_MODEL = st.secrets.get("DEFAULT_MODEL", core.DEFAULT_MODEL)
 
 # Start background scheduler on app startup
 if "scheduler_started" not in st.session_state:
@@ -43,17 +43,35 @@ st.set_page_config(
 # -----------------------------
 # Load API Keys (OpenRouter)
 # -----------------------------
+client = None  # Global cache for the client
+
 @st.cache_resource
+
+def _initialize_openai_client():
+    """
+    Internal function to initialize the OpenAI client using Streamlit secrets.
+    """
+    return OpenAI(
+        api_key=st.secrets["OPENROUTER_API_KEY"],
+        base_url=st.secrets["OPENROUTER_BASE_URL"]
+    )
+
 def get_client():
-    """Lazy initialization of the OpenAI client"""
+    """
+    Returns the OpenAI client, initializing it only when needed.
+    This prevents the application from crashing on import if st.secrets are missing.
+    """
+    global client
+    if client is not None:
+        return client
+
     try:
-        return OpenAI(
-            api_key=st.secrets["OPENROUTER_API_KEY"],
-            base_url=st.secrets["OPENROUTER_BASE_URL"]
-        )
-    except Exception as e:
+        client = _initialize_openai_client()
+    except (KeyError, FileNotFoundError, RuntimeError, AttributeError) as e:
+        # Graceful fallback for environments where secrets are not available (e.g., tests)
         logging.error(f"Failed to initialize OpenAI client: {e}")
         return None
+    return client
 
 # -----------------------------
 # Retro Styling
@@ -159,8 +177,9 @@ def main():
 
     if uploaded_file and st.button("🚀 Generate Summary"):
         client = get_client()
+
         if not client:
-            st.error("API client not initialized. Check your secrets.")
+            st.error("OpenAI client not initialized. Please ensure OPENROUTER_API_KEY and OPENROUTER_BASE_URL are set in .streamlit/secrets.toml")
             return
 
         with st.spinner("Processing judgment…"):
@@ -170,6 +189,8 @@ def main():
 
                 prompt = core.build_summary_prompt(safe_text, language)
 
+                # ⚡ Best multilingual model for Hindi/Bengali/Urdu
+                model_id = DEFAULT_MODEL
                 response = client.chat.completions.create(
                     model=DEFAULT_MODEL,
                     messages=[
