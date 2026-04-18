@@ -1,4 +1,4 @@
-import PyPDF2
+from pypdf import PdfReader
 import re
 import logging
 from pathlib import Path
@@ -16,18 +16,18 @@ def extract_text_from_pdf(pdf_input) -> str:
     # Handle both Path objects and file-like objects (from Streamlit)
     if isinstance(pdf_input, (str, Path)):
         with open(pdf_input, "rb") as f:
-            reader = PyPDF2.PdfReader(f)
+            reader = PdfReader(f)
             text = _extract_pages(reader)
     else:
         # Streamlit's UploadedFile is a file-like object
-        reader = PyPDF2.PdfReader(pdf_input)
+        reader = PdfReader(pdf_input)
         text = _extract_pages(reader)
     
     if not text.strip():
         raise ValueError("No extractable text found. The PDF may be image-only or empty.")
     return text
 
-def _extract_pages(reader: PyPDF2.PdfReader) -> str:
+def _extract_pages(reader: PdfReader) -> str:
     text = ""
     for page in reader.pages:
         page_text = page.extract_text()

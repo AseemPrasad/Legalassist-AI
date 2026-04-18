@@ -2,14 +2,16 @@
 import pytest
 import os
 import json
-import PyPDF2
+from pypdf import PdfReader
 from unittest.mock import MagicMock, patch
 import app
 import core
 
-# Ensure client is mocked for tests if not initialized
-if app.client is None:
-    app.client = MagicMock()
+# Mock streamlit secrets and session state for testing
+import streamlit as st
+st.secrets = {"OPENROUTER_API_KEY": "test_key", "OPENROUTER_BASE_URL": "test_url"}
+if "openai_client" not in st.session_state:
+    st.session_state.openai_client = MagicMock()
 
 # Load test metadata
 with open("tests/test_metadata.json", "r") as f:
@@ -81,10 +83,13 @@ def test_all_languages_prompt_building(language):
     assert language in prompt
     assert "3 bullet points" in prompt
 
-@patch("app.client.chat.completions.create")
-def test_get_remedies_advice_flow(mock_openai):
+@patch("app.get_client")
+def test_get_remedies_advice_flow(mock_get_client):
     """Test the full flow of getting remedies with mocked LLM"""
     # Setup mock
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
+    mock_openai = mock_client.chat.completions.create
     mock_choice = MagicMock()
     mock_choice.message.content = """
     1. What happened?
