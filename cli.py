@@ -151,6 +151,93 @@ def _chat_completion(
     )
 
 
+def generate_summary(
+    client: OpenAI,
+    model: str,
+    raw_text: str,
+    language: str,
+    max_chars: int,
+) -> Tuple[str, int, int, int]:
+    """Generates a legal summary with multilingual leakage protection."""
+    safe_text = core.compress_text(raw_text, limit=max_chars)
+    summary_prompt = core.build_summary_prompt(safe_text, language)
+    
+    resp_summary = _chat_completion(
+        client=client,
+        model=model,
+        system_prompt="You are an expert legal simplification engine.",
+        user_prompt=summary_prompt,
+        max_tokens=280,
+        temperature=0.05,
+    )
+    
+    summary = (resp_summary.choices[0].message.content or "").strip()
+    p_sum, c_sum, t_sum = _usage_tokens(resp_summary)
+
+    if language.lower() != "english" and core.english_leakage_detected(summary):
+        retry_prompt = core.build_retry_prompt(safe_text, language)
+        resp_retry = _chat_completion(
+            client=client,
+            model=model,
+            system_prompt="Strict multilingual rewriting engine.",
+            user_prompt=retry_prompt,
+            max_tokens=260,
+            temperature=0.03,
+        )
+        retry_summary = (resp_retry.choices[0].message.content or "").strip()
+        p_ret, c_ret, t_ret = _usage_tokens(resp_retry)
+        p_sum += p_ret
+        c_sum += c_ret
+        t_sum += t_ret
+        if retry_summary and not core.english_leakage_detected(retry_summary):
+            summary = retry_summary
+
+    if not summary:
+        raise CLIError("Model returned empty summary.")
+        
+    return summary, p_sum, c_sum, t_sum
+
+
+def get_remedies(
+    client: OpenAI,
+    model: str,
+    raw_text: str,
+    language: str,
+    file_name: str = "unknown"
+) -> Tuple[Dict[str, Optional[str]], int, int, int]:
+    """Calls LLM to extract legal remedies and parse the response."""
+    remedies_prompt = core.build_remedies_prompt(raw_text, language)
+    resp_remedies = _chat_completion(
+        client=client,
+        model=model,
+        system_prompt="You are a helpful legal advisor. Answer questions about legal remedies in India.",
+        user_prompt=remedies_prompt,
+        max_tokens=500,
+        temperature=0.1,
+    )
+    
+    remedies_text = (resp_remedies.choices[0].message.content or "").strip()
+    remedies = core.parse_remedies_response(remedies_text)
+    
+    if remedies is None:
+        LOGGER.warning(
+            "get_remedies: remedies parsing failed for file=%s",
+            file_name,
+        )
+        remedies = {
+            "what_happened": None,
+            "can_appeal": None,
+            "appeal_days": None,
+            "appeal_court": None,
+            "cost_estimate": None,
+            "first_action": None,
+            "deadline": None,
+        }
+        
+    p_rem, c_rem, t_rem = _usage_tokens(resp_remedies)
+    return remedies, p_rem, c_rem, t_rem
+
+
 def process_one_pdf(
     pdf_path: Path,
     client: OpenAI,
@@ -193,72 +280,29 @@ def process_one_pdf(
         language = normalize_language(language_arg, text_for_auto=raw_text)
         result["language"] = language
 
-        safe_text = core.compress_text(raw_text, limit=max_chars)
-
-        summary_prompt = core.build_summary_prompt(safe_text, language)
-        resp_summary = _chat_completion(
+        # 1. Generate Summary
+        summary, p_sum, c_sum, t_sum = generate_summary(
             client=client,
             model=model,
-            system_prompt="You are an expert legal simplification engine.",
-            user_prompt=summary_prompt,
-            max_tokens=280,
-            temperature=0.05,
+            raw_text=raw_text,
+            language=language,
+            max_chars=max_chars
         )
-        summary = (resp_summary.choices[0].message.content or "").strip()
 
-        p1, c1, t1 = _usage_tokens(resp_summary)
-
-        if language.lower() != "english" and core.english_leakage_detected(summary):
-            retry_prompt = core.build_retry_prompt(safe_text, language)
-            resp_retry = _chat_completion(
-                client=client,
-                model=model,
-                system_prompt="Strict multilingual rewriting engine.",
-                user_prompt=retry_prompt,
-                max_tokens=260,
-                temperature=0.03,
-            )
-            retry_summary = (resp_retry.choices[0].message.content or "").strip()
-            p2, c2, t2 = _usage_tokens(resp_retry)
-            p1 += p2
-            c1 += c2
-            t1 += t2
-            if retry_summary and not core.english_leakage_detected(retry_summary):
-                summary = retry_summary
-
-        if not summary:
-            raise CLIError("Model returned empty summary.")
-
-        remedies_prompt = core.build_remedies_prompt(raw_text, language)
-        resp_remedies = _chat_completion(
+        # 2. Get Remedies
+        remedies, p_rem, c_rem, t_rem = get_remedies(
             client=client,
             model=model,
-            system_prompt="You are a helpful legal advisor. Answer questions about legal remedies in India.",
-            user_prompt=remedies_prompt,
-            max_tokens=500,
-            temperature=0.1,
+            raw_text=raw_text,
+            language=language,
+            file_name=pdf_path.name
         )
-        remedies_text = (resp_remedies.choices[0].message.content or "").strip()
-        remedies = core.parse_remedies_response(remedies_text)
-        if remedies is None:
-            LOGGER.warning(
-                "process_one_pdf: remedies parsing failed for file=%s",
-                pdf_path.name,
-            )
-            remedies = {
-                "what_happened": None,
-                "can_appeal": None,
-                "appeal_days": None,
-                "appeal_court": None,
-                "cost_estimate": None,
-                "first_action": None,
-                "deadline": None,
-            }
 
-        p3, c3, t3 = _usage_tokens(resp_remedies)
-        prompt_tokens = p1 + p3
-        completion_tokens = c1 + c3
-        total_tokens = t1 + t3
+        # 3. Aggregate Metrics and Results
+        prompt_tokens = p_sum + p_rem
+        completion_tokens = c_sum + c_rem
+        total_tokens = t_sum + t_rem
+        
         cost_usd = _estimate_cost_usd(
             prompt_tokens,
             completion_tokens,

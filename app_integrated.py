@@ -69,10 +69,10 @@ try:
     from app import (
         get_client,
         get_remedies_advice,
-        DEFAULT_MODEL,
+        get_default_model,
     )
     import core
-    client = get_client()
+    client = None
     all_features_available = True
 except ImportError as e:
     logging.error(f"Failed to import UI modules: {e}")
@@ -148,6 +148,8 @@ def show_judgment_analysis():
     st.markdown("---")
 
     if uploaded_file and st.button("🚀 Generate Summary", use_container_width=True):
+        from app import get_client
+        client = get_client()
         with st.spinner("Processing judgment…"):
             try:
                 if not client:
@@ -161,7 +163,7 @@ def show_judgment_analysis():
 
                 # First attempt
                 response = client.chat.completions.create(
-                    model=DEFAULT_MODEL,
+                    model=get_default_model(),
                     messages=[
                         {"role": "system", "content": "You are an expert legal simplification engine."},
                         {"role": "user", "content": prompt}
@@ -176,7 +178,7 @@ def show_judgment_analysis():
                 if language.lower() != "english" and core.english_leakage_detected(summary):
                     retry_prompt = core.build_retry_prompt(safe_text, language)
                     response2 = client.chat.completions.create(
-                        model=DEFAULT_MODEL,
+                        model=get_default_model(),
                         messages=[
                             {"role": "system", "content": "Strict multilingual rewriting engine."},
                             {"role": "user", "content": retry_prompt}

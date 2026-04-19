@@ -1,8 +1,9 @@
 from pypdf import PdfReader
+import pdfplumber
 import re
 import logging
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Union
 
 LOGGER = logging.getLogger(__name__)
 
@@ -14,25 +15,53 @@ DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 # -----------------------------
 # PDF to text
 # -----------------------------
-def extract_text_from_pdf(pdf_input) -> str:
+def extract_text_from_pdf(pdf_input: Union[str, Path, object]) -> str:
     """
-    Extracts text from a PDF file or file-like object.
+    Extracts text from a PDF file or file-like object using pdfplumber 
+    for robustness, falling back to pypdf if necessary.
     """
-    # Handle both Path objects and file-like objects (from Streamlit)
-    if isinstance(pdf_input, (str, Path)):
-        with open(pdf_input, "rb") as f:
-            reader = PdfReader(f)
-            text = _extract_pages(reader)
-    else:
-        # Streamlit's UploadedFile is a file-like object
-        reader = PdfReader(pdf_input)
-        text = _extract_pages(reader)
+    text = ""
     
+    # 1. Try pdfplumber (more robust for complex layouts)
+    try:
+        with pdfplumber.open(pdf_input) as pdf:
+            pages_text = []
+            for page in pdf.pages:
+                # Use default extraction which is usually better for flow
+                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                if page_text:
+                    pages_text.append(page_text)
+            text = "\n".join(pages_text).strip()
+            
+            if text:
+                LOGGER.info("Extracted text using pdfplumber.")
+                return text
+    except Exception as e:
+        LOGGER.warning(f"pdfplumber extraction failed or not available: {e}. Falling back to pypdf.")
+
+    # 2. Fallback to pypdf (the successor to PyPDF2)
+    try:
+        if isinstance(pdf_input, (str, Path)):
+            with open(pdf_input, "rb") as f:
+                reader = PdfReader(f)
+                text = _extract_pages_pypdf(reader)
+        else:
+            reader = PdfReader(pdf_input)
+            text = _extract_pages_pypdf(reader)
+        
+        if text:
+            LOGGER.info("Extracted text using pypdf fallback.")
+            return text
+    except Exception as e:
+        LOGGER.error(f"pypdf extraction also failed: {e}")
+
     if not text.strip():
         raise ValueError("No extractable text found. The PDF may be image-only or empty.")
+    
     return text
 
-def _extract_pages(reader: PdfReader) -> str:
+def _extract_pages_pypdf(reader: PdfReader) -> str:
+    """Helper for pypdf extraction fallback."""
     text = ""
     for page in reader.pages:
         page_text = page.extract_text()

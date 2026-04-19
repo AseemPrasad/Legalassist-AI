@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     ForeignKey,
     Enum as SQLEnum,
+    JSON,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import enum
@@ -23,7 +24,7 @@ import os
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./legalassist.db")
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
 Base = declarative_base()
 
 
@@ -49,7 +50,7 @@ class CaseDeadline(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, index=True, nullable=False)
-    case_id = Column(String, nullable=False)
+    case_id = Column(Integer, ForeignKey("cases.id"), nullable=False, index=True)
     case_title = Column(String, nullable=False)
     deadline_date = Column(DateTime, nullable=False, index=True)
     deadline_type = Column(String, nullable=False)  # appeal, filing, submission, etc.
@@ -59,13 +60,14 @@ class CaseDeadline(Base):
     is_completed = Column(Boolean, default=False)
 
     # Relationships
+    case = relationship("Case", back_populates="deadlines")
     notifications = relationship("NotificationLog", back_populates="deadline", cascade="all, delete-orphan")
 
     def days_until_deadline(self) -> int:
         """Calculate days remaining until deadline"""
         now = dt.datetime.now(dt.timezone.utc)
         deadline = self.deadline_date
-        if deadline.tzinfo is None:
+        if deadline and deadline.tzinfo is None:
             deadline = deadline.replace(tzinfo=dt.timezone.utc)
         delta = deadline - now
         return max(0, delta.days)
@@ -79,7 +81,7 @@ class UserPreference(Base):
     __tablename__ = "user_preferences"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
     phone_number = Column(String, nullable=True)
     email = Column(String, nullable=False)
     notification_channel = Column(SQLEnum(NotificationChannel), default=NotificationChannel.BOTH)
@@ -90,6 +92,9 @@ class UserPreference(Base):
     notify_1_day = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc))
     updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    # Relationships
+    user = relationship("User", back_populates="preferences")
 
     def __repr__(self):
         return f"<UserPreference(user_id={self.user_id}, channel={self.notification_channel})>"
@@ -204,7 +209,7 @@ class UserFeedback(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, nullable=False, index=True)
     case_id = Column(Integer, ForeignKey("case_records.id"), nullable=True)
-    
+
     # Feedback fields
     did_appeal = Column(Boolean, nullable=True)
     appeal_outcome = Column(String, nullable=True)  # won, lost, pending, withdrawn
@@ -212,7 +217,7 @@ class UserFeedback(Base):
     time_to_verdict = Column(Integer, nullable=True)  # days
     case_type = Column(String, nullable=True)
     jurisdiction = Column(String, nullable=True)
-    
+
     # Satisfaction feedback
     satisfaction_rating = Column(Integer, nullable=True)  # 1-5
     feedback_text = Column(Text, nullable=True)  # User's notes
@@ -221,6 +226,123 @@ class UserFeedback(Base):
 
     def __repr__(self):
         return f"<UserFeedback(user_id={self.user_id}, appeal_outcome={self.appeal_outcome})>"
+
+
+# ==================== New Models for Case History & Authentication ====================
+
+
+class User(Base):
+    """Model for user authentication and profiles"""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    last_login = Column(DateTime, nullable=True)
+    is_verified = Column(Boolean, default=True, nullable=False)
+
+    # Relationships
+    cases = relationship("Case", back_populates="user", cascade="all, delete-orphan")
+    preferences = relationship("UserPreference", back_populates="user", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<User(email={self.email})>"
+
+
+class OTPVerification(Base):
+    """Model for storing email OTP codes for authentication"""
+    __tablename__ = "otp_verifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, nullable=False, index=True)
+    otp_hash = Column(String, nullable=False)  # Hashed OTP code
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    is_used = Column(Boolean, default=False, nullable=False)
+
+    def __repr__(self):
+        return f"<OTPVerification(email={self.email}, expires_at={self.expires_at})>"
+
+
+class CaseStatus(str, enum.Enum):
+    """Status of a case"""
+    ACTIVE = "active"
+    APPEALED = "appealed"
+    CLOSED = "closed"
+    PENDING = "pending"
+
+
+class DocumentType(str, enum.Enum):
+    """Type of legal document"""
+    FIR = "FIR"
+    CHARGESHEET = "ChargeSheet"
+    JUDGMENT = "Judgment"
+    APPEAL = "Appeal"
+    ORDER = "Order"
+    OTHER = "Other"
+
+
+class Case(Base):
+    """Model for tracking user cases"""
+    __tablename__ = "cases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    case_number = Column(String, nullable=False)  # User-facing identifier
+    case_type = Column(String, nullable=False, index=True)  # civil, criminal, family, etc.
+    jurisdiction = Column(String, nullable=False, index=True)
+    status = Column(SQLEnum(CaseStatus), default=CaseStatus.ACTIVE, nullable=False)
+    title = Column(String, nullable=True)  # Optional case title
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    # Relationships
+    user = relationship("User", back_populates="cases")
+    documents = relationship("CaseDocument", back_populates="case", cascade="all, delete-orphan", order_by="CaseDocument.uploaded_at")
+    deadlines = relationship("CaseDeadline", back_populates="case", cascade="all, delete-orphan")
+    timeline_events = relationship("CaseTimeline", back_populates="case", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<Case(case_number={self.case_number}, status={self.status})>"
+
+
+class CaseDocument(Base):
+    """Model for storing documents uploaded for a case"""
+    __tablename__ = "case_documents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    case_id = Column(Integer, ForeignKey("cases.id"), nullable=False, index=True)
+    document_type = Column(SQLEnum(DocumentType), nullable=False)
+    document_content = Column(Text, nullable=True)  # Extracted text from PDF
+    file_path = Column(String, nullable=True)  # Optional: path to stored PDF
+    uploaded_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    summary = Column(Text, nullable=True)  # LLM-generated 3-bullet summary
+    remedies = Column(JSON, nullable=True)  # JSON: appeal info, deadlines, costs
+
+    # Relationships
+    case = relationship("Case", back_populates="documents")
+
+    def __repr__(self):
+        return f"<CaseDocument(case_id={self.case_id}, type={self.document_type})>"
+
+
+class CaseTimeline(Base):
+    """Model for tracking timeline events in a case"""
+    __tablename__ = "case_timeline"
+
+    id = Column(Integer, primary_key=True, index=True)
+    case_id = Column(Integer, ForeignKey("cases.id"), nullable=False, index=True)
+    event_type = Column(String, nullable=False, index=True)  # document_upload, deadline_created, action_completed, etc.
+    event_date = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
+    description = Column(Text, nullable=False)
+    event_metadata = Column(JSON, nullable=True)  # Extra context (document_id, deadline_id, etc.)
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    # Relationships
+    case = relationship("Case", back_populates="timeline_events")
+
+    def __repr__(self):
+        return f"<CaseTimeline(case_id={self.case_id}, event_type={self.event_type})>"
 
 
 # Database initialization
@@ -509,3 +631,263 @@ def get_user_feedback(db: Session, user_id: str, limit: int = 50) -> List[UserFe
         UserFeedback.user_id == user_id
     ).order_by(UserFeedback.created_at.desc()).limit(limit).all()
 
+
+# ==================== User & Authentication Helper Functions ====================
+
+
+def get_user_by_email(db: Session, email: str) -> Optional[User]:
+    """Get user by email address"""
+    return db.query(User).filter(User.email == email).first()
+
+
+def create_user(db: Session, email: str) -> User:
+    """Create a new user"""
+    user = User(email=email)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def update_user_last_login(db: Session, user_id: int) -> User:
+    """Update user's last login timestamp"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.last_login = dt.datetime.now(dt.timezone.utc)
+        db.commit()
+        db.refresh(user)
+    return user
+
+
+def create_otp_verification(
+    db: Session,
+    email: str,
+    otp_hash: str,
+    expires_at: dt.datetime,
+) -> OTPVerification:
+    """Create a new OTP verification record"""
+    otp = OTPVerification(
+        email=email,
+        otp_hash=otp_hash,
+        expires_at=expires_at,
+    )
+    db.add(otp)
+    db.commit()
+    db.refresh(otp)
+    return otp
+
+
+def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
+    """Get unused, non-expired OTP for email"""
+    now = dt.datetime.now(dt.timezone.utc)
+    return db.query(OTPVerification).filter(
+        OTPVerification.email == email,
+        OTPVerification.is_used == False,
+        OTPVerification.expires_at > now,
+    ).order_by(OTPVerification.created_at.desc()).first()
+
+
+def mark_otp_as_used(db: Session, otp_id: int) -> bool:
+    """Mark an OTP as used"""
+    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+    if otp:
+        otp.is_used = True
+        db.commit()
+        return True
+    return False
+
+
+def cleanup_expired_otps(db: Session) -> int:
+    """Delete expired OTPs, return count of deleted"""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = db.query(OTPVerification).filter(
+        OTPVerification.expires_at < now
+    ).delete()
+    db.commit()
+    return deleted
+
+
+# ==================== Case Management Helper Functions ====================
+
+
+def create_case(
+    db: Session,
+    user_id: int,
+    case_number: str,
+    case_type: str,
+    jurisdiction: str,
+    title: Optional[str] = None,
+    status: CaseStatus = CaseStatus.ACTIVE,
+) -> Case:
+    """Create a new case"""
+    case = Case(
+        user_id=user_id,
+        case_number=case_number,
+        case_type=case_type,
+        jurisdiction=jurisdiction,
+        title=title,
+        status=status,
+    )
+    db.add(case)
+    db.commit()
+    db.refresh(case)
+    return case
+
+
+def get_user_cases(db: Session, user_id: int, include_closed: bool = True) -> List[Case]:
+    """Get all cases for a user"""
+    query = db.query(Case).filter(Case.user_id == user_id)
+    if not include_closed:
+        query = query.filter(Case.status != CaseStatus.CLOSED)
+    return query.order_by(Case.created_at.desc()).all()
+
+
+def get_case_by_id(db: Session, case_id: int) -> Optional[Case]:
+    """Get a case by ID"""
+    return db.query(Case).filter(Case.id == case_id).first()
+
+
+def get_case_by_number(db: Session, user_id: int, case_number: str) -> Optional[Case]:
+    """Get a case by case number for a specific user"""
+    return db.query(Case).filter(
+        Case.user_id == user_id,
+        Case.case_number == case_number,
+    ).first()
+
+
+def update_case_status(db: Session, case_id: int, status: CaseStatus) -> Optional[Case]:
+    """Update case status"""
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if case:
+        case.status = status
+        case.updated_at = dt.datetime.now(dt.timezone.utc)
+        db.commit()
+        db.refresh(case)
+    return case
+
+
+def delete_case(db: Session, case_id: int) -> bool:
+    """Delete a case and all related data"""
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if case:
+        db.delete(case)
+        db.commit()
+        return True
+    return False
+
+
+# ==================== Case Document Helper Functions ====================
+
+
+def create_case_document(
+    db: Session,
+    case_id: int,
+    document_type: DocumentType,
+    document_content: Optional[str] = None,
+    file_path: Optional[str] = None,
+    summary: Optional[str] = None,
+    remedies: Optional[dict] = None,
+) -> CaseDocument:
+    """Create a new case document"""
+    doc = CaseDocument(
+        case_id=case_id,
+        document_type=document_type,
+        document_content=document_content,
+        file_path=file_path,
+        summary=summary,
+        remedies=remedies,
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    return doc
+
+
+def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
+    """Get all documents for a case"""
+    return db.query(CaseDocument).filter(
+        CaseDocument.case_id == case_id
+    ).order_by(CaseDocument.uploaded_at).all()
+
+
+def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocument]:
+    """Get a case document by ID"""
+    return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
+
+
+def update_case_document(
+    db: Session,
+    document_id: int,
+    document_content: Optional[str] = None,
+    summary: Optional[str] = None,
+    remedies: Optional[dict] = None,
+) -> Optional[CaseDocument]:
+    """Update case document"""
+    doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
+    if doc:
+        if document_content:
+            doc.document_content = document_content
+        if summary:
+            doc.summary = summary
+        if remedies:
+            doc.remedies = remedies
+        db.commit()
+        db.refresh(doc)
+    return doc
+
+
+# ==================== Case Timeline Helper Functions ====================
+
+
+def create_timeline_event(
+    db: Session,
+    case_id: int,
+    event_type: str,
+    description: str,
+    event_date: Optional[dt.datetime] = None,
+    metadata: Optional[dict] = None,
+) -> CaseTimeline:
+    """Create a new timeline event"""
+    event = CaseTimeline(
+        case_id=case_id,
+        event_type=event_type,
+        description=description,
+        event_date=event_date or dt.datetime.now(dt.timezone.utc),
+        event_metadata=metadata,
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return event
+
+
+def get_case_timeline(db: Session, case_id: int) -> List[CaseTimeline]:
+    """Get timeline events for a case"""
+    return db.query(CaseTimeline).filter(
+        CaseTimeline.case_id == case_id
+    ).order_by(CaseTimeline.event_date.desc()).all()
+
+
+def get_user_stats(db: Session, user_id: int) -> dict:
+    """Get statistics for a user's cases"""
+    cases = get_user_cases(db, user_id)
+
+    active_count = len([c for c in cases if c.status == CaseStatus.ACTIVE])
+    appealed_count = len([c for c in cases if c.status == CaseStatus.APPEALED])
+    closed_count = len([c for c in cases if c.status == CaseStatus.CLOSED])
+
+    # Get upcoming deadlines
+    now = dt.datetime.now(dt.timezone.utc)
+    upcoming_deadlines = db.query(CaseDeadline).filter(
+        CaseDeadline.user_id == str(user_id),
+        CaseDeadline.is_completed == False,
+        CaseDeadline.deadline_date > now,
+    ).count()
+
+    return {
+        "total_cases": len(cases),
+        "active_cases": active_count,
+        "appealed_cases": appealed_count,
+        "closed_cases": closed_count,
+        "upcoming_deadlines": upcoming_deadlines,
+    }
