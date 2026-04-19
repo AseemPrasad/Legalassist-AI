@@ -137,9 +137,8 @@ class NotificationService:
         """Build SMS reminder message"""
         formatted_date = deadline_date.strftime("%d %b %Y")
         return (
-            f"⚖️ LegalAssist Reminder: Your case '{case_title}' has a deadline in {days_left} day(s). "
-            f"Deadline: {formatted_date}. Act now to avoid case closure. "
-            f"Log in to check details."
+            f"⚖️ LegalAssist: Case '{case_title}' has a deadline in {days_left} day(s). "
+            f"Deadline: {formatted_date}. Log in to check details."
         )
 
     def build_email_message(self, case_title: str, days_left: int, deadline_date: datetime, case_id: str) -> Tuple[str, str]:

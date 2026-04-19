@@ -5,10 +5,13 @@ import json
 from pypdf import PdfReader
 from unittest.mock import MagicMock, patch
 import app
+import core
 
-# Ensure client is mocked for tests if not initialized
-if app.client is None:
-    app.client = MagicMock()
+# Mock streamlit secrets and session state for testing
+import streamlit as st
+st.secrets = {"OPENROUTER_API_KEY": "test_key", "OPENROUTER_BASE_URL": "test_url"}
+if "openai_client" not in st.session_state:
+    st.session_state.openai_client = MagicMock()
 
 # Load test metadata
 with open("tests/test_metadata.json", "r") as f:
@@ -21,24 +24,24 @@ def test_pdf_extraction():
         assert os.path.exists(path), f"File {path} does not exist"
         
         with open(path, "rb") as f:
-            text = app.extract_text_from_pdf(f)
+            text = core.extract_text_from_pdf(f)
             assert len(text) > 0, f"Extraction failed for {path}"
             assert "JUDGMENT" in text or "judgment" in text.lower()
 
 def test_compress_text():
     """Test text compression logic"""
     long_text = "A" * 10000
-    compressed = app.compress_text(long_text, limit=6000)
+    compressed = core.compress_text(long_text, limit=6000)
     assert len(compressed) < 10000
     assert "... [TRUNCATED] ..." in compressed
     
     short_text = "Small text"
-    assert app.compress_text(short_text) == short_text
+    assert core.compress_text(short_text) == short_text
 
 def test_english_leakage():
     """Test English leakage detection"""
-    assert app.english_leakage_detected("This is a simple the and of test", threshold=3) == True
-    assert app.english_leakage_detected("नमस्ते यह एक परीक्षण है", threshold=3) == False
+    assert core.english_leakage_detected("This is a simple the and of test", threshold=3) == True
+    assert core.english_leakage_detected("नमस्ते यह एक परीक्षण है", threshold=3) == False
 
 def test_parse_remedies_response():
     """Test parsing of LLM response for remedies"""
@@ -64,7 +67,7 @@ def test_parse_remedies_response():
     7. Important deadline
     The 30 day deadline.
     """
-    remedies = app.parse_remedies_response(mock_response)
+    remedies = core.parse_remedies_response(mock_response)
     assert remedies["what_happened"] == "The plaintiff won the property dispute case."
     assert remedies["can_appeal"] == "yes"
     assert remedies["appeal_days"] == "30"
@@ -76,14 +79,17 @@ def test_parse_remedies_response():
 @pytest.mark.parametrize("language", ["English", "Hindi", "Bengali", "Urdu"])
 def test_all_languages_prompt_building(language):
     """Test prompt building for all supported languages"""
-    prompt = app.build_prompt("Sample text", language)
+    prompt = core.build_summary_prompt("Sample text", language)
     assert language in prompt
     assert "3 bullet points" in prompt
 
-@patch("app.client.chat.completions.create")
-def test_get_remedies_advice_flow(mock_openai):
+@patch("app.get_client")
+def test_get_remedies_advice_flow(mock_get_client):
     """Test the full flow of getting remedies with mocked LLM"""
     # Setup mock
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
+    mock_openai = mock_client.chat.completions.create
     mock_choice = MagicMock()
     mock_choice.message.content = """
     1. What happened?
@@ -117,7 +123,7 @@ def test_judgment_summary_quality_manual():
     In a real CI, we might use an LLM-as-a-judge or check for 3 bullet points.
     """
     # Just check if our prompt asks for 3 bullets
-    prompt = app.build_prompt("test", "Hindi")
+    prompt = core.build_summary_prompt("test", "Hindi")
     assert "EXACTLY 3 bullet points" in prompt
 
 if __name__ == "__main__":

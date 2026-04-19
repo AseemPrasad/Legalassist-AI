@@ -1,10 +1,10 @@
-﻿streamlit
-openai
+streamlit==1.56.0
+openai==2.30.0
 pypdf
 fpdf2
-pytest
-tqdm
-langdetect
+pytest==9.0.2
+tqdm==4.67.1
+langdetect==1.0.9
 
 # Database & ORM
 sqlalchemy>=2.0.0

@@ -3,7 +3,7 @@ Database models for deadline tracking and notification management.
 Uses SQLAlchemy ORM with SQLite for persistence.
 """
 
-from datetime import datetime, timezone
+import datetime as dt
 from typing import Optional, List
 from sqlalchemy import (
     create_engine,
@@ -54,8 +54,8 @@ class CaseDeadline(Base):
     deadline_date = Column(DateTime, nullable=False, index=True)
     deadline_type = Column(String, nullable=False)  # appeal, filing, submission, etc.
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
     is_completed = Column(Boolean, default=False)
 
     # Relationships
@@ -63,8 +63,11 @@ class CaseDeadline(Base):
 
     def days_until_deadline(self) -> int:
         """Calculate days remaining until deadline"""
-        now = datetime.now(timezone.utc)
-        delta = self.deadline_date - now
+        now = dt.datetime.now(dt.timezone.utc)
+        deadline = self.deadline_date
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=dt.timezone.utc)
+        delta = deadline - now
         return max(0, delta.days)
 
     def __repr__(self):
@@ -85,8 +88,8 @@ class UserPreference(Base):
     notify_10_days = Column(Boolean, default=True)
     notify_3_days = Column(Boolean, default=True)
     notify_1_day = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc))
+    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     def __repr__(self):
         return f"<UserPreference(user_id={self.user_id}, channel={self.notification_channel})>"
@@ -107,7 +110,7 @@ class NotificationLog(Base):
     error_message = Column(Text, nullable=True)
     sent_at = Column(DateTime, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     # Relationships
     deadline = relationship("CaseDeadline", back_populates="notifications")
@@ -131,8 +134,8 @@ class CaseRecord(Base):
     case_value = Column(String, nullable=True)  # value range: <1L, 1-5L, 5-10L, >10L
     outcome = Column(String, nullable=False, index=True)  # plaintiff_won, defendant_won, settlement, dismissal
     judgment_summary = Column(Text, nullable=True)  # Brief summary of judgment
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
     outcome_data = relationship("CaseOutcome", back_populates="case_record", uselist=False, cascade="all, delete-orphan")
@@ -154,8 +157,8 @@ class CaseOutcome(Base):
     time_to_appeal_verdict = Column(Integer, nullable=True)  # days
     appeal_cost = Column(String, nullable=True)  # estimated cost range
     additional_notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
     case_record = relationship("CaseRecord", back_populates="outcome_data")
@@ -188,7 +191,7 @@ class CaseAnalytics(Base):
     avg_appeal_duration = Column(Integer, nullable=True)  # days
     avg_appeal_cost = Column(Integer, nullable=True)  # rupees
     
-    last_updated = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    last_updated = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     def __repr__(self):
         return f"<CaseAnalytics(jurisdiction={self.jurisdiction}, appeal_success_rate={self.appeal_success_rate})>"
@@ -214,7 +217,7 @@ class UserFeedback(Base):
     satisfaction_rating = Column(Integer, nullable=True)  # 1-5
     feedback_text = Column(Text, nullable=True)  # User's notes
     
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     def __repr__(self):
         return f"<UserFeedback(user_id={self.user_id}, appeal_outcome={self.appeal_outcome})>"
@@ -254,7 +257,7 @@ def create_or_update_user_preference(
         pref.phone_number = phone_number
         pref.notification_channel = notification_channel
         pref.timezone = timezone
-        pref.updated_at = datetime.now(timezone=timezone.utc)
+        pref.updated_at = dt.datetime.now(dt.timezone.utc)
     else:
         pref = UserPreference(
             user_id=user_id,
@@ -275,7 +278,7 @@ def create_case_deadline(
     user_id: str,
     case_id: str,
     case_title: str,
-    deadline_date: datetime,
+    deadline_date: dt.datetime,
     deadline_type: str,
     description: Optional[str] = None,
 ) -> CaseDeadline:
@@ -296,8 +299,8 @@ def create_case_deadline(
 
 def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadline]:
     """Get all deadlines that are X days away"""
-    now = datetime.now(timezone.utc)
-    target_date = datetime.fromtimestamp(now.timestamp() + (days_before * 86400), tz=timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
+    target_date = dt.datetime.fromtimestamp(now.timestamp() + (days_before * 86400), tz=dt.timezone.utc)
     
     return db.query(CaseDeadline).filter(
         CaseDeadline.is_completed == False,
@@ -308,7 +311,7 @@ def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadl
 
 def get_user_deadlines(db: Session, user_id: str) -> List[CaseDeadline]:
     """Get all active deadlines for a user"""
-    now = datetime.now(timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
     return db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
         CaseDeadline.is_completed == False,
@@ -352,7 +355,7 @@ def log_notification(
         status=status,
         message_id=message_id,
         error_message=error_message,
-        sent_at=datetime.now(timezone.utc) if status != NotificationStatus.PENDING else None,
+        sent_at=dt.datetime.now(dt.timezone.utc) if status != NotificationStatus.PENDING else None,
     )
     db.add(log)
     db.commit()
@@ -406,7 +409,7 @@ def update_case_outcome(
     db: Session,
     case_id: str,
     appeal_filed: bool = False,
-    appeal_date: Optional[datetime] = None,
+    appeal_date: Optional[dt.datetime] = None,
     appeal_outcome: Optional[str] = None,
     appeal_success: Optional[bool] = None,
     time_to_appeal_verdict: Optional[int] = None,

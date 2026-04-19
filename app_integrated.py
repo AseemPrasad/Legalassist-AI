@@ -45,10 +45,44 @@ if "scheduler_started" not in st.session_state:
         logger.error(f"Failed to start scheduler: {str(e)}")
         st.session_state.scheduler_started = False
 
+# ==================== Logging Setup ====================
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 
-# ==================== SIDEBAR & NAVIGATION ====================
-def render_sidebar():
-    """Render the sidebar with app info and status"""
+# ==================== Page Configuration ====================
+st.set_page_config(
+    page_title="LegalEase AI",
+    page_icon="⚖",
+    layout="wide"
+)
+
+# ==================== Import UI Modules ====================
+try:
+    from notifications_ui import (
+        page_notification_preferences,
+        page_manage_deadlines,
+        page_notification_history,
+    )
+    # Import original app components
+    from app import (
+        get_client,
+        get_remedies_advice,
+        DEFAULT_MODEL,
+    )
+    import core
+    client = get_client()
+    all_features_available = True
+except ImportError as e:
+    logging.error(f"Failed to import UI modules: {e}")
+    all_features_available = False
+    client = None
+
+
+# ==================== Main UI ====================
+def main():
+    # Sidebar navigation
     st.sidebar.markdown("# ⚖️ LegalEase AI")
     st.sidebar.markdown("**Convert Judgments to Simple Language**")
     st.sidebar.divider()
@@ -64,34 +98,178 @@ def render_sidebar():
         """
         **Need Help?**
         - 📞 National Legal Services: 1800-180-8111
-        - 🌐 [nalsa.gov.in](https://nalsa.gov.in)
-        
-        **About**
-        - Breaking barriers in India's judiciary
-        - Simplifying legal language for citizens
+        - 🌐 nalsa.gov.in
         """
     )
+    
+    # Route to appropriate page
+    if page == "Judgment Analysis":
+        show_judgment_analysis()
+    elif page == "Case Deadlines":
+        page_manage_deadlines()
+    elif page == "Notification History":
+        page_notification_history()
+    elif page == "Preferences":
+        page_notification_preferences()
 
 
-def main():
-    """Main application entry point"""
-    render_sidebar()
+def show_judgment_analysis():
+    """Original app UI for judgment analysis"""
     
-    # Streamlit multi-page navigation is handled automatically
-    # by files in pages/ directory when named with numeric prefix
-    # Pages are automatically discovered and routed by Streamlit
+    # Retro Styling (from original app)
+    st.markdown("""
+    <style>
+        .main {
+            background-color: #0d0d0f;
+        }
+        .stButton>button {
+            background: linear-gradient(90deg, #2d2dff, #8a2be2);
+            border-radius: 8px;
+            color: white;
+            font-weight: 600;
+            border: none;
+            padding: 0.6rem 1.2rem;
+        }
+    </style>
+    """, unsafe_allow_html=True)
     
-    st.write(
-        """
-        Welcome to **LegalEase AI** - Your Legal Judgment Simplifier!
-        
-        Select a page from the sidebar to get started:
-        - **Home**: Analyze court judgments
-        - **Deadlines**: Manage case appeal deadlines
-        - **History**: View your notification history
-        - **Settings**: Customize your preferences
-        """
-    )
+    st.title("⚡ LegalEase AI")
+    st.subheader("Legal Judgment Simplifier")
+
+    st.markdown("""
+    LegalEase AI breaks the Information Barrier in the Judiciary by converting
+    complex court judgments into clear, 3-point summaries in your chosen language.
+    """)
+    st.markdown("---")
+
+    language = st.selectbox("🌐 Select your language", 
+                          ["English", "Hindi", "Bengali", "Urdu"])
+    uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
+    st.markdown("---")
+
+    if uploaded_file and st.button("🚀 Generate Summary", use_container_width=True):
+        with st.spinner("Processing judgment…"):
+            try:
+                if not client:
+                    st.error("❌ OpenRouter client not configured. Check your API keys.")
+                    return
+
+                raw_text = core.extract_text_from_pdf(uploaded_file)
+                safe_text = core.compress_text(raw_text)
+
+                prompt = core.build_summary_prompt(safe_text, language)
+
+                # First attempt
+                response = client.chat.completions.create(
+                    model=DEFAULT_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are an expert legal simplification engine."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=280,
+                    temperature=0.05,
+                )
+
+                summary = response.choices[0].message.content.strip()
+
+                # Retry if English leakage detected
+                if language.lower() != "english" and core.english_leakage_detected(summary):
+                    retry_prompt = core.build_retry_prompt(safe_text, language)
+                    response2 = client.chat.completions.create(
+                        model=DEFAULT_MODEL,
+                        messages=[
+                            {"role": "system", "content": "Strict multilingual rewriting engine."},
+                            {"role": "user", "content": retry_prompt}
+                        ],
+                        max_tokens=260,
+                        temperature=0.03,
+                    )
+                    retry_summary = response2.choices[0].message.content.strip()
+                    if len(retry_summary) > 0 and not english_leakage_detected(retry_summary):
+                        summary = retry_summary
+
+                if not summary:
+                    st.error("The model returned an empty summary. Try a shorter file or switch to English.")
+                else:
+                    st.markdown("## ✅ Simplified Judgment")
+                    st.write(summary)
+                    st.success("The judgment has been simplified successfully.")
+                    
+                    # ===== REMEDIES SECTION =====
+                    st.markdown("---")
+                    st.markdown("## ⚖️ What Can You Do Now?")
+                    
+                    with st.spinner("Analyzing your legal options..."):
+                        try:
+                            remedies = get_remedies_advice(raw_text, language)
+                            
+                            if remedies.get("what_happened"):
+                                st.subheader("What Happened?")
+                                st.write(remedies["what_happened"])
+                            
+                            if remedies.get("can_appeal"):
+                                st.subheader("Can You Appeal?")
+                                st.write(remedies["can_appeal"])
+                                
+                                if "yes" in remedies["can_appeal"].lower():
+                                    st.subheader("Appeal Details")
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        if remedies.get("appeal_days"):
+                                            st.metric("Days to File Appeal", remedies["appeal_days"])
+                                        if remedies.get("appeal_court"):
+                                            st.write(f"**Appeal to:** {remedies['appeal_court']}")
+                                    with col2:
+                                        if remedies.get("cost"):
+                                            st.write(f"**Estimated Cost:** {remedies['cost']}")
+                            
+                            if remedies.get("first_action"):
+                                st.subheader("What Should You Do First?")
+                                st.write(f"✅ {remedies['first_action']}")
+                            
+                            if remedies.get("deadline"):
+                                st.subheader("⏰ Important Deadline")
+                                st.write(remedies["deadline"])
+                            
+                        except Exception as e:
+                            st.error(f"Could not get remedies advice: {str(e)}")
+                    
+                    # ===== FREE LEGAL HELP SECTION =====
+                    st.markdown("---")
+                    st.markdown("## 📞 Free Legal Help")
+                    
+                    help_options = """
+                    **You don't have to handle this alone. Here are free resources:**
+                    
+                    🔗 **National Legal Services (Free Lawyer)**
+                    - Phone: 1800-180-8111
+                    - Website: nalsa.gov.in
+                    - For: Everyone (especially poor citizens)
+                    
+                    🔗 **Bar Council of India (Find Verified Lawyers)**
+                    - Website: bci.org.in
+                    - For: Finding qualified lawyers in your area
+                    
+                    🔗 **Legal Clinics (Law Colleges)**
+                    - Most law colleges offer free consultation
+                    - Search: "[Your City] law college legal clinic"
+                    
+                    🔗 **NGOs for Specific Cases**
+                    - Family cases: National Commission for Women (1800-123-4344)
+                    - Criminal cases: Criminal Law Clinic (project39a.com)
+                    - Tenant rights: Housing rights organizations
+                    
+                    **Tip:** Start with National Legal Services. They are free and available.
+                    """
+                    
+                    st.info(help_options)
+
+            except Exception as e:
+                err = str(e)
+                if "402" in err or "credits" in err.lower():
+                    st.error("❌ Not enough OpenRouter credits. Please top up.")
+                else:
+                    st.error(f"An error occurred: {err}")
 
 
 if __name__ == "__main__":

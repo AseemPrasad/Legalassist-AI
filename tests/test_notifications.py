@@ -350,7 +350,7 @@ class TestScheduler:
         # Create deadline at exactly 30 days
         create_case_deadline(
             test_db, "user1", "CASE-001", "Case 1",
-            now + timetepdelta(days=30), "appeal",
+            now + timedelta(days=30), "appeal",
         )
         
         # Create user preference

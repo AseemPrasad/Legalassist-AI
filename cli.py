@@ -17,6 +17,7 @@ from pypdf import PdfReader
 from langdetect import DetectorFactory, LangDetectException, detect
 from openai import OpenAI
 from tqdm import tqdm
+import core
 
 # Make language detection deterministic.
 DetectorFactory.seed = 0
@@ -28,7 +29,7 @@ LANG_CODE_TO_NAME = {
     "bn": "Bengali",
     "ur": "Urdu",
 }
-DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", core.DEFAULT_MODEL)
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 LOGGER = logging.getLogger(__name__)
 
@@ -87,29 +88,7 @@ def get_client() -> OpenAI:
     return OpenAI(api_key=api_key, base_url=base_url)
 
 
-def extract_text_from_pdf(pdf_path: Path) -> str:
-    text_parts: List[str] = []
-    with pdf_path.open("rb") as f:
-        reader = PdfReader(f)
-        for page in reader.pages:
-            page_text = page.extract_text() or ""
-            if page_text.strip():
-                text_parts.append(page_text)
-    return "\n".join(text_parts).strip()
-
-
-def compress_text(text: str, limit: int = 6000) -> str:
-    if len(text) <= limit:
-        return text
-    half = limit // 2
-    return text[:half] + "\n\n... [TRUNCATED] ...\n\n" + text[-half:]
-
-
-def english_leakage_detected(output_text: str, threshold: int = 5) -> bool:
-    common = [" the ", " and ", " of ", " to ", " in ", " is ", " that ", " it ", " for ", " on "]
-    text_lower = " " + output_text.lower() + " "
-    count = sum(1 for w in common if w in text_lower)
-    return count >= threshold
+# Prompt building and core logic moved to core.py
 
 
 def detect_language_name(text: str) -> str:
@@ -132,201 +111,6 @@ def normalize_language(language: str, text_for_auto: str = "") -> str:
     if lower in SUPPORTED_LANGUAGES:
         return lower.capitalize()
     return "English"
-
-
-def build_summary_prompt(safe_text: str, language: str) -> str:
-    return f"""
-You are LegalEase AI - an expert judicial-simplification and translation engine.
-
-MISSION:
-Convert the judgment text into a simple, citizen-friendly summary.
-
-INSTRUCTIONS:
-1. Extract ONLY the final judgment outcome.
-2. Remove all legal jargon and case history.
-3. Produce EXACTLY 3 bullet points.
-4. Write ONLY in {language}. ZERO English allowed if language is not English.
-5. Each bullet must be 1-2 very short sentences.
-6. No extra headings. No disclaimers.
-
-TEXT TO ANALYZE:
-{safe_text}
-
-OUTPUT REQUIRED:
-- 3 bullet points in {language} only
-"""
-
-
-def build_retry_prompt(safe_text: str, language: str) -> str:
-    return f"""
-Your previous answer included English. Now STRICTLY produce the answer ONLY in {language}.
-
-REQUIREMENTS:
-- Exactly 3 bullet points
-- VERY simple {language}
-- No English at all
-- No introductions, headings, or explanations
-
-TEXT:
-{safe_text}
-
-OUTPUT NOW:
-3 bullet points in {language} only.
-"""
-
-
-def build_remedies_prompt(judgment_text: str, language: str) -> str:
-    return f"""
-You are a Legal Rights Advisor. Read this judgment and answer in SIMPLE format.
-
-JUDGMENT:
-{judgment_text}
-
-Answer ONLY these questions in {language}. Be practical and direct.
-
-1. What happened? (Who won and who lost; 1 sentence)
-2. Can the loser appeal? (Yes/No + reason; 1-2 sentences)
-3. Appeal timeline: How many days? (Just number)
-4. Appeal court: Which court should they go to? (Court name only)
-5. Cost estimate: Rough cost in rupees? (e.g., 5000-15000)
-6. First action: What should they do first? (1 sentence)
-7. Important deadline: What key deadline should they remember? (1 sentence)
-
-Output in numbered form like:
-1. ...\n2. ...\n3. ... etc.
-"""
-
-
-def _clean_answer(value: str) -> Optional[str]:
-    cleaned = re.sub(r"\s+", " ", (value or "")).strip(" -:\t\n")
-    return cleaned or None
-
-
-def _strip_question_label(key: str, value: Optional[str]) -> Optional[str]:
-    if not value:
-        return None
-
-    patterns = {
-        "what_happened": r"^(what happened\??)\s*",
-        "can_appeal": r"^(can the loser appeal\??)\s*",
-        "appeal_days": r"^(appeal timeline\??|how many days\??)\s*",
-        "appeal_court": r"^(appeal court\??|which court(?: should they go to)?\??)\s*",
-        "cost_estimate": r"^(cost estimate\??|rough cost(?: in rupees)?\??)\s*",
-        "first_action": r"^(first action\??|what should they do first\??)\s*",
-        "deadline": r"^(important deadline\??|important dates?\??)\s*",
-    }
-    pattern = patterns.get(key)
-    if pattern:
-        value = re.sub(pattern, "", value, flags=re.IGNORECASE).strip()
-    return value or None
-
-
-def _normalize_yes_no(value: Optional[str]) -> Optional[str]:
-    if not value:
-        return None
-    lower = value.lower()
-    if re.search(r"\byes\b", lower):
-        return "yes"
-    if re.search(r"\bno\b", lower):
-        return "no"
-    return None
-
-
-def _extract_number(value: Optional[str]) -> Optional[str]:
-    if not value:
-        return None
-    match = re.search(r"\b(\d{1,4})\b", value)
-    return match.group(1) if match else None
-
-
-def _validate_court_name(value: Optional[str]) -> Optional[str]:
-    if not value:
-        return None
-    cleaned = _clean_answer(value)
-    if not cleaned:
-        return None
-
-    normalized = cleaned.lower()
-    if normalized in KNOWN_COURTS or any(court in normalized for court in KNOWN_COURTS):
-        return cleaned
-    return None
-
-
-def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[str]]]:
-    text = (response_text or "").strip()
-    if not text:
-        LOGGER.warning("parse_remedies_response: empty response text")
-        return None
-
-    mapping = {
-        1: "what_happened",
-        2: "can_appeal",
-        3: "appeal_days",
-        4: "appeal_court",
-        5: "cost_estimate",
-        6: "first_action",
-        7: "deadline",
-    }
-    remedies: Dict[str, Optional[str]] = {key: None for key in mapping.values()}
-
-    marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
-    matches = list(marker_pattern.finditer(text))
-
-    if not matches:
-        LOGGER.warning("parse_remedies_response: no numbered sections found")
-        return None
-
-    parsed_sections = 0
-    for idx, match in enumerate(matches):
-        section_num = int(match.group(1))
-        key = mapping.get(section_num)
-        if not key:
-            continue
-
-        start = match.end()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        inline_text = _clean_answer(match.group(2))
-        block_text = _clean_answer(text[start:end])
-        section_text = _clean_answer(" ".join(part for part in [inline_text, block_text] if part))
-        cleaned = _strip_question_label(key, section_text)
-        if cleaned is not None:
-            remedies[key] = cleaned
-            parsed_sections += 1
-
-    if parsed_sections == 0:
-        LOGGER.warning("parse_remedies_response: numbered markers found but no parseable content")
-        return None
-
-    normalized_can_appeal = _normalize_yes_no(remedies.get("can_appeal"))
-    if remedies.get("can_appeal") and normalized_can_appeal is None:
-        LOGGER.warning(
-            "parse_remedies_response: invalid can_appeal value=%r",
-            remedies.get("can_appeal"),
-        )
-    remedies["can_appeal"] = normalized_can_appeal
-
-    normalized_days = _extract_number(remedies.get("appeal_days"))
-    if remedies.get("appeal_days") and normalized_days is None:
-        LOGGER.warning(
-            "parse_remedies_response: invalid appeal_days value=%r",
-            remedies.get("appeal_days"),
-        )
-    remedies["appeal_days"] = normalized_days
-
-    validated_court = _validate_court_name(remedies.get("appeal_court"))
-    if remedies.get("appeal_court") and validated_court is None:
-        LOGGER.warning(
-            "parse_remedies_response: unknown appeal_court value=%r",
-            remedies.get("appeal_court"),
-        )
-    remedies["appeal_court"] = validated_court
-
-    LOGGER.info(
-        "parse_remedies_response: parsed_sections=%d extracted_keys=%s",
-        parsed_sections,
-        [key for key, value in remedies.items() if value is not None],
-    )
-    return remedies
 
 
 def _usage_tokens(response) -> Tuple[int, int, int]:
@@ -402,16 +186,16 @@ def process_one_pdf(
     }
 
     try:
-        raw_text = extract_text_from_pdf(pdf_path)
+        raw_text = core.extract_text_from_pdf(pdf_path)
         if not raw_text:
             raise CLIError("No extractable text found in PDF.")
 
         language = normalize_language(language_arg, text_for_auto=raw_text)
         result["language"] = language
 
-        safe_text = compress_text(raw_text, limit=max_chars)
+        safe_text = core.compress_text(raw_text, limit=max_chars)
 
-        summary_prompt = build_summary_prompt(safe_text, language)
+        summary_prompt = core.build_summary_prompt(safe_text, language)
         resp_summary = _chat_completion(
             client=client,
             model=model,
@@ -424,8 +208,8 @@ def process_one_pdf(
 
         p1, c1, t1 = _usage_tokens(resp_summary)
 
-        if language.lower() != "english" and english_leakage_detected(summary):
-            retry_prompt = build_retry_prompt(safe_text, language)
+        if language.lower() != "english" and core.english_leakage_detected(summary):
+            retry_prompt = core.build_retry_prompt(safe_text, language)
             resp_retry = _chat_completion(
                 client=client,
                 model=model,
@@ -439,13 +223,13 @@ def process_one_pdf(
             p1 += p2
             c1 += c2
             t1 += t2
-            if retry_summary and not english_leakage_detected(retry_summary):
+            if retry_summary and not core.english_leakage_detected(retry_summary):
                 summary = retry_summary
 
         if not summary:
             raise CLIError("Model returned empty summary.")
 
-        remedies_prompt = build_remedies_prompt(raw_text, language)
+        remedies_prompt = core.build_remedies_prompt(raw_text, language)
         resp_remedies = _chat_completion(
             client=client,
             model=model,
@@ -455,7 +239,7 @@ def process_one_pdf(
             temperature=0.1,
         )
         remedies_text = (resp_remedies.choices[0].message.content or "").strip()
-        remedies = parse_remedies_response(remedies_text)
+        remedies = core.parse_remedies_response(remedies_text)
         if remedies is None:
             LOGGER.warning(
                 "process_one_pdf: remedies parsing failed for file=%s",
