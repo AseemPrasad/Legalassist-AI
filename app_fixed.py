@@ -2,6 +2,9 @@ import streamlit as st
 from openai import OpenAI
 from pypdf import PdfReader
 import re
+import core
+
+DEFAULT_MODEL = st.secrets.get("DEFAULT_MODEL", core.DEFAULT_MODEL)
 
 # -----------------------------
 # App Config
@@ -233,7 +236,7 @@ def get_remedies_advice(judgment_text, language):
     prompt = build_remedies_prompt(judgment_text, language)
 
     response = client.chat.completions.create(
-        model="meta-llama/llama-3.1-8b-instruct",
+        model=DEFAULT_MODEL,
         messages=[
             {"role": "system", "content": "You are a helpful legal advisor. Answer questions about legal remedies in India."},
             {"role": "user", "content": prompt}
@@ -269,7 +272,7 @@ if uploaded_file and st.button("🚀 Generate Summary"):
             safe_text = compress_text(raw_text)
 
             prompt = build_prompt(safe_text, language)
-            model_id = "meta-llama/llama-3.1-8b-instruct"
+            model_id = DEFAULT_MODEL
 
             response = client.chat.completions.create(
                 model=model_id,

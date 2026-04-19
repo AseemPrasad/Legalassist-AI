@@ -3,6 +3,8 @@ from openai import OpenAI
 from pypdf import PdfReader
 import logging
 import os
+import re
+import core
 
 # ==================== Notification System Setup ====================
 from database import init_db, SessionLocal, get_db, DocumentType
@@ -12,6 +14,15 @@ from case_manager import get_user_cases_summary, upload_case_document, create_ne
 
 # Initialize database
 init_db()
+
+# Constants moved to lazy initialization to prevent import crashes
+def get_default_model():
+    """Returns the default model to use, safely accessing st.secrets."""
+    try:
+        return st.secrets.get("DEFAULT_MODEL", core.DEFAULT_MODEL)
+    except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
+        # Fallback to core.DEFAULT_MODEL if secrets are unavailable
+        return core.DEFAULT_MODEL
 
 # Start background scheduler on app startup
 if "scheduler_started" not in st.session_state:
@@ -40,223 +51,54 @@ st.set_page_config(
 # -----------------------------
 # Load API Keys (OpenRouter)
 # -----------------------------
-def get_client():
+client = None  # Global cache for the client
+
+@st.cache_resource
+def _initialize_openai_client():
+    """
+    Internal function to initialize the OpenAI client using Streamlit secrets.
+    """
     return OpenAI(
         api_key=st.secrets["OPENROUTER_API_KEY"],
         base_url=st.secrets["OPENROUTER_BASE_URL"]
     )
 
-try:
-    client = get_client()
-except Exception:
-    client = None
+def get_client():
+    """
+    Returns the OpenAI client, initializing it only when needed.
+    This prevents the application from crashing on import if st.secrets are missing.
+    """
+    global client
+    if client is not None:
+        return client
+
+    try:
+        client = _initialize_openai_client()
+    except (KeyError, FileNotFoundError, RuntimeError, AttributeError) as e:
+        # Graceful fallback for environments where secrets are not available (e.g., tests)
+        logging.error(f"Failed to initialize OpenAI client: {e}")
+        return None
+    return client
 
 # Using default Streamlit theme
 
 # -----------------------------
-# Helper: PDF to text
+# LLM Interaction Helpers (using core)
 # -----------------------------
-def extract_text_from_pdf(uploaded_pdf):
-    reader = PdfReader(uploaded_pdf)
-    text = ""
-    for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text += page_text + "\n"
-    if not text.strip():
-        raise ValueError("No extractable text found. The PDF may be image-only or empty.")
-    return text
-
-# -----------------------------
-# Compress text for token safety
-# -----------------------------
-def compress_text(text, limit=6000):
-    if len(text) <= limit:
-        return text
-    head = text[:3000]
-    tail = text[-3000:]
-    return head + "\n\n... [TRUNCATED] ...\n\n" + tail
-
-# -----------------------------
-# Detect English leakage
-# -----------------------------
-def english_leakage_detected(output_text, threshold=5):
-    common = [" the ", " and ", " of ", " to ", " in ", " is ", " that ", " it ", " for ", " on "]
-    text_lower = " " + output_text.lower() + " "
-    count = sum(1 for w in common if w in text_lower)
-    return count >= threshold
-
-# -----------------------------
-# Build prompts
-# -----------------------------
-def build_prompt(safe_text, language):
-    return f"""
-You are LegalEase AI — an expert judicial-simplification and translation engine.
-
-MISSION:
-Convert the judgment text into a simple, citizen-friendly summary.
-
-INSTRUCTIONS:
-1. Extract ONLY the final judgment outcome.
-2. Remove all legal jargon and case history.
-3. Produce EXACTLY 3 bullet points.
-4. Write ONLY in {language}. ZERO English allowed if language ≠ English.
-5. Each bullet must be 1–2 very short sentences.
-6. No extra headings. No disclaimers.
-
-TEXT TO ANALYZE:
-{safe_text}
-
-OUTPUT REQUIRED:
-- 3 bullet points in {language} only
-"""
-
-def build_retry_prompt(safe_text, language):
-    return f"""
-Your previous answer included English. Now STRICTLY produce the answer ONLY in {language}.
-
-REQUIREMENTS:
-- Exactly 3 bullet points
-- VERY simple {language}
-- No English at all
-- No introductions, headings, or explanations
-
-TEXT:
-{safe_text}
-
-OUTPUT NOW:
-3 bullet points in {language} only.
-"""
-
-# -----------------------------
-# Remedies Advisor Functions
-# -----------------------------
-
-def build_remedies_prompt(judgment_text, language):
-    """
-    Ask LLM to analyze what remedies are available
-    based on the actual judgment content
-    """
-    return f"""
-You are a Legal Rights Advisor. Read this judgment and answer in SIMPLE format.
-
-JUDGMENT:
-{judgment_text}
-
-Answer ONLY these questions in {language}. Be practical and direct.
-
-1. What happened? (Who won and who lost; 1 sentence)
-2. Can the loser appeal? (Yes/No + reason; 1-2 sentences)
-3. Appeal timeline: How many days? (Just number)
-4. Appeal court: Which court should they go to? (Court name only)
-5. Cost estimate: Rough cost in rupees? (e.g., 5000-15000)
-6. First action: What should they do first? (1 sentence)
-7. Important deadline: What key deadline should they remember? (1 sentence)
-
-Output in numbered form like:
-1. ...\n2. ...\n3. ... etc.
-"""
-
-
-def parse_remedies_response(response_text):
-    """
-    Extract structured info from LLM response using flexible numbered-line parsing.
-    Supports multiple separators: . ) : - 
-    Handles both 5-section (old) and 7-section (new) formats.
-    """
-    import re
-    
-    remedies = {
-        "what_happened": "",
-        "can_appeal": "",
-        "appeal_days": "",
-        "appeal_court": "",
-        "cost_estimate": "",
-        "cost": "",
-        "first_action": "",
-        "deadline": "",
-        "appeal_details": ""
-    }
-
-    text = response_text.strip()
-    if not text:
-        return remedies
-
-    # Detect all numbered sections (flexible separators: . ) : -)
-    # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
-    pattern = r'^([1-9]\d?)\s*[.):‐-]\s*(.*?)$'
-    sections = {}
-    
-    for line in text.split('\n'):
-        match = re.match(pattern, line.strip())
-        if match:
-            num = int(match.group(1))
-            header = match.group(2).strip()
-            sections[num] = {"header": header, "content": ""}
-    
-    # Extract content for each section
-    lines = text.split('\n')
-    current_section = None
-    
-    for line in lines:
-        match = re.match(pattern, line.strip())
-        if match:
-            current_section = int(match.group(1))
-        elif current_section is not None and current_section in sections:
-            if line.strip():  # Only add non-empty lines
-                sections[current_section]["content"] += line.strip() + " "
-    
-    # Clean up content
-    for num in sections:
-        sections[num]["content"] = sections[num]["content"].strip()
-    
-    # Map sections to keys based on count
-    is_7section = len(sections) >= 7
-    
-    if is_7section:
-        if 1 in sections:
-            remedies["what_happened"] = sections[1]["content"]
-        if 2 in sections:
-            can_appeal_text = sections[2]["content"].lower()
-            remedies["can_appeal"] = "yes" if "yes" in can_appeal_text else "no"
-        if 3 in sections:
-            # Extract just the number from "30 days"
-            appeal_days_text = sections[3]["content"]
-            match = re.search(r'\d+', appeal_days_text)
-            remedies["appeal_days"] = match.group() if match else appeal_days_text
-        if 4 in sections:
-            remedies["appeal_court"] = sections[4]["content"]
-        if 5 in sections:
-            remedies["cost_estimate"] = sections[5]["content"]
-            remedies["cost"] = sections[5]["content"]  # Support both keys
-        if 6 in sections:
-            remedies["first_action"] = sections[6]["content"]
-        if 7 in sections:
-            remedies["deadline"] = sections[7]["content"]
-    else:
-        # 5-section format (old)
-        if 1 in sections:
-            remedies["what_happened"] = sections[1]["content"]
-        if 2 in sections:
-            remedies["can_appeal"] = sections[2]["content"]
-        if 3 in sections:
-            remedies["appeal_details"] = sections[3]["content"]
-        if 4 in sections:
-            remedies["first_action"] = sections[4]["content"]
-        if 5 in sections:
-            remedies["deadline"] = sections[5]["content"]
-
-    return remedies
 
 
 def get_remedies_advice(judgment_text, language):
     """
     Call LLM to get remedies for this judgment
     """
-    prompt = build_remedies_prompt(compress_text(judgment_text), language)
+    client = get_client()
+    if not client:
+        return None
+
+    prompt = core.build_remedies_prompt(core.compress_text(judgment_text), language)
     
     response = client.chat.completions.create(
-        model="meta-llama/llama-3.1-8b-instruct",
+        model=get_default_model(),
         messages=[
             {
                 "role": "system",
@@ -272,7 +114,19 @@ def get_remedies_advice(judgment_text, language):
     )
     
     response_text = response.choices[0].message.content.strip()
-    remedies = parse_remedies_response(response_text)
+    remedies = core.parse_remedies_response(response_text)
+    
+    if remedies is None:
+        return {
+            "what_happened": None,
+            "can_appeal": None,
+            "appeal_days": None,
+            "appeal_court": None,
+            "cost_estimate": None,
+            "cost": None,
+            "first_action": None,
+            "deadline": None,
+        }
     
     return remedies
 
@@ -316,15 +170,23 @@ def main():
         st.session_state.last_language = language
 
     if uploaded_file and st.session_state.get("processed_file") == uploaded_file.name and st.session_state.get("last_language") == language:
+        client = get_client()
+
+        if not client:
+            st.error("OpenAI client not initialized. Please ensure OPENROUTER_API_KEY and OPENROUTER_BASE_URL are set in .streamlit/secrets.toml")
+            return
+
         with st.spinner("Processing judgment…"):
             try:
                 # Only call LLM if we haven't processed this exact file/language combo
                 if st.session_state.get("last_processed") != f"{uploaded_file.name}_{language}":
-                    raw_text = extract_text_from_pdf(uploaded_file)
-                    safe_text = compress_text(raw_text)
-                    prompt = build_prompt(safe_text, language)
-                    model_id = "meta-llama/llama-3.1-8b-instruct"
+                    raw_text = core.extract_text_from_pdf(uploaded_file)
+                    safe_text = core.compress_text(raw_text)
 
+                    prompt = core.build_summary_prompt(safe_text, language)
+
+                    # ⚡ Best multilingual model for Hindi/Bengali/Urdu
+                    model_id = get_default_model()
                     response = client.chat.completions.create(
                         model=model_id,
                         messages=[
@@ -337,8 +199,12 @@ def main():
 
                     summary = response.choices[0].message.content.strip()
 
-                    if language.lower() != "english" and english_leakage_detected(summary):
-                        retry_prompt = build_retry_prompt(safe_text, language)
+                    # -----------------------------
+                    # RETRY IF ENGLISH LEAKAGE
+                    # -----------------------------
+                    if language.lower() != "english" and core.english_leakage_detected(summary):
+                        retry_prompt = core.build_retry_prompt(safe_text, language)
+
                         response2 = client.chat.completions.create(
                             model=model_id,
                             messages=[
@@ -349,7 +215,8 @@ def main():
                             temperature=0.03,
                         )
                         retry_summary = response2.choices[0].message.content.strip()
-                        if len(retry_summary) > 0 and not english_leakage_detected(retry_summary):
+
+                        if len(retry_summary) > 0 and not core.english_leakage_detected(retry_summary):
                             summary = retry_summary
 
                     remedies = get_remedies_advice(raw_text, language)
@@ -513,7 +380,7 @@ def main():
                         st.subheader("📊 Quick Analytics Preview")
                         try:
                             from analytics_engine import AnalyticsAggregator
-                            from database import SessionLocal, CaseRecord
+                            from database import CaseRecord
                             
                             db = SessionLocal()
                             summary = AnalyticsAggregator.get_dashboard_summary(db)

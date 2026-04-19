@@ -3,7 +3,7 @@ Database models for deadline tracking and notification management.
 Uses SQLAlchemy ORM with SQLite for persistence.
 """
 
-from datetime import datetime, timezone
+import datetime as dt
 from typing import Optional, List
 from sqlalchemy import (
     create_engine,
@@ -55,8 +55,8 @@ class CaseDeadline(Base):
     deadline_date = Column(DateTime, nullable=False, index=True)
     deadline_type = Column(String, nullable=False)  # appeal, filing, submission, etc.
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
     is_completed = Column(Boolean, default=False)
 
     # Relationships
@@ -65,10 +65,10 @@ class CaseDeadline(Base):
 
     def days_until_deadline(self) -> int:
         """Calculate days remaining until deadline"""
-        now = datetime.now(timezone.utc)
+        now = dt.datetime.now(dt.timezone.utc)
         deadline = self.deadline_date
         if deadline and deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=timezone.utc)
+            deadline = deadline.replace(tzinfo=dt.timezone.utc)
         delta = deadline - now
         return max(0, delta.days)
 
@@ -90,8 +90,8 @@ class UserPreference(Base):
     notify_10_days = Column(Boolean, default=True)
     notify_3_days = Column(Boolean, default=True)
     notify_1_day = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc))
+    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
     user = relationship("User", back_populates="preferences")
@@ -115,7 +115,7 @@ class NotificationLog(Base):
     error_message = Column(Text, nullable=True)
     sent_at = Column(DateTime, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     # Relationships
     deadline = relationship("CaseDeadline", back_populates="notifications")
@@ -139,8 +139,8 @@ class CaseRecord(Base):
     case_value = Column(String, nullable=True)  # value range: <1L, 1-5L, 5-10L, >10L
     outcome = Column(String, nullable=False, index=True)  # plaintiff_won, defendant_won, settlement, dismissal
     judgment_summary = Column(Text, nullable=True)  # Brief summary of judgment
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
     outcome_data = relationship("CaseOutcome", back_populates="case_record", uselist=False, cascade="all, delete-orphan")
@@ -162,8 +162,8 @@ class CaseOutcome(Base):
     time_to_appeal_verdict = Column(Integer, nullable=True)  # days
     appeal_cost = Column(String, nullable=True)  # estimated cost range
     additional_notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
     case_record = relationship("CaseRecord", back_populates="outcome_data")
@@ -196,7 +196,7 @@ class CaseAnalytics(Base):
     avg_appeal_duration = Column(Integer, nullable=True)  # days
     avg_appeal_cost = Column(Integer, nullable=True)  # rupees
     
-    last_updated = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    last_updated = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     def __repr__(self):
         return f"<CaseAnalytics(jurisdiction={self.jurisdiction}, appeal_success_rate={self.appeal_success_rate})>"
@@ -221,8 +221,8 @@ class UserFeedback(Base):
     # Satisfaction feedback
     satisfaction_rating = Column(Integer, nullable=True)  # 1-5
     feedback_text = Column(Text, nullable=True)  # User's notes
-
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     def __repr__(self):
         return f"<UserFeedback(user_id={self.user_id}, appeal_outcome={self.appeal_outcome})>"
@@ -237,7 +237,7 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, nullable=False, index=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     last_login = Column(DateTime, nullable=True)
     is_verified = Column(Boolean, default=True, nullable=False)
 
@@ -256,7 +256,7 @@ class OTPVerification(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, nullable=False, index=True)
     otp_hash = Column(String, nullable=False)  # Hashed OTP code
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     expires_at = Column(DateTime, nullable=False)
     is_used = Column(Boolean, default=False, nullable=False)
 
@@ -293,8 +293,8 @@ class Case(Base):
     jurisdiction = Column(String, nullable=False, index=True)
     status = Column(SQLEnum(CaseStatus), default=CaseStatus.ACTIVE, nullable=False)
     title = Column(String, nullable=True)  # Optional case title
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
     user = relationship("User", back_populates="cases")
@@ -315,7 +315,7 @@ class CaseDocument(Base):
     document_type = Column(SQLEnum(DocumentType), nullable=False)
     document_content = Column(Text, nullable=True)  # Extracted text from PDF
     file_path = Column(String, nullable=True)  # Optional: path to stored PDF
-    uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    uploaded_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     summary = Column(Text, nullable=True)  # LLM-generated 3-bullet summary
     remedies = Column(JSON, nullable=True)  # JSON: appeal info, deadlines, costs
 
@@ -333,10 +333,10 @@ class CaseTimeline(Base):
     id = Column(Integer, primary_key=True, index=True)
     case_id = Column(Integer, ForeignKey("cases.id"), nullable=False, index=True)
     event_type = Column(String, nullable=False, index=True)  # document_upload, deadline_created, action_completed, etc.
-    event_date = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    event_date = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
     description = Column(Text, nullable=False)
     event_metadata = Column(JSON, nullable=True)  # Extra context (document_id, deadline_id, etc.)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     # Relationships
     case = relationship("Case", back_populates="timeline_events")
@@ -379,7 +379,7 @@ def create_or_update_user_preference(
         pref.phone_number = phone_number
         pref.notification_channel = notification_channel
         pref.timezone = timezone
-        pref.updated_at = datetime.now(timezone=timezone.utc)
+        pref.updated_at = dt.datetime.now(dt.timezone.utc)
     else:
         pref = UserPreference(
             user_id=user_id,
@@ -400,7 +400,7 @@ def create_case_deadline(
     user_id: str,
     case_id: str,
     case_title: str,
-    deadline_date: datetime,
+    deadline_date: dt.datetime,
     deadline_type: str,
     description: Optional[str] = None,
 ) -> CaseDeadline:
@@ -421,8 +421,8 @@ def create_case_deadline(
 
 def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadline]:
     """Get all deadlines that are X days away"""
-    now = datetime.now(timezone.utc)
-    target_date = datetime.fromtimestamp(now.timestamp() + (days_before * 86400), tz=timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
+    target_date = dt.datetime.fromtimestamp(now.timestamp() + (days_before * 86400), tz=dt.timezone.utc)
     
     return db.query(CaseDeadline).filter(
         CaseDeadline.is_completed == False,
@@ -433,7 +433,7 @@ def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadl
 
 def get_user_deadlines(db: Session, user_id: str) -> List[CaseDeadline]:
     """Get all active deadlines for a user"""
-    now = datetime.now(timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
     return db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
         CaseDeadline.is_completed == False,
@@ -477,7 +477,7 @@ def log_notification(
         status=status,
         message_id=message_id,
         error_message=error_message,
-        sent_at=datetime.now(timezone.utc) if status != NotificationStatus.PENDING else None,
+        sent_at=dt.datetime.now(dt.timezone.utc) if status != NotificationStatus.PENDING else None,
     )
     db.add(log)
     db.commit()
@@ -531,7 +531,7 @@ def update_case_outcome(
     db: Session,
     case_id: str,
     appeal_filed: bool = False,
-    appeal_date: Optional[datetime] = None,
+    appeal_date: Optional[dt.datetime] = None,
     appeal_outcome: Optional[str] = None,
     appeal_success: Optional[bool] = None,
     time_to_appeal_verdict: Optional[int] = None,
@@ -653,7 +653,7 @@ def update_user_last_login(db: Session, user_id: int) -> User:
     """Update user's last login timestamp"""
     user = db.query(User).filter(User.id == user_id).first()
     if user:
-        user.last_login = datetime.now(timezone.utc)
+        user.last_login = dt.datetime.now(dt.timezone.utc)
         db.commit()
         db.refresh(user)
     return user
@@ -663,7 +663,7 @@ def create_otp_verification(
     db: Session,
     email: str,
     otp_hash: str,
-    expires_at: datetime,
+    expires_at: dt.datetime,
 ) -> OTPVerification:
     """Create a new OTP verification record"""
     otp = OTPVerification(
@@ -679,7 +679,7 @@ def create_otp_verification(
 
 def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
     """Get unused, non-expired OTP for email"""
-    now = datetime.now(timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
     return db.query(OTPVerification).filter(
         OTPVerification.email == email,
         OTPVerification.is_used == False,
@@ -699,7 +699,7 @@ def mark_otp_as_used(db: Session, otp_id: int) -> bool:
 
 def cleanup_expired_otps(db: Session) -> int:
     """Delete expired OTPs, return count of deleted"""
-    now = datetime.now(timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
     deleted = db.query(OTPVerification).filter(
         OTPVerification.expires_at < now
     ).delete()
@@ -760,7 +760,7 @@ def update_case_status(db: Session, case_id: int, status: CaseStatus) -> Optiona
     case = db.query(Case).filter(Case.id == case_id).first()
     if case:
         case.status = status
-        case.updated_at = datetime.now(timezone.utc)
+        case.updated_at = dt.datetime.now(dt.timezone.utc)
         db.commit()
         db.refresh(case)
     return case
@@ -844,7 +844,7 @@ def create_timeline_event(
     case_id: int,
     event_type: str,
     description: str,
-    event_date: Optional[datetime] = None,
+    event_date: Optional[dt.datetime] = None,
     metadata: Optional[dict] = None,
 ) -> CaseTimeline:
     """Create a new timeline event"""
@@ -852,7 +852,7 @@ def create_timeline_event(
         case_id=case_id,
         event_type=event_type,
         description=description,
-        event_date=event_date or datetime.now(timezone.utc),
+        event_date=event_date or dt.datetime.now(dt.timezone.utc),
         event_metadata=metadata,
     )
     db.add(event)
@@ -877,7 +877,7 @@ def get_user_stats(db: Session, user_id: int) -> dict:
     closed_count = len([c for c in cases if c.status == CaseStatus.CLOSED])
 
     # Get upcoming deadlines
-    now = datetime.now(timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
     upcoming_deadlines = db.query(CaseDeadline).filter(
         CaseDeadline.user_id == str(user_id),
         CaseDeadline.is_completed == False,
@@ -891,4 +891,3 @@ def get_user_stats(db: Session, user_id: int) -> dict:
         "closed_cases": closed_count,
         "upcoming_deadlines": upcoming_deadlines,
     }
-
