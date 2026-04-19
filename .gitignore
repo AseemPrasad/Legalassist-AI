@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Environment variables
+.env
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Databases
+legalassist.db
+*.sqlite3
+
+# IDEs and Tools
+.claude/
+.vscode/
+.idea/

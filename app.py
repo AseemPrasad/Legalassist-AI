@@ -5,8 +5,10 @@ import logging
 import os
 
 # ==================== Notification System Setup ====================
-from database import init_db, SessionLocal, get_db
+from database import init_db, SessionLocal, get_db, DocumentType
 from scheduler import start_scheduler, stop_scheduler
+from auth import init_auth_session, require_auth, get_current_user_id, get_current_user_email, logout_user
+from case_manager import get_user_cases_summary, upload_case_document, create_new_case
 
 # Initialize database
 init_db()
@@ -49,38 +51,7 @@ try:
 except Exception:
     client = None
 
-# -----------------------------
-# Retro Styling
-# -----------------------------
-st.markdown("""
-<style>
-    body {
-        background-color: #0d0d0f;
-        color: #e0e0e0;
-        font-family: 'Inter', sans-serif;
-    }
-    .main {
-        background-color: #0d0d0f;
-    }
-    .stButton>button {
-        background: linear-gradient(90deg, #2d2dff, #8a2be2);
-        border-radius: 8px;
-        color: white;
-        font-weight: 600;
-        border: none;
-        padding: 0.6rem 1.2rem;
-    }
-    .stSelectbox>div>div {
-        background-color: #1a1a1d;
-        color: #e0e0e0;
-        border-radius: 6px;
-    }
-    .stTextArea>div>textarea {
-        background-color: #121214;
-        color: #e0e0e0;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Using default Streamlit theme
 
 # -----------------------------
 # Helper: PDF to text
@@ -313,6 +284,19 @@ def get_remedies_advice(judgment_text, language):
 # Main Action Wrapper
 # -----------------------------
 def main():
+    init_auth_session()
+    
+    st.sidebar.markdown("# ⚖️ LegalEase AI")
+    if require_auth():
+        st.sidebar.success(f"Logged in as {get_current_user_email()}")
+        if st.sidebar.button("Logout"):
+            logout_user()
+            st.rerun()
+    else:
+        st.sidebar.info("Not logged in. Log in to track cases and deadlines.")
+        if st.sidebar.button("Go to Login"):
+            st.switch_page("pages/0_Login.py")
+
     st.title("⚡ LegalEase AI")
     st.subheader("Legal Judgment Simplifier")
 
@@ -326,53 +310,60 @@ def main():
     uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
     st.markdown("---")
 
-    if uploaded_file and st.button("🚀 Generate Summary"):
+    generate_clicked = st.button("🚀 Generate Summary") if uploaded_file else False
+    if uploaded_file and generate_clicked:
+        st.session_state.processed_file = uploaded_file.name
+        st.session_state.last_language = language
+
+    if uploaded_file and st.session_state.get("processed_file") == uploaded_file.name and st.session_state.get("last_language") == language:
         with st.spinner("Processing judgment…"):
             try:
-                raw_text = extract_text_from_pdf(uploaded_file)
-                safe_text = compress_text(raw_text)
+                # Only call LLM if we haven't processed this exact file/language combo
+                if st.session_state.get("last_processed") != f"{uploaded_file.name}_{language}":
+                    raw_text = extract_text_from_pdf(uploaded_file)
+                    safe_text = compress_text(raw_text)
+                    prompt = build_prompt(safe_text, language)
+                    model_id = "meta-llama/llama-3.1-8b-instruct"
 
-                prompt = build_prompt(safe_text, language)
-
-                # ⚡ Best multilingual model for Hindi/Bengali/Urdu
-                model_id = "meta-llama/llama-3.1-8b-instruct"
-
-
-                # -----------------------------
-                # FIRST ATTEMPT
-                # -----------------------------
-                response = client.chat.completions.create(
-                    model=model_id,
-                    messages=[
-                        {"role": "system", "content": "You are an expert legal simplification engine."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=280,
-                    temperature=0.05,
-                )
-
-                summary = response.choices[0].message.content.strip()
-
-                # -----------------------------
-                # RETRY IF ENGLISH LEAKAGE
-                # -----------------------------
-                if language.lower() != "english" and english_leakage_detected(summary):
-                    retry_prompt = build_retry_prompt(safe_text, language)
-
-                    response2 = client.chat.completions.create(
+                    response = client.chat.completions.create(
                         model=model_id,
                         messages=[
-                            {"role": "system", "content": "Strict multilingual rewriting engine."},
-                            {"role": "user", "content": retry_prompt}
+                            {"role": "system", "content": "You are an expert legal simplification engine."},
+                            {"role": "user", "content": prompt}
                         ],
-                        max_tokens=260,
-                        temperature=0.03,
+                        max_tokens=280,
+                        temperature=0.05,
                     )
 
-                    retry_summary = response2.choices[0].message.content.strip()
+                    summary = response.choices[0].message.content.strip()
 
-                    if len(retry_summary) > 0 and not english_leakage_detected(retry_summary):
-                        summary = retry_summary
+                    if language.lower() != "english" and english_leakage_detected(summary):
+                        retry_prompt = build_retry_prompt(safe_text, language)
+                        response2 = client.chat.completions.create(
+                            model=model_id,
+                            messages=[
+                                {"role": "system", "content": "Strict multilingual rewriting engine."},
+                                {"role": "user", "content": retry_prompt}
+                            ],
+                            max_tokens=260,
+                            temperature=0.03,
+                        )
+                        retry_summary = response2.choices[0].message.content.strip()
+                        if len(retry_summary) > 0 and not english_leakage_detected(retry_summary):
+                            summary = retry_summary
+
+                    remedies = get_remedies_advice(raw_text, language)
+
+                    # Save to session
+                    st.session_state.raw_text = raw_text
+                    st.session_state.summary = summary
+                    st.session_state.remedies = remedies
+                    st.session_state.last_processed = f"{uploaded_file.name}_{language}"
+                else:
+                    # Load from session
+                    raw_text = st.session_state.raw_text
+                    summary = st.session_state.summary
+                    remedies = st.session_state.remedies
 
                 if not summary:
                     st.error("The model returned an empty summary. Try a shorter file or switch to English.")
@@ -387,7 +378,6 @@ def main():
                     
                     with st.spinner("Analyzing your legal options..."):
                         try:
-                            remedies = get_remedies_advice(raw_text, language)
                             
                             # Show each answer
                             if remedies.get("what_happened"):
@@ -423,6 +413,75 @@ def main():
                             
                         except Exception as e:
                             st.error(f"Could not get remedies advice: {str(e)}")
+                    
+                    # ===== SAVE TO CASE SECTION =====
+                    st.markdown("---")
+                    st.markdown("## 💾 Save to Case History")
+                    
+                    if not require_auth():
+                        st.info("Log in to save this document, track deadlines, and view timeline history.")
+                        if st.button("Go to Login", key="login_to_save"):
+                            st.switch_page("pages/0_Login.py")
+                    else:
+                        user_id = get_current_user_id()
+                        cases = get_user_cases_summary(user_id, include_closed=False)
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if cases:
+                                case_options = {f"{c['case_number']} - {c['title']}": c['id'] for c in cases}
+                                selected_case_name = st.selectbox("Select Existing Case", options=list(case_options.keys()))
+                                selected_case_id = case_options[selected_case_name]
+                                
+                                if st.button("Save to Selected Case"):
+                                    with st.spinner("Saving..."):
+                                        doc = upload_case_document(
+                                            user_id=user_id,
+                                            case_id=selected_case_id,
+                                            document_type=DocumentType.JUDGMENT,
+                                            document_content=raw_text,
+                                            summary=summary,
+                                            remedies=remedies
+                                        )
+                                        if doc:
+                                            st.success("✅ Saved successfully! Deadlines auto-created.")
+                                            st.session_state.selected_case_id = selected_case_id
+                            else:
+                                st.info("No active cases found. Create one to the right.")
+                            
+                            if st.session_state.get("selected_case_id"):
+                                if st.button("View Case Details", key="view_existing_case"):
+                                    st.switch_page("pages/2_Case_Details.py")
+                                
+                        with col2:
+                            with st.expander("➕ Or Create New Case"):
+                                new_case_number = st.text_input("Case Number")
+                                new_case_title = st.text_input("Case Title (Optional)")
+                                new_case_type = st.selectbox("Type", ["civil", "criminal", "family", "other"])
+                                new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court")
+                                if st.button("Create & Save"):
+                                    if new_case_number and new_jurisdiction:
+                                        new_case = create_new_case(
+                                            user_id=user_id,
+                                            case_number=new_case_number,
+                                            case_type=new_case_type,
+                                            jurisdiction=new_jurisdiction,
+                                            title=new_case_title
+                                        )
+                                        if new_case:
+                                            doc = upload_case_document(
+                                                user_id=user_id,
+                                                case_id=new_case.id,
+                                                document_type=DocumentType.JUDGMENT,
+                                                document_content=raw_text,
+                                                summary=summary,
+                                                remedies=remedies
+                                            )
+                                            if doc:
+                                                st.success("✅ Case created and document saved!")
+                                                st.session_state.selected_case_id = new_case.id
+                                    else:
+                                        st.error("Case Number and Jurisdiction required.")
                     
                     # ===== ANALYTICS & TRACKING SECTION =====
                     st.markdown("---")
