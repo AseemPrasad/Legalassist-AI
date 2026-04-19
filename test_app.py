@@ -4,8 +4,7 @@ import os
 import json
 from pypdf import PdfReader
 from unittest.mock import MagicMock, patch
-import app
-import core
+from core import app_utils as core
 
 # Mock streamlit secrets and session state for testing
 import streamlit as st
@@ -83,7 +82,7 @@ def test_all_languages_prompt_building(language):
     assert language in prompt
     assert "3 bullet points" in prompt
 
-@patch("app.get_client")
+@patch("core.app_utils.get_client")
 def test_get_remedies_advice_flow(mock_get_client):
     """Test the full flow of getting remedies with mocked LLM"""
     # Setup mock
@@ -109,7 +108,7 @@ def test_get_remedies_advice_flow(mock_get_client):
     """
     mock_openai.return_value.choices = [mock_choice]
     
-    remedies = app.get_remedies_advice("Some judgment text", "English")
+    remedies = core.get_remedies_advice("Some judgment text", "English", mock_client)
     assert remedies["what_happened"] == "Defendant was convicted."
     assert remedies["can_appeal"] == "yes"
     assert remedies["appeal_days"] == "30"
