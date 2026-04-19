@@ -4,138 +4,307 @@
         "type": "criminal_guilty",
         "expected_verdict": "guilty",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "90",
+        "case_value": "5000"
     },
     {
         "path": "tests/samples/criminal/guilty/case_2.pdf",
         "type": "criminal_guilty",
         "expected_verdict": "guilty",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "90",
+        "case_value": "5000"
     },
     {
         "path": "tests/samples/criminal/guilty/case_3.pdf",
         "type": "criminal_guilty",
         "expected_verdict": "guilty",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "90",
+        "case_value": "5000"
     },
     {
         "path": "tests/samples/criminal/guilty/case_4.pdf",
         "type": "criminal_guilty",
         "expected_verdict": "guilty",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "90",
+        "case_value": "5000"
     },
     {
         "path": "tests/samples/criminal/guilty/case_5.pdf",
         "type": "criminal_guilty",
         "expected_verdict": "guilty",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "90",
+        "case_value": "5000"
     },
     {
         "path": "tests/samples/criminal/acquitted/case_1.pdf",
         "type": "criminal_acquitted",
         "expected_verdict": "acquitted",
-        "expected_appeal": "yes",
+        "expected_appeal": "rarely",
         "expected_days": "90"
     },
     {
         "path": "tests/samples/criminal/acquitted/case_2.pdf",
         "type": "criminal_acquitted",
         "expected_verdict": "acquitted",
-        "expected_appeal": "yes",
+        "expected_appeal": "rarely",
         "expected_days": "90"
     },
     {
         "path": "tests/samples/criminal/acquitted/case_3.pdf",
         "type": "criminal_acquitted",
         "expected_verdict": "acquitted",
-        "expected_appeal": "yes",
+        "expected_appeal": "rarely",
         "expected_days": "90"
     },
     {
         "path": "tests/samples/criminal/acquitted/case_4.pdf",
         "type": "criminal_acquitted",
         "expected_verdict": "acquitted",
-        "expected_appeal": "yes",
+        "expected_appeal": "rarely",
         "expected_days": "90"
     },
     {
         "path": "tests/samples/criminal/acquitted/case_5.pdf",
         "type": "criminal_acquitted",
         "expected_verdict": "acquitted",
-        "expected_appeal": "yes",
+        "expected_appeal": "rarely",
         "expected_days": "90"
     },
     {
         "path": "tests/samples/civil/plaintiff_won/case_1.pdf",
         "type": "civil_won",
-        "expected_verdict": "won",
+        "expected_verdict": "decreed",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "30",
+        "case_value": "500000"
     },
     {
         "path": "tests/samples/civil/plaintiff_won/case_2.pdf",
         "type": "civil_won",
-        "expected_verdict": "won",
+        "expected_verdict": "decreed",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "30",
+        "case_value": "500000"
     },
     {
         "path": "tests/samples/civil/plaintiff_won/case_3.pdf",
         "type": "civil_won",
-        "expected_verdict": "won",
+        "expected_verdict": "decreed",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "30",
+        "case_value": "500000"
     },
     {
         "path": "tests/samples/civil/plaintiff_won/case_4.pdf",
         "type": "civil_won",
-        "expected_verdict": "won",
+        "expected_verdict": "decreed",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "30",
+        "case_value": "500000"
     },
     {
         "path": "tests/samples/civil/plaintiff_won/case_5.pdf",
         "type": "civil_won",
-        "expected_verdict": "won",
+        "expected_verdict": "decreed",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "30",
+        "case_value": "500000"
     },
     {
         "path": "tests/samples/civil/plaintiff_lost/case_1.pdf",
         "type": "civil_lost",
-        "expected_verdict": "lost",
+        "expected_verdict": "dismissed",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "30",
+        "case_value": "500000"
     },
     {
         "path": "tests/samples/civil/plaintiff_lost/case_2.pdf",
         "type": "civil_lost",
-        "expected_verdict": "lost",
+        "expected_verdict": "dismissed",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "30",
+        "case_value": "500000"
     },
     {
         "path": "tests/samples/civil/plaintiff_lost/case_3.pdf",
         "type": "civil_lost",
-        "expected_verdict": "lost",
+        "expected_verdict": "dismissed",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "30",
+        "case_value": "500000"
     },
     {
         "path": "tests/samples/civil/plaintiff_lost/case_4.pdf",
         "type": "civil_lost",
-        "expected_verdict": "lost",
+        "expected_verdict": "dismissed",
         "expected_appeal": "yes",
-        "expected_days": "30"
+        "expected_days": "30",
+        "case_value": "500000"
     },
     {
         "path": "tests/samples/civil/plaintiff_lost/case_5.pdf",
         "type": "civil_lost",
-        "expected_verdict": "lost",
+        "expected_verdict": "dismissed",
+        "expected_appeal": "yes",
+        "expected_days": "30",
+        "case_value": "500000"
+    },
+    {
+        "path": "tests/samples/family/custody_granted/case_1.pdf",
+        "type": "family_custody_granted",
+        "expected_verdict": "custody_granted",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/family/custody_granted/case_2.pdf",
+        "type": "family_custody_granted",
+        "expected_verdict": "custody_granted",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/family/custody_granted/case_3.pdf",
+        "type": "family_custody_granted",
+        "expected_verdict": "custody_granted",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/family/custody_granted/case_4.pdf",
+        "type": "family_custody_granted",
+        "expected_verdict": "custody_granted",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/family/custody_granted/case_5.pdf",
+        "type": "family_custody_granted",
+        "expected_verdict": "custody_granted",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/family/custody_granted/case_6.pdf",
+        "type": "family_custody_granted",
+        "expected_verdict": "custody_granted",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/family/custody_denied/case_1.pdf",
+        "type": "family_custody_denied",
+        "expected_verdict": "custody_denied",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/family/custody_denied/case_2.pdf",
+        "type": "family_custody_denied",
+        "expected_verdict": "custody_denied",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/family/custody_denied/case_3.pdf",
+        "type": "family_custody_denied",
+        "expected_verdict": "custody_denied",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/family/custody_denied/case_4.pdf",
+        "type": "family_custody_denied",
+        "expected_verdict": "custody_denied",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/labor/termination_upheld/case_1.pdf",
+        "type": "labor_termination_upheld",
+        "expected_verdict": "upheld",
+        "expected_appeal": "yes",
+        "expected_days": "90"
+    },
+    {
+        "path": "tests/samples/labor/termination_upheld/case_2.pdf",
+        "type": "labor_termination_upheld",
+        "expected_verdict": "upheld",
+        "expected_appeal": "yes",
+        "expected_days": "90"
+    },
+    {
+        "path": "tests/samples/labor/termination_upheld/case_3.pdf",
+        "type": "labor_termination_upheld",
+        "expected_verdict": "upheld",
+        "expected_appeal": "yes",
+        "expected_days": "90"
+    },
+    {
+        "path": "tests/samples/labor/termination_upheld/case_4.pdf",
+        "type": "labor_termination_upheld",
+        "expected_verdict": "upheld",
+        "expected_appeal": "yes",
+        "expected_days": "90"
+    },
+    {
+        "path": "tests/samples/labor/termination_overturned/case_1.pdf",
+        "type": "labor_termination_overturned",
+        "expected_verdict": "overturned",
+        "expected_appeal": "yes",
+        "expected_days": "90"
+    },
+    {
+        "path": "tests/samples/labor/termination_overturned/case_2.pdf",
+        "type": "labor_termination_overturned",
+        "expected_verdict": "overturned",
+        "expected_appeal": "yes",
+        "expected_days": "90"
+    },
+    {
+        "path": "tests/samples/landlord_tenant/eviction_granted/case_1.pdf",
+        "type": "landlord_tenant_eviction_granted",
+        "expected_verdict": "eviction_granted",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/landlord_tenant/eviction_granted/case_2.pdf",
+        "type": "landlord_tenant_eviction_granted",
+        "expected_verdict": "eviction_granted",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/landlord_tenant/eviction_granted/case_3.pdf",
+        "type": "landlord_tenant_eviction_granted",
+        "expected_verdict": "eviction_granted",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/landlord_tenant/eviction_granted/case_4.pdf",
+        "type": "landlord_tenant_eviction_granted",
+        "expected_verdict": "eviction_granted",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/landlord_tenant/eviction_denied/case_1.pdf",
+        "type": "landlord_tenant_eviction_denied",
+        "expected_verdict": "eviction_denied",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/landlord_tenant/eviction_denied/case_2.pdf",
+        "type": "landlord_tenant_eviction_denied",
+        "expected_verdict": "eviction_denied",
         "expected_appeal": "yes",
         "expected_days": "30"
     }

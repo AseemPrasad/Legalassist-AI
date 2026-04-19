@@ -1,0 +1,34 @@
+"""Core utilities for LegalEase AI"""
+from .app_utils import (
+    extract_text_from_pdf,
+    compress_text,
+    english_leakage_detected,
+    build_prompt,
+    build_retry_prompt,
+    build_remedies_prompt,
+    parse_remedies_response,
+    extract_appeal_info,
+    get_remedies_advice,
+    DEFAULT_MODEL,
+    build_summary_prompt,
+    LANGUAGES,
+    RETRO_STYLING,
+    LEGAL_HELP_RESOURCES,
+)
+
+__all__ = [
+    'extract_text_from_pdf',
+    'compress_text',
+    'english_leakage_detected',
+    'build_prompt',
+    'build_retry_prompt',
+    'build_remedies_prompt',
+    'parse_remedies_response',
+    'extract_appeal_info',
+    'get_remedies_advice',
+    'DEFAULT_MODEL',
+    'build_summary_prompt',
+    'LANGUAGES',
+    'RETRO_STYLING',
+    'LEGAL_HELP_RESOURCES',
+]

@@ -1,32 +1,101 @@
 
-name: Python Tests
+name: Tests & Coverage
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, develop ]
 
 jobs:
-  build:
+  tests:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python 3.11
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4
       with:
-        python-version: "3.11"
+        python-version: ${{ matrix.python-version }}
+    
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-    - name: Generate Test Data
+        pip install pytest-cov coverage[toml]
+    
+    - name: Setup Streamlit secrets for testing
       run: |
-        python scripts/generate_test_data.py
-    - name: Run Tests
-      run: |
-        # We dummy mock secrets for streamlit import
         mkdir -p .streamlit
-        echo 'OPENROUTER_API_KEY = "dummy"' > .streamlit/secrets.toml
-        echo 'OPENROUTER_BASE_URL = "dummy"' >> .streamlit/secrets.toml
-        pytest test_app.py
+        echo 'OPENROUTER_API_KEY = "test_key"' > .streamlit/secrets.toml
+        echo 'OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"' >> .streamlit/secrets.toml
+    
+    - name: Lint with flake8
+      run: |
+        pip install flake8
+        flake8 core/ tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 core/ tests/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      continue-on-error: true
+    
+    - name: Run all tests
+      run: |
+        pytest tests/ -v --tb=short \
+          tests/test_app.py \
+          tests/test_app_core.py \
+          tests/test_remedies.py \
+          tests/test_notifications.py
+    
+    - name: Generate coverage report
+      run: |
+        pytest tests/ \
+          --cov=core \
+          --cov=database \
+          --cov=notification_service \
+          --cov=scheduler \
+          --cov-report=html \
+          --cov-report=term-missing \
+          --cov-report=xml \
+          --cov-fail-under=70
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-${{ matrix.python-version }}
+        fail_ci_if_error: false
+    
+    - name: Archive coverage reports
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-report-${{ matrix.python-version }}
+        path: htmlcov/
+        retention-days: 30
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.12"
+    
+    - name: Install security tools
+      run: |
+        pip install bandit safety
+    
+    - name: Run Bandit security scan
+      run: |
+        bandit -r core/ database.py notification_service.py scheduler.py -f json -o bandit-report.json || true
+    
+    - name: Check dependencies with Safety
+      run: |
+        pip install -r requirements.txt
+        safety check --json || true

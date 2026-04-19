@@ -197,8 +197,18 @@ python scripts/generate_sample_analytics_data.py clear
 
 #### 3. Start the App
 ```bash
-streamlit run app.py
+streamlit run app_integrated.py
 ```
+
+**Note:** The main application entry point is `app_integrated.py`. 
+- Multi-page structure with Streamlit's automatic routing
+- Pages located in `pages/` directory:
+  - `0_Home.py` - Judgment analysis (main feature)
+  - `1_Deadlines.py` - Appeal deadline management
+  - `2_History.py` - Notification history
+  - `3_Settings.py` - User preferences
+- Core utilities extracted to `core/app_utils.py`
+- Legacy files (`app.py`, `app_fixed.py`) have been consolidated into this unified structure
 
 #### 4. Access the Pages
 

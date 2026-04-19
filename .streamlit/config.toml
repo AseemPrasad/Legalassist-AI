@@ -1,0 +1,25 @@
+[theme]
+primaryColor = "#2d2dff"
+backgroundColor = "#0d0d0f"
+secondaryBackgroundColor = "#1a1a1d"
+textColor = "#e0e0e0"
+font = "sans serif"
+
+[client]
+showErrorDetails = true
+toolbarMode = "minimal"
+
+[logger]
+level = "info"
+
+[server]
+headless = true
+port = 8501
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+# Multi-page app settings
+[client]
+showErrorDetails = true
