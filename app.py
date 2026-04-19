@@ -13,8 +13,14 @@ from scheduler import start_scheduler, stop_scheduler
 # Initialize database
 init_db()
 
-# Constants
-DEFAULT_MODEL = st.secrets.get("DEFAULT_MODEL", core.DEFAULT_MODEL)
+# Constants moved to lazy initialization to prevent import crashes
+def get_default_model():
+    """Returns the default model to use, safely accessing st.secrets."""
+    try:
+        return st.secrets.get("DEFAULT_MODEL", core.DEFAULT_MODEL)
+    except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
+        # Fallback to core.DEFAULT_MODEL if secrets are unavailable
+        return core.DEFAULT_MODEL
 
 # Start background scheduler on app startup
 if "scheduler_started" not in st.session_state:
@@ -122,7 +128,7 @@ def get_remedies_advice(judgment_text, language):
     prompt = core.build_remedies_prompt(core.compress_text(judgment_text), language)
     
     response = client.chat.completions.create(
-        model=DEFAULT_MODEL,
+        model=get_default_model(),
         messages=[
             {
                 "role": "system",
@@ -190,9 +196,9 @@ def main():
                 prompt = core.build_summary_prompt(safe_text, language)
 
                 # ⚡ Best multilingual model for Hindi/Bengali/Urdu
-                model_id = DEFAULT_MODEL
+                model_id = get_default_model()
                 response = client.chat.completions.create(
-                    model=DEFAULT_MODEL,
+                    model=model_id,
                     messages=[
                         {"role": "system", "content": "You are an expert legal simplification engine."},
                         {"role": "user", "content": prompt}
@@ -210,7 +216,7 @@ def main():
                     retry_prompt = core.build_retry_prompt(safe_text, language)
 
                     response2 = client.chat.completions.create(
-                        model=DEFAULT_MODEL,
+                        model=model_id,
                         messages=[
                             {"role": "system", "content": "Strict multilingual rewriting engine."},
                             {"role": "user", "content": retry_prompt}
