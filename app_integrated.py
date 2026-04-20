@@ -1,27 +1,48 @@
 """
-Integrated LegalEase AI app with deadline notification system.
-This file coordinates between the original app and the notification UI.
+LegalEase AI - Main Application Entry Point
+Streamlit multi-page app with deadline notification system.
+
+Run with: streamlit run app_integrated.py
 """
 
 import streamlit as st
 import logging
 import os
 
-# ==================== Notification System Setup ====================
-from database import init_db, SessionLocal
+# ==================== CONFIGURATION ====================
+st.set_page_config(
+    page_title="LegalEase AI",
+    page_icon="⚖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ==================== LOGGING SETUP ====================
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# ==================== DATABASE & SCHEDULER SETUP ====================
+from database import init_db
 from scheduler import start_scheduler, stop_scheduler
 
 # Initialize database
-init_db()
+try:
+    init_db()
+    logger.info("Database initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize database: {str(e)}")
 
 # Start background scheduler on app startup
 if "scheduler_started" not in st.session_state:
     try:
         start_scheduler()
         st.session_state.scheduler_started = True
-        logging.info("Background scheduler started")
+        logger.info("Background scheduler started")
     except Exception as e:
-        logging.error(f"Failed to start scheduler: {str(e)}")
+        logger.error(f"Failed to start scheduler: {str(e)}")
         st.session_state.scheduler_started = False
 
 # ==================== Logging Setup ====================
@@ -64,19 +85,6 @@ def main():
     # Sidebar navigation
     st.sidebar.markdown("# ⚖️ LegalEase AI")
     st.sidebar.markdown("**Convert Judgments to Simple Language**")
-    st.sidebar.divider()
-    
-    page = st.sidebar.radio(
-        "📌 Choose Feature",
-        [
-            "Judgment Analysis",
-            "Case Deadlines",
-            "Notification History",
-            "Preferences"
-        ],
-        help="Select what you'd like to do"
-    )
-    
     st.sidebar.divider()
     
     # Display scheduler status

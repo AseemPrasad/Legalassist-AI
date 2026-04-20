@@ -4,7 +4,22 @@ from pypdf import PdfReader
 import logging
 import os
 import re
-import core
+
+# ==================== Import Utilities from core.app_utils ====================
+from core.app_utils import (
+    get_client,
+    get_default_model,
+    _initialize_openai_client,
+    extract_text_from_pdf,
+    compress_text,
+    english_leakage_detected,
+    build_prompt,
+    build_summary_prompt,
+    build_retry_prompt,
+    build_remedies_prompt,
+    parse_remedies_response,
+    get_remedies_advice,
+)
 
 # ==================== Notification System Setup ====================
 from database import init_db, SessionLocal, get_db, DocumentType
@@ -14,15 +29,6 @@ from case_manager import get_user_cases_summary, upload_case_document, create_ne
 
 # Initialize database
 init_db()
-
-# Constants moved to lazy initialization to prevent import crashes
-def get_default_model():
-    """Returns the default model to use, safely accessing st.secrets."""
-    try:
-        return st.secrets.get("DEFAULT_MODEL", core.DEFAULT_MODEL)
-    except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
-        # Fallback to core.DEFAULT_MODEL if secrets are unavailable
-        return core.DEFAULT_MODEL
 
 # Start background scheduler on app startup
 if "scheduler_started" not in st.session_state:
@@ -47,96 +53,9 @@ st.set_page_config(
     layout="wide" if st.query_params.get("page") == "deadlines" else "centered"
 )
 
-
-# -----------------------------
-# Load API Keys (OpenRouter)
-# -----------------------------
-client = None  # Global cache for the client
-
-@st.cache_resource
-def _initialize_openai_client():
-    """
-    Internal function to initialize the OpenAI client using Streamlit secrets.
-    """
-    return OpenAI(
-        api_key=st.secrets["OPENROUTER_API_KEY"],
-        base_url=st.secrets["OPENROUTER_BASE_URL"]
-    )
-
-def get_client():
-    """
-    Returns the OpenAI client, initializing it only when needed.
-    This prevents the application from crashing on import if st.secrets are missing.
-    """
-    global client
-    if client is not None:
-        return client
-
-    try:
-        client = _initialize_openai_client()
-    except (KeyError, FileNotFoundError, RuntimeError, AttributeError) as e:
-        # Graceful fallback for environments where secrets are not available (e.g., tests)
-        logging.error(f"Failed to initialize OpenAI client: {e}")
-        return None
-    return client
-
 # Using default Streamlit theme
 
-# -----------------------------
-# LLM Interaction Helpers (using core)
-# -----------------------------
-
-
-def get_remedies_advice(judgment_text, language):
-    """
-    Call LLM to get remedies for this judgment
-    """
-    client = get_client()
-    if not client:
-        return None
-
-    prompt = core.build_remedies_prompt(core.compress_text(judgment_text), language)
-    
-    response = client.chat.completions.create(
-        model=get_default_model(),
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful legal advisor. Answer questions about legal remedies in India."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        max_tokens=500,  # Longer for detailed answers
-        temperature=0.1,  # Low temp = more consistent
-    )
-    
-    response_text = response.choices[0].message.content.strip()
-    remedies = core.parse_remedies_response(response_text)
-    
-    if remedies is None:
-        return {
-            "what_happened": None,
-            "can_appeal": None,
-            "appeal_days": None,
-            "appeal_court": None,
-            "cost_estimate": None,
-            "cost": None,
-            "first_action": None,
-            "deadline": None,
-        }
-    
-    return remedies
-
-# -----------------------------
-# UI
-# -----------------------------
-
-# -----------------------------
-# Main Action Wrapper
-# -----------------------------
+# ==================== Main UI Component ====================
 def main():
     init_auth_session()
     
@@ -180,10 +99,10 @@ def main():
             try:
                 # Only call LLM if we haven't processed this exact file/language combo
                 if st.session_state.get("last_processed") != f"{uploaded_file.name}_{language}":
-                    raw_text = core.extract_text_from_pdf(uploaded_file)
-                    safe_text = core.compress_text(raw_text)
+                    raw_text = extract_text_from_pdf(uploaded_file)
+                    safe_text = compress_text(raw_text)
 
-                    prompt = core.build_summary_prompt(safe_text, language)
+                    prompt = build_summary_prompt(safe_text, language)
 
                     # ⚡ Best multilingual model for Hindi/Bengali/Urdu
                     model_id = get_default_model()
@@ -202,8 +121,8 @@ def main():
                     # -----------------------------
                     # RETRY IF ENGLISH LEAKAGE
                     # -----------------------------
-                    if language.lower() != "english" and core.english_leakage_detected(summary):
-                        retry_prompt = core.build_retry_prompt(safe_text, language)
+                    if language.lower() != "english" and english_leakage_detected(summary):
+                        retry_prompt = build_retry_prompt(safe_text, language)
 
                         response2 = client.chat.completions.create(
                             model=model_id,
@@ -216,7 +135,7 @@ def main():
                         )
                         retry_summary = response2.choices[0].message.content.strip()
 
-                        if len(retry_summary) > 0 and not core.english_leakage_detected(retry_summary):
+                        if len(retry_summary) > 0 and not english_leakage_detected(retry_summary):
                             summary = retry_summary
 
                     remedies = get_remedies_advice(raw_text, language)
