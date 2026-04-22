@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 from pypdf import PdfReader
 from langdetect import DetectorFactory, LangDetectException, detect
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from tqdm import tqdm
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 from logging_config import configure_logging
@@ -47,6 +47,10 @@ KNOWN_COURTS = {
     "consumer court",
     "tribunal",
 }
+
+# Global semaphore for API concurrency control
+API_SEMAPHORE = threading.Semaphore(5)
+
 
 
 class CLIError(Exception):
@@ -142,16 +146,43 @@ def _chat_completion(
     user_prompt: str,
     max_tokens: int,
     temperature: float,
+    max_retries: int = 5,
 ):
-    return client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            with API_SEMAPHORE:
+                return client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+        except RateLimitError as e:
+            last_err = e
+            if attempt == max_retries - 1:
+                LOGGER.error("api_rate_limit_exhausted", attempts=max_retries, error=str(e))
+                raise
+            
+            # Exponential backoff: 2, 4, 8, 16, 32 seconds
+            wait_time = 2 ** (attempt + 1)
+            LOGGER.warning(
+                "api_rate_limited",
+                attempt=attempt + 1,
+                wait_seconds=wait_time,
+                error=str(e)
+            )
+            time.sleep(wait_time)
+        except Exception as e:
+            # We don't retry on other errors here to avoid infinite loops on valid failures
+            raise e
+    
+    if last_err:
+        raise last_err
+
 
 
 def generate_summary(
@@ -586,6 +617,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Estimated USD cost per 1K completion tokens (for cost reporting).",
     )
+    common.add_argument(
+        "--concurrency",
+        type=int,
+        default=5,
+        help="Maximum concurrent API calls. Default: 5",
+    )
+
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -649,6 +687,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         configure_logging()
     except Exception:
         logging.basicConfig(level=logging.INFO)
+
+    # Initialize global semaphore with user-specified concurrency
+    global API_SEMAPHORE
+    API_SEMAPHORE = threading.Semaphore(args.concurrency)
 
     if getattr(args, "workers", 1) < 1:
         raise CLIError("--workers must be >= 1")
