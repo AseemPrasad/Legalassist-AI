@@ -43,15 +43,11 @@ jobs:
     
     - name: Run all tests
       run: |
-        pytest tests/ -v --tb=short \
-          tests/test_app.py \
-          tests/test_app_core.py \
-          tests/test_remedies.py \
-          tests/test_notifications.py
+        python -m pytest tests/ -v --tb=short
     
     - name: Generate coverage report
       run: |
-        pytest tests/ \
+        python -m pytest tests/ \
           --cov=core \
           --cov=database \
           --cov=notification_service \
