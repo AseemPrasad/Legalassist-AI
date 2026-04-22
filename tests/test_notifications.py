@@ -360,7 +360,8 @@ class TestScheduler:
         )
 
         # Mock the notification service to count calls
-        with patch("scheduler.notification_service") as mock_service:
+        with patch("scheduler.notification_service") as mock_service, \
+             patch("scheduler.SessionLocal", return_value=test_db):
             mock_service.send_reminders.return_value = []
             check_reminders_sync(target_days=30)
 

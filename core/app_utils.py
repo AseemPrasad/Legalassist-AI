@@ -9,6 +9,10 @@ import re
 import logging
 from openai import OpenAI
 from pypdf import PdfReader
+from langdetect import detect, DetectorFactory, detect_langs
+
+# For consistent language detection results
+DetectorFactory.seed = 0
 
 # ==================== MODEL CONFIGURATION ====================
 
@@ -87,11 +91,37 @@ def compress_text(text, limit=6000):
     return head + "\n\n... [TRUNCATED] ...\n\n" + tail
 
 
-def english_leakage_detected(output_text, threshold=5):
-    """Detect if English words have leaked into non-English output"""
-    common_english = [" the ", " and ", " of ", " to ", " in ", " is ", " that ", " it ", " for ", " on "]
-    text_lower = " " + output_text.lower() + " "
+def english_leakage_detected(output_text, threshold=8):
+    """
+    Detect if English words have leaked into non-English output.
+    Uses langdetect for primary detection and a refined word-list heuristic for fallback.
+    """
+    if not output_text or len(output_text.strip()) < 10:
+        return False
+
+    try:
+        # Get probabilities for all detected languages
+        langs = detect_langs(output_text)
+        # If English is detected with high confidence (> 0.5), it's likely leakage
+        for l in langs:
+            if l.lang == 'en' and l.prob > 0.8:
+                return True
+            # If the top language is English and it's much more likely than others
+            if l.lang == 'en' and langs[0].lang == 'en' and l.prob > 0.5:
+                return True
+    except Exception as e:
+        logging.debug(f"langdetect failed: {e}")
+
+    # Refined heuristic: Use a more comprehensive list and higher threshold
+    # Legal summaries often contain some English names or terms, so we need to be careful
+    common_english = [
+        " the ", " and ", " of ", " to ", " in ", " is ", " that ", " it ", " for ", " on ", 
+        " with ", " as ", " this ", " was ", " are ", " at ", " by ", " be ", " or ", " has "
+    ]
+    text_lower = " " + re.sub(r'[^\w\s]', ' ', output_text.lower()) + " "
     count = sum(1 for word in common_english if word in text_lower)
+    
+    # Increased threshold to 8 to avoid false positives on short legal snippets
     return count >= threshold
 
 

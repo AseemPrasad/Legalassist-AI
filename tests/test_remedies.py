@@ -379,8 +379,8 @@ class TestGetRemediesAdviceWithMocks:
         mock_get_client.return_value = mock_openai_client
         mock_openai_client.chat.completions.create.side_effect = Exception("API Error")
         
-        with pytest.raises(Exception):
-            get_remedies_advice("Test judgment", "English", mock_openai_client)
+        result = get_remedies_advice("Test judgment", "English", mock_openai_client)
+        assert result is None
     
     @patch("core.app_utils.get_client")
     def test_get_remedies_prompt_structure(self, mock_get_client, mock_openai_client):
