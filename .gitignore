@@ -30,3 +30,8 @@ htmlcov/
 requirements.txt
 requirements.in
 /.venv
+.streamlit/secrets.toml
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
