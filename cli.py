@@ -386,12 +386,6 @@ def load_checkpoint(checkpoint_file: Path) -> List[Dict[str, object]]:
     return records
 
 
-def append_checkpoint(checkpoint_file: Path, record: Dict[str, object]) -> None:
-    checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-    with checkpoint_file.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
 def dedupe_latest_by_file(records: List[Dict[str, object]]) -> List[Dict[str, object]]:
     latest: Dict[str, Dict[str, object]] = {}
     for rec in records:
@@ -542,19 +536,27 @@ def batch_command(args: argparse.Namespace) -> int:
             for pdf_path in to_process
         }
 
+        checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
         with Progress(
             SpinnerColumn(),
             TextColumn("{task.description}"),
             BarColumn(),
             TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
-        ) as progress:
+        ) as progress, checkpoint_file.open("a", encoding="utf-8") as cp_file:
             task_id = progress.add_task("Processing PDFs", total=len(futures))
             try:
                 for future in as_completed(futures):
                     record = future.result()
                     run_records.append(record)
-                    append_checkpoint(checkpoint_file, record)
+
+                    # Write to checkpoint immediately and sync to disk to prevent data loss
+                    cp_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    cp_file.flush()
+                    try:
+                        os.fsync(cp_file.fileno())
+                    except OSError:
+                        pass
 
                     tracker.add(
                         int(record.get("prompt_tokens", 0) or 0),
