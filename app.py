@@ -14,13 +14,12 @@ from core.app_utils import (
     compress_text,
     english_leakage_detected,
     build_summary_prompt,
-    build_retry_prompt,
     get_remedies_advice,
 )
 
 # ==================== SAFE IMPORT (IGNORE AUTH ERRORS) ====================
 try:
-    from database import init_db, SessionLocal, DocumentType
+    from database import init_db
     from scheduler import start_scheduler
 except:
     pass
@@ -86,7 +85,7 @@ def main():
                 raw_text = extract_text_from_pdf(uploaded_file)
                 safe_text = compress_text(raw_text)
 
-                # ==================== PROMPT (UPDATED) ====================
+                # ==================== PROMPT ====================
                 base_prompt = build_summary_prompt(safe_text, target_language)
 
                 prompt = f"""
@@ -104,21 +103,21 @@ IMPORTANT RULES:
                 model_id = get_default_model()
 
                 response = client.chat.completions.create(
-    model=model_id,
-    messages=[
-        {"role": "system", "content": "Legal simplification engine"},
-        {"role": "user", "content": prompt}
-    ],
-    max_tokens=300,
-    temperature=0.1,
-)
+                    model=model_id,
+                    messages=[
+                        {"role": "system", "content": "Legal simplification engine"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=300,
+                    temperature=0.1,
+                )
 
-summary = response.choices[0].message.content.strip()
+                summary = response.choices[0].message.content.strip()
 
-# ==================== RETRY IF ENGLISH ====================
-if language != "English" and english_leakage_detected(summary):
+                # ==================== RETRY IF ENGLISH ====================
+                if language != "English" and english_leakage_detected(summary):
 
-    retry_prompt = f"""
+                    retry_prompt = f"""
 The previous output contained English words.
 
 Rewrite the following STRICTLY in {target_language}:
@@ -130,17 +129,17 @@ TEXT:
 {summary}
 """
 
-    response2 = client.chat.completions.create(
-        model=model_id,
-        messages=[{"role": "user", "content": retry_prompt}],
-        max_tokens=300,
-        temperature=0.01,
-    )
+                    response2 = client.chat.completions.create(
+                        model=model_id,
+                        messages=[{"role": "user", "content": retry_prompt}],
+                        max_tokens=300,
+                        temperature=0.01,
+                    )
 
-    retry_summary = response2.choices[0].message.content.strip()
+                    retry_summary = response2.choices[0].message.content.strip()
 
-    if retry_summary and not english_leakage_detected(retry_summary):
-        summary = retry_summary
+                    if retry_summary and not english_leakage_detected(retry_summary):
+                        summary = retry_summary
 
                 # ==================== OUTPUT ====================
                 st.markdown("## ✅ Simplified Judgment")
@@ -164,6 +163,7 @@ TEXT:
 
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
+
 
 # ==================== RUN ====================
 if __name__ == "__main__":
