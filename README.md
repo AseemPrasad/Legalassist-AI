@@ -40,9 +40,58 @@ intermediaries for basic updates. The judiciary is stuck with manual records and
  
  Accessibility (Digital Divide Bridge): By instantly converting legal jargon into local language summaries, the solution bridges the Digital Divide and promotes inclusive justice for ordinary people who cannot navigate the courts due to language
 
+## 🌐 Supported Languages
+
+LegalEase AI now supports multiple Indian languages to improve accessibility across regions:
+
+| Language  | Region | Approx Speakers |
+|----------|--------|----------------|
+| English  | Global | — |
+| Hindi    | North India | 600M+ |
+| Bengali  | East India | 230M+ |
+| Urdu     | North India | 70M+ |
+| Marathi  | Maharashtra | 83M+ |
+| Tamil    | Tamil Nadu | 75M+ |
+| Telugu   | Andhra Pradesh, Telangana | 74M+ |
+| Kannada  | Karnataka | 45M+ |
+| Gujarati | Gujarat | 50M+ |
+| Punjabi  | Punjab | 125M+ |
+
+---
+
+### ✅ Multilingual Features
+
+- Generate summaries in **selected native language**
+- Strict **non-English enforcement** for regional languages
+- Automatic **English leakage detection & retry**
+- Works in both:
+  - Streamlit UI
+  - CLI batch processing
+
+---
+
+### 🧪 Testing Coverage
+
+Languages tested:
+- Hindi ✅  
+- Marathi ✅  
+- Tamil ✅  
+
+Test includes:
+- Language output validation  
+- English leakage detection  
+- Prompt correctness  
+
+Run tests:
+```bash
+pytest test_app.py
+```
+
 ## CLI Tool for Batch Processing
 
 LegalEase AI now supports command-line processing for legal aid teams handling many judgments each day.
+🚀 AI-powered multilingual legal judgment simplifier  
+⏱️ Understand court decisions in under 60 seconds
 
 ### Installation
 
