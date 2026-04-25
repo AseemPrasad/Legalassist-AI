@@ -3,7 +3,7 @@ CLI tool for managing deadlines and testing the notification system.
 Useful for bulk operations and testing without Streamlit.
 
 Usage:
-    python deadline_cli.py add-deadline --user-id user1 --case-id CASE-001 \\
+    python deadline_cli.py add-deadline --user-id user1 --case-id 1 \\
         --case-title "Property Dispute" --days 30 --type appeal
     
     python deadline_cli.py list-deadlines --user-id user1
@@ -105,12 +105,12 @@ def setup_preferences(user_id: str, email: str, phone: Optional[str], timezone: 
 
 @cli.command()
 @click.option("--user-id", required=True, help="User ID")
-@click.option("--case-id", required=True, help="Case ID")
+@click.option("--case-id", required=True, type=int, help="Numeric case ID (cases.id)")
 @click.option("--case-title", required=True, help="Case title")
 @click.option("--days", type=int, default=30, help="Days until deadline (default 30)")
 @click.option("--type", type=click.Choice(["appeal", "filing", "submission", "response", "hearing", "other"]), default="appeal")
 @click.option("--description", help="Additional notes")
-def add_deadline(user_id: str, case_id: str, case_title: str, days: int, type: str, description: Optional[str]):
+def add_deadline(user_id: str, case_id: int, case_title: str, days: int, type: str, description: Optional[str]):
     """Add a new case deadline"""
     db = SessionLocal()
     try:
@@ -247,7 +247,7 @@ def test_sms(user_id: str, case_title: str, days_left: int):
         # Create a test deadline
         deadline = CaseDeadline(
             user_id=user_id,
-            case_id="TEST-001",
+            case_id=1,
             case_title=case_title,
             deadline_date=datetime.now(timezone.utc) + timedelta(days=days_left),
             deadline_type="test",
@@ -289,7 +289,7 @@ def test_email(user_id: str, case_title: str, days_left: int):
         # Create a test deadline
         deadline = CaseDeadline(
             user_id=user_id,
-            case_id="TEST-001",
+            case_id=1,
             case_title=case_title,
             deadline_date=datetime.now(timezone.utc) + timedelta(days=days_left),
             deadline_type="test",

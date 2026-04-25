@@ -60,7 +60,7 @@ class TestDatabaseModels:
         deadline = create_case_deadline(
             db=test_db,
             user_id="user123",
-            case_id="CASE-001",
+            case_id=1,
             case_title="Property Dispute",
             deadline_date=deadline_date,
             deadline_type="appeal",
@@ -68,7 +68,7 @@ class TestDatabaseModels:
         )
 
         assert deadline.user_id == "user123"
-        assert deadline.case_id == "CASE-001"
+        assert deadline.case_id == 1
         assert deadline.case_title == "Property Dispute"
         assert deadline.is_completed == False
         assert deadline.days_until_deadline() >= 29  # Approximately 30 days
@@ -119,15 +119,15 @@ class TestDatabaseModels:
         
         # Create deadlines at different time points
         create_case_deadline(
-            test_db, "user1", "CASE-001", "Case 1",
+            test_db, "user1", 1, "Case 1",
             now + timedelta(days=5), "appeal"
         )
         create_case_deadline(
-            test_db, "user1", "CASE-002", "Case 2",
+            test_db, "user1", 2, "Case 2",
             now + timedelta(days=15), "filing"
         )
         create_case_deadline(
-            test_db, "user1", "CASE-003", "Case 3",
+            test_db, "user1", 3, "Case 3",
             now + timedelta(days=40), "submission"
         )
 
@@ -138,7 +138,7 @@ class TestDatabaseModels:
     def test_notification_logging(self, test_db):
         """Test logging notification attempts"""
         deadline = create_case_deadline(
-            test_db, "user123", "CASE-001", "Case",
+            test_db, "user123", 1, "Case",
             datetime.now(timezone.utc) + timedelta(days=30), "appeal",
         )
 
@@ -161,7 +161,7 @@ class TestDatabaseModels:
     def test_prevent_duplicate_notifications(self, test_db):
         """Test that duplicate notifications are not sent"""
         deadline = create_case_deadline(
-            test_db, "user123", "CASE-001", "Case",
+            test_db, "user123", 1, "Case",
             datetime.now(timezone.utc) + timedelta(days=30), "appeal",
         )
 
@@ -179,11 +179,11 @@ class TestDatabaseModels:
         now = datetime.now(timezone.utc)
         
         create_case_deadline(
-            test_db, "user1", "CASE-001", "Case 1",
+            test_db, "user1", 1, "Case 1",
             now + timedelta(days=50), "appeal"
         )
         create_case_deadline(
-            test_db, "user1", "CASE-002", "Case 2",
+            test_db, "user1", 2, "Case 2",
             now + timedelta(days=10), "filing"
         )
 
@@ -235,7 +235,7 @@ class TestNotificationService:
 
         # Create test data
         deadline = create_case_deadline(
-            test_db, "user123", "CASE-001", "Test Case",
+            test_db, "user123", 1, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=30), "appeal",
         )
         pref = create_or_update_user_preference(
@@ -259,7 +259,7 @@ class TestNotificationService:
     def test_sms_send_missing_phone(self, test_db):
         """Test SMS fails gracefully when no phone number"""
         deadline = create_case_deadline(
-            test_db, "user123", "CASE-001", "Test Case",
+            test_db, "user123", 1, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=30), "appeal",
         )
         pref = create_or_update_user_preference(
@@ -283,7 +283,7 @@ class TestNotificationService:
         mock_sendgrid.return_value.send.return_value = mock_response
 
         deadline = create_case_deadline(
-            test_db, "user123", "CASE-001", "Test Case",
+            test_db, "user123", 1, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=10), "appeal",
         )
         pref = create_or_update_user_preference(
@@ -303,7 +303,7 @@ class TestNotificationService:
     def test_mock_mode_sms(self, test_db):
         """Test SMS in mock mode (no credentials)"""
         deadline = create_case_deadline(
-            test_db, "user123", "CASE-001", "Test Case",
+            test_db, "user123", 1, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=30), "appeal",
         )
         pref = create_or_update_user_preference(
@@ -323,7 +323,7 @@ class TestNotificationService:
     def test_mock_mode_email(self, test_db):
         """Test email in mock mode (no API key)"""
         deadline = create_case_deadline(
-            test_db, "user123", "CASE-001", "Test Case",
+            test_db, "user123", 1, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=10), "appeal",
         )
         pref = create_or_update_user_preference(
@@ -349,7 +349,7 @@ class TestScheduler:
         
         # Create deadline at exactly 30 days
         create_case_deadline(
-            test_db, "user1", "CASE-001", "Case 1",
+            test_db, "user1", 1, "Case 1",
             now + timedelta(days=30), "appeal",
         )
         
@@ -370,7 +370,7 @@ class TestScheduler:
         now = datetime.now(timezone.utc)
         
         deadline = create_case_deadline(
-            test_db, "user1", "CASE-001", "Case 1",
+            test_db, "user1", 1, "Case 1",
             now + timedelta(days=30), "appeal",
         )
         
@@ -397,7 +397,7 @@ class TestIntegration:
         # 1. Create deadline
         deadline_date = datetime.now(timezone.utc) + timedelta(days=30)
         deadline = create_case_deadline(
-            test_db, "user1", "CASE-001", "Appeal Filing",
+            test_db, "user1", 1, "Appeal Filing",
             deadline_date, "appeal", "Need to submit appeal"
         )
 
@@ -449,7 +449,7 @@ class TestIntegration:
         """Test that all reminder thresholds work for same deadline"""
         now = datetime.now(timezone.utc)
         deadline = create_case_deadline(
-            test_db, "user1", "CASE-001", "Case",
+            test_db, "user1", 1, "Case",
             now + timedelta(days=30), "appeal",
         )
         pref = create_or_update_user_preference(

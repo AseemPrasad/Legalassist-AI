@@ -398,16 +398,21 @@ def create_or_update_user_preference(
 def create_case_deadline(
     db: Session,
     user_id: str,
-    case_id: str,
+    case_id: int,
     case_title: str,
     deadline_date: dt.datetime,
     deadline_type: str,
     description: Optional[str] = None,
 ) -> CaseDeadline:
     """Create a new case deadline"""
+    try:
+        normalized_case_id = int(case_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("case_id must be an integer matching cases.id") from exc
+
     deadline = CaseDeadline(
         user_id=user_id,
-        case_id=case_id,
+        case_id=normalized_case_id,
         case_title=case_title,
         deadline_date=deadline_date,
         deadline_type=deadline_type,

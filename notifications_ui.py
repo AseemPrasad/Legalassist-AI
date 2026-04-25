@@ -217,7 +217,7 @@ def page_manage_deadlines():
             col1, col2 = st.columns(2)
 
             with col1:
-                case_id = st.text_input("Case ID", placeholder="e.g., CASE-2024-001")
+                case_id = st.number_input("Case ID", min_value=1, step=1, value=1)
                 case_title = st.text_input("Case Title", placeholder="e.g., Property Dispute")
 
             with col2:
@@ -240,8 +240,8 @@ def page_manage_deadlines():
             submitted = st.form_submit_button("📌 Add Deadline", use_container_width=True)
 
             if submitted:
-                if not case_id or not case_title:
-                    st.error("❌ Case ID and Case Title are required")
+                if not case_title:
+                    st.error("❌ Case Title is required")
                 else:
                     try:
                         # Convert date to datetime
@@ -252,7 +252,7 @@ def page_manage_deadlines():
                         create_case_deadline(
                             db=db,
                             user_id=user_id,
-                            case_id=case_id,
+                            case_id=int(case_id),
                             case_title=case_title,
                             deadline_date=deadline_datetime,
                             deadline_type=deadline_type.lower(),
