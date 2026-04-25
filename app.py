@@ -4,6 +4,8 @@ from pypdf import PdfReader
 import logging
 import os
 import re
+import json
+from pathlib import Path
 
 # ==================== Import Utilities from core.app_utils ====================
 from core.app_utils import (
@@ -54,6 +56,86 @@ st.set_page_config(
 )
 
 # Using default Streamlit theme
+
+LEGAL_AID_DIRECTORY_PATH = Path(__file__).parent / "legal_aid_directory.json"
+
+
+@st.cache_data(show_spinner=False)
+def load_legal_aid_directory():
+    """Load state-wise legal aid directory from JSON data file."""
+    if not LEGAL_AID_DIRECTORY_PATH.exists():
+        logging.error("legal_aid_directory.json not found")
+        return {}
+
+    try:
+        with LEGAL_AID_DIRECTORY_PATH.open("r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+        return payload.get("states", {})
+    except Exception as e:
+        logging.error(f"Failed to load legal aid directory: {str(e)}")
+        return {}
+
+
+def render_localized_legal_help():
+    """Render state-specific legal help resources."""
+    st.markdown("## 📞 Free Legal Help")
+
+    directory = load_legal_aid_directory()
+    if not directory:
+        st.warning("Localized legal help data is unavailable right now.")
+        return
+
+    state_names = sorted(directory.keys())
+    selected_state = st.selectbox(
+        "Select your state/UT",
+        options=state_names,
+        key="legal_help_state_selector",
+    )
+
+    state_data = directory.get(selected_state, {})
+    authority = state_data.get("legal_aid_authority", {})
+    colleges = state_data.get("law_colleges", [])
+    ngos = state_data.get("ngos", [])
+    bar_association = state_data.get("bar_association", {})
+    avg_cost = state_data.get("avg_cost", "Not available")
+
+    st.success(f"Showing legal help resources for {selected_state}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### State Legal Aid Authority")
+        st.write(f"**Name:** {authority.get('name', 'N/A')}")
+        st.write(f"**Phone:** {authority.get('phone', 'N/A')}")
+        st.write(f"**Website:** {authority.get('website', 'N/A')}")
+
+        st.markdown("### State Bar Association")
+        st.write(f"**Name:** {bar_association.get('name', 'N/A')}")
+        st.write(f"**Phone:** {bar_association.get('phone', 'N/A')}")
+        st.write(f"**Website:** {bar_association.get('website', 'N/A')}")
+
+        st.markdown("### Average Appeal Cost")
+        st.info(avg_cost)
+
+    with col2:
+        st.markdown("### Law Colleges with Legal Clinics")
+        if colleges:
+            for college in colleges:
+                clinic_status = "Yes" if college.get("clinic_available") else "No"
+                st.write(
+                    f"- **{college.get('name', 'N/A')}** ({college.get('city', 'N/A')}) | Clinic: {clinic_status}"
+                )
+        else:
+            st.write("No college records available.")
+
+        st.markdown("### NGOs")
+        if ngos:
+            for ngo in ngos:
+                st.write(
+                    f"- **{ngo.get('name', 'N/A')}** | {ngo.get('specialty', 'General legal aid')} | "
+                    f"{ngo.get('phone', 'N/A')} | {ngo.get('website', 'N/A')}"
+                )
+        else:
+            st.write("No NGO records available.")
 
 # ==================== Main UI Component ====================
 def main():
@@ -323,33 +405,7 @@ def main():
                     
                     # ===== FREE LEGAL HELP SECTION =====
                     st.markdown("---")
-                    st.markdown("## 📞 Free Legal Help")
-                    
-                    help_options = """
-                    **You don't have to handle this alone. Here are free resources:**
-                    
-                    🔗 **National Legal Services (Free Lawyer)**
-                    - Phone: 1800-180-8111
-                    - Website: nalsa.gov.in
-                    - For: Everyone (especially poor citizens)
-                    
-                    🔗 **Bar Council of India (Find Verified Lawyers)**
-                    - Website: bci.org.in
-                    - For: Finding qualified lawyers in your area
-                    
-                    🔗 **Legal Clinics (Law Colleges)**
-                    - Most law colleges offer free consultation
-                    - Search: "[Your City] law college legal clinic"
-                    
-                    🔗 **NGOs for Specific Cases**
-                    - Family cases: National Commission for Women (1800-123-4344)
-                    - Criminal cases: Criminal Law Clinic (project39a.com)
-                    - Tenant rights: Housing rights organizations
-                    
-                    **Tip:** Start with National Legal Services. They are free and available.
-                    """
-                    
-                    st.info(help_options)
+                    render_localized_legal_help()
 
             except Exception as e:
                 err = str(e)

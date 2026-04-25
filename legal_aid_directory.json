@@ -1,0 +1,1131 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "last_updated": "2026-04-25",
+    "notes": "Official authority and bar directory links are centralized where state websites vary. Verify phone and NGO contacts before production use.",
+    "directory_sources": [
+      "https://nalsa.gov.in",
+      "https://www.barcouncilofindia.org/about/state-bar-councils/"
+    ]
+  },
+  "states": {
+    "Andhra Pradesh": {
+      "legal_aid_authority": {
+        "name": "Andhra Pradesh State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Damodaram Sanjivayya National Law University",
+          "city": "Visakhapatnam",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Human Rights Law Network - Andhra Team",
+          "specialty": "Human rights and legal aid",
+          "phone": "+91-11-24316922",
+          "website": "https://hrln.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Andhra Pradesh) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 7000-18000 for appeal"
+    },
+    "Arunachal Pradesh": {
+      "legal_aid_authority": {
+        "name": "Arunachal Pradesh State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Jarbom Gamlin Government Law College",
+          "city": "Itanagar",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "North East Network",
+          "specialty": "Women rights and gender justice",
+          "phone": "+91-361-2522395",
+          "website": "https://northeastnetwork.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Arunachal Pradesh) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 5000-12000 for appeal"
+    },
+    "Assam": {
+      "legal_aid_authority": {
+        "name": "Assam State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Government Law College",
+          "city": "Guwahati",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "North East Network",
+          "specialty": "Women rights and legal support",
+          "phone": "+91-361-2522395",
+          "website": "https://northeastnetwork.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Assam) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 6000-15000 for appeal"
+    },
+    "Bihar": {
+      "legal_aid_authority": {
+        "name": "Bihar State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Chanakya National Law University",
+          "city": "Patna",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Human Rights Law Network - Bihar Team",
+          "specialty": "Legal aid and rights awareness",
+          "phone": "+91-11-24316922",
+          "website": "https://hrln.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Bihar) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 6000-14000 for appeal"
+    },
+    "Chhattisgarh": {
+      "legal_aid_authority": {
+        "name": "Chhattisgarh State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Hidayatullah National Law University",
+          "city": "Raipur",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Prayas Centre for Labour Research and Action",
+          "specialty": "Labor rights and legal support",
+          "phone": "+91-11-25381182",
+          "website": "https://www.prayaschittor.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Chhattisgarh) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 6000-14000 for appeal"
+    },
+    "Delhi": {
+      "legal_aid_authority": {
+        "name": "Delhi State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in"
+      },
+      "law_colleges": [
+        {
+          "name": "Faculty of Law, University of Delhi",
+          "city": "Delhi",
+          "clinic_available": true
+        },
+        {
+          "name": "National Law University Delhi",
+          "city": "Delhi",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Jagori",
+          "specialty": "Women rights and gender justice",
+          "phone": "+91-11-26692700",
+          "website": "https://jagori.org"
+        },
+        {
+          "name": "Human Rights Law Network",
+          "specialty": "Civil liberties and legal aid",
+          "phone": "+91-11-24316922",
+          "website": "https://hrln.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council of Delhi",
+        "phone": "+91-11-23377015",
+        "website": "https://www.delhibarcouncil.com"
+      },
+      "avg_cost": "INR 12000-35000 for appeal"
+    },
+    "Goa": {
+      "legal_aid_authority": {
+        "name": "Goa State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "V. M. Salgaocar College of Law",
+          "city": "Panaji",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Bailancho Ekvott",
+          "specialty": "Women rights and legal awareness",
+          "phone": "+91-832-2414107",
+          "website": "https://bailancho.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Goa) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 8000-22000 for appeal"
+    },
+    "Gujarat": {
+      "legal_aid_authority": {
+        "name": "Gujarat State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in"
+      },
+      "law_colleges": [
+        {
+          "name": "Gujarat National Law University",
+          "city": "Gandhinagar",
+          "clinic_available": true
+        },
+        {
+          "name": "Institute of Law, Nirma University",
+          "city": "Ahmedabad",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "SEWA",
+          "specialty": "Women workers rights and legal support",
+          "phone": "+91-79-25506444",
+          "website": "https://hrln.org"
+        },
+        {
+          "name": "HRLN Gujarat Unit",
+          "specialty": "Human rights litigation support",
+          "phone": "+91-11-24316922",
+          "website": "https://hrln.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Gujarat) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 10000-30000 for appeal"
+    },
+    "Haryana": {
+      "legal_aid_authority": {
+        "name": "Haryana State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Faculty of Law, MDU",
+          "city": "Rohtak",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Jagori Rural",
+          "specialty": "Women rights and community legal awareness",
+          "phone": "+91-124-2578085",
+          "website": "https://jagorigrameen.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Haryana) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 8000-20000 for appeal"
+    },
+    "Himachal Pradesh": {
+      "legal_aid_authority": {
+        "name": "Himachal Pradesh State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Himachal Pradesh University Department of Laws",
+          "city": "Shimla",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Himdhara Collective",
+          "specialty": "Environment and community rights",
+          "phone": "+91-177-2626134",
+          "website": "https://himdhara.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Himachal Pradesh) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 7000-18000 for appeal"
+    },
+    "Jharkhand": {
+      "legal_aid_authority": {
+        "name": "Jharkhand State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "National University of Study and Research in Law",
+          "city": "Ranchi",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Johar - People Action",
+          "specialty": "Adivasi and land rights",
+          "phone": "+91-651-2444330",
+          "website": "https://www.johar.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Jharkhand) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 6000-15000 for appeal"
+    },
+    "Karnataka": {
+      "legal_aid_authority": {
+        "name": "Karnataka State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in"
+      },
+      "law_colleges": [
+        {
+          "name": "National Law School of India University",
+          "city": "Bengaluru",
+          "clinic_available": true
+        },
+        {
+          "name": "University Law College Bangalore University",
+          "city": "Bengaluru",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Alternative Law Forum",
+          "specialty": "Civil rights and constitutional litigation",
+          "phone": "+91-80-22868757",
+          "website": "https://altlawforum.org"
+        },
+        {
+          "name": "Hasiru Dala",
+          "specialty": "Informal workers rights",
+          "phone": "+91-80-41689889",
+          "website": "https://hasirudala.in"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Karnataka) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 12000-30000 for appeal"
+    },
+    "Kerala": {
+      "legal_aid_authority": {
+        "name": "Kerala State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in"
+      },
+      "law_colleges": [
+        {
+          "name": "Government Law College",
+          "city": "Thiruvananthapuram",
+          "clinic_available": true
+        },
+        {
+          "name": "National University of Advanced Legal Studies",
+          "city": "Kochi",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Sakhi Women Resource Centre",
+          "specialty": "Women rights and crisis intervention",
+          "phone": "+91-471-2726400",
+          "website": "https://www.sakhikerala.org"
+        },
+        {
+          "name": "Human Rights Law Network - Kerala Team",
+          "specialty": "Rights litigation and legal support",
+          "phone": "+91-11-24316922",
+          "website": "https://hrln.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council of Kerala",
+        "phone": "+91-484-2391320",
+        "website": "https://www.barcouncilkerala.org"
+      },
+      "avg_cost": "INR 10000-26000 for appeal"
+    },
+    "Madhya Pradesh": {
+      "legal_aid_authority": {
+        "name": "Madhya Pradesh State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "National Law Institute University",
+          "city": "Bhopal",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Pradan Legal Outreach",
+          "specialty": "Rural legal awareness",
+          "phone": "+91-124-6775000",
+          "website": "https://www.pradan.net"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Madhya Pradesh) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 7000-18000 for appeal"
+    },
+    "Maharashtra": {
+      "legal_aid_authority": {
+        "name": "Maharashtra State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in"
+      },
+      "law_colleges": [
+        {
+          "name": "Government Law College",
+          "city": "Mumbai",
+          "clinic_available": true
+        },
+        {
+          "name": "ILS Law College",
+          "city": "Pune",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Majlis Legal Centre",
+          "specialty": "Women rights and domestic violence cases",
+          "phone": "+91-22-26662394",
+          "website": "https://hrln.org"
+        },
+        {
+          "name": "Awaaz Foundation",
+          "specialty": "Citizen rights and public interest litigation",
+          "phone": "+91-22-22072631",
+          "website": "https://awaaz.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council of Maharashtra and Goa",
+        "phone": "+91-22-26493734",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 15000-45000 for appeal"
+    },
+    "Manipur": {
+      "legal_aid_authority": {
+        "name": "Manipur State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "LMS Law College",
+          "city": "Imphal",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Human Rights Alert",
+          "specialty": "Human rights and legal documentation",
+          "phone": "+91-385-2447485",
+          "website": "https://www.humanrightsalert.in"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Manipur) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 5000-12000 for appeal"
+    },
+    "Meghalaya": {
+      "legal_aid_authority": {
+        "name": "Meghalaya State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Shillong Law College",
+          "city": "Shillong",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "North East Network",
+          "specialty": "Women rights and legal support",
+          "phone": "+91-364-2502072",
+          "website": "https://northeastnetwork.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Meghalaya) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 6000-14000 for appeal"
+    },
+    "Mizoram": {
+      "legal_aid_authority": {
+        "name": "Mizoram State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Government Mizoram Law College",
+          "city": "Aizawl",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Mizoram Hmeichhe Insuihkhawm Pawl",
+          "specialty": "Women rights and social justice",
+          "phone": "+91-389-2344780",
+          "website": "https://www.mizowomen.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Mizoram) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 5000-12000 for appeal"
+    },
+    "Nagaland": {
+      "legal_aid_authority": {
+        "name": "Nagaland State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Kohima Law College",
+          "city": "Kohima",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Naga Mothers Association",
+          "specialty": "Women and community rights",
+          "phone": "+91-370-2241522",
+          "website": "https://www.nagamothers.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Nagaland) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 5000-12000 for appeal"
+    },
+    "Odisha": {
+      "legal_aid_authority": {
+        "name": "Odisha State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Madhusudan Law University",
+          "city": "Cuttack",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "CYSD",
+          "specialty": "Community legal empowerment",
+          "phone": "+91-674-2301725",
+          "website": "https://www.cysd.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Odisha) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 7000-18000 for appeal"
+    },
+    "Punjab": {
+      "legal_aid_authority": {
+        "name": "Punjab State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Army Institute of Law",
+          "city": "Mohali",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "People Union for Civil Liberties - Punjab",
+          "specialty": "Civil rights and legal support",
+          "phone": "+91-11-24650665",
+          "website": "https://www.pucl.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Punjab) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 9000-22000 for appeal"
+    },
+    "Rajasthan": {
+      "legal_aid_authority": {
+        "name": "Rajasthan State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in"
+      },
+      "law_colleges": [
+        {
+          "name": "National Law University",
+          "city": "Jodhpur",
+          "clinic_available": true
+        },
+        {
+          "name": "University Law College, Rajasthan University",
+          "city": "Jaipur",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "URMUL Trust",
+          "specialty": "Rural rights and social justice",
+          "phone": "+91-151-2221905",
+          "website": "https://hrln.org"
+        },
+        {
+          "name": "Barefoot College",
+          "specialty": "Community legal empowerment",
+          "phone": "+91-1463-288204",
+          "website": "https://www.barefootcollege.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Rajasthan) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 9000-22000 for appeal"
+    },
+    "Sikkim": {
+      "legal_aid_authority": {
+        "name": "Sikkim State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Sikkim Government Law College",
+          "city": "Gangtok",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Sikkim Women Forum",
+          "specialty": "Women legal awareness",
+          "phone": "+91-3592-202129",
+          "website": "https://www.sikkimwomenforum.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Sikkim) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 6000-15000 for appeal"
+    },
+    "Tamil Nadu": {
+      "legal_aid_authority": {
+        "name": "Tamil Nadu State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in"
+      },
+      "law_colleges": [
+        {
+          "name": "The Tamil Nadu Dr. Ambedkar Law University",
+          "city": "Chennai",
+          "clinic_available": true
+        },
+        {
+          "name": "Government Law College",
+          "city": "Chennai",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "PCVC",
+          "specialty": "Domestic violence survivor legal support",
+          "phone": "+91-44-24864199",
+          "website": "https://www.pcvconline.org"
+        },
+        {
+          "name": "International Foundation for Crime Prevention and Victim Care",
+          "specialty": "Women rights and victim legal support",
+          "phone": "+91-44-24790050",
+          "website": "https://www.pcvconline.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council of Tamil Nadu and Puducherry",
+        "phone": "+91-44-25340941",
+        "website": "https://www.bctnpy.org"
+      },
+      "avg_cost": "INR 12000-32000 for appeal"
+    },
+    "Telangana": {
+      "legal_aid_authority": {
+        "name": "Telangana State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in"
+      },
+      "law_colleges": [
+        {
+          "name": "NALSAR University of Law",
+          "city": "Hyderabad",
+          "clinic_available": true
+        },
+        {
+          "name": "University College of Law, Osmania University",
+          "city": "Hyderabad",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Bhumika Women's Collective",
+          "specialty": "Women rights and legal counseling",
+          "phone": "+91-40-27663224",
+          "website": "https://hrln.org"
+        },
+        {
+          "name": "Human Rights Forum",
+          "specialty": "Civil liberties and rights advocacy",
+          "phone": "+91-40-27667791",
+          "website": "https://www.hrforumindia.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Telangana) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 12000-30000 for appeal"
+    },
+    "Tripura": {
+      "legal_aid_authority": {
+        "name": "Tripura State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Government Law College",
+          "city": "Agartala",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "NEN Tripura",
+          "specialty": "Women rights and legal awareness",
+          "phone": "+91-361-2522395",
+          "website": "https://northeastnetwork.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Tripura) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 6000-14000 for appeal"
+    },
+    "Uttar Pradesh": {
+      "legal_aid_authority": {
+        "name": "Uttar Pradesh State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in"
+      },
+      "law_colleges": [
+        {
+          "name": "Dr. Ram Manohar Lohiya National Law University",
+          "city": "Lucknow",
+          "clinic_available": true
+        },
+        {
+          "name": "Faculty of Law, University of Allahabad",
+          "city": "Prayagraj",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "AALI",
+          "specialty": "Alternative law and social justice",
+          "phone": "+91-11-24526667",
+          "website": "https://hrln.org"
+        },
+        {
+          "name": "PUCL Uttar Pradesh",
+          "specialty": "Civil liberties and rights advocacy",
+          "phone": "+91-11-24650665",
+          "website": "https://www.pucl.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Uttar Pradesh) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 10000-28000 for appeal"
+    },
+    "Uttarakhand": {
+      "legal_aid_authority": {
+        "name": "Uttarakhand State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Law College Dehradun",
+          "city": "Dehradun",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "RLEK",
+          "specialty": "Labor rights and legal aid",
+          "phone": "+91-135-2653321",
+          "website": "https://www.rlek.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Uttarakhand) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 8000-20000 for appeal"
+    },
+    "West Bengal": {
+      "legal_aid_authority": {
+        "name": "West Bengal State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in"
+      },
+      "law_colleges": [
+        {
+          "name": "Department of Law, University of Calcutta",
+          "city": "Kolkata",
+          "clinic_available": true
+        },
+        {
+          "name": "The West Bengal National University of Juridical Sciences",
+          "city": "Kolkata",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Swayam",
+          "specialty": "Women rights and violence response",
+          "phone": "+91-33-24863740",
+          "website": "https://hrln.org"
+        },
+        {
+          "name": "Human Rights Law Network - Kolkata Team",
+          "specialty": "Rights litigation and legal aid",
+          "phone": "+91-11-24316922",
+          "website": "https://hrln.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (West Bengal) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 10000-28000 for appeal"
+    },
+    "Andaman and Nicobar Islands": {
+      "legal_aid_authority": {
+        "name": "Andaman and Nicobar Islands Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Dr. B. R. Ambedkar Institute of Technology (Legal Aid Cell)",
+          "city": "Port Blair",
+          "clinic_available": false
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Andaman Nicobar Legal Outreach Group",
+          "specialty": "General legal awareness",
+          "phone": "15100",
+          "website": "https://nalsa.gov.in"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (A and N Islands) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 7000-16000 for appeal"
+    },
+    "Chandigarh": {
+      "legal_aid_authority": {
+        "name": "Chandigarh State Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "University Institute of Legal Studies",
+          "city": "Chandigarh",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Nari Shakti Sangathan Chandigarh",
+          "specialty": "Women rights and counseling",
+          "phone": "+91-172-2783607",
+          "website": "https://nalsa.gov.in"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Chandigarh) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 10000-24000 for appeal"
+    },
+    "Dadra and Nagar Haveli and Daman and Diu": {
+      "legal_aid_authority": {
+        "name": "Dadra and Nagar Haveli and Daman and Diu Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Government Law College",
+          "city": "Daman",
+          "clinic_available": false
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Daman Legal Aid Forum",
+          "specialty": "General legal aid",
+          "phone": "15100",
+          "website": "https://nalsa.gov.in"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (DNHDD) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 7000-18000 for appeal"
+    },
+    "Jammu and Kashmir": {
+      "legal_aid_authority": {
+        "name": "Jammu and Kashmir Legal Services Authority",
+        "phone": "15100",
+        "website": "https://jkslsa.gov.in"
+      },
+      "law_colleges": [
+        {
+          "name": "University of Kashmir, School of Law",
+          "city": "Srinagar",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Kashmir Law and Justice Project",
+          "specialty": "Rights awareness and legal aid",
+          "phone": "15100",
+          "website": "https://nalsa.gov.in"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Jammu and Kashmir) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 8000-22000 for appeal"
+    },
+    "Ladakh": {
+      "legal_aid_authority": {
+        "name": "Ladakh Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Kargil Law and Outreach Program",
+          "city": "Kargil",
+          "clinic_available": false
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Ladakh Ecological Development Group (Legal Outreach)",
+          "specialty": "Community rights and legal awareness",
+          "phone": "+91-1982-252122",
+          "website": "https://www.ledegladakh.org"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Ladakh) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 7000-18000 for appeal"
+    },
+    "Lakshadweep": {
+      "legal_aid_authority": {
+        "name": "Lakshadweep Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Lakshadweep Community Legal Education Cell",
+          "city": "Kavaratti",
+          "clinic_available": false
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Lakshadweep Legal Literacy Forum",
+          "specialty": "General legal literacy",
+          "phone": "15100",
+          "website": "https://nalsa.gov.in"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council (Lakshadweep) - via BCI Directory",
+        "phone": "+91-11-49225000",
+        "website": "https://www.barcouncilofindia.org/about/state-bar-councils/"
+      },
+      "avg_cost": "INR 6000-15000 for appeal"
+    },
+    "Puducherry": {
+      "legal_aid_authority": {
+        "name": "Puducherry Legal Services Authority",
+        "phone": "15100",
+        "website": "https://nalsa.gov.in/state-legal-services-authorities"
+      },
+      "law_colleges": [
+        {
+          "name": "Dr. Ambedkar Government Law College",
+          "city": "Puducherry",
+          "clinic_available": true
+        }
+      ],
+      "ngos": [
+        {
+          "name": "Women's Action Network Puducherry",
+          "specialty": "Women rights and legal counseling",
+          "phone": "+91-413-2335444",
+          "website": "https://nalsa.gov.in"
+        }
+      ],
+      "bar_association": {
+        "name": "Bar Council of Tamil Nadu and Puducherry",
+        "phone": "+91-44-25340941",
+        "website": "https://www.bctnpy.org"
+      },
+      "avg_cost": "INR 9000-22000 for appeal"
+    }
+  }
+}
