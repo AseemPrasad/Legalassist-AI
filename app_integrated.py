@@ -94,6 +94,19 @@ def main():
         - 🌐 nalsa.gov.in
         """
     )
+
+    if all_features_available:
+        page_options = [
+            "Judgment Analysis",
+            "Case Deadlines",
+            "Notification History",
+            "Preferences",
+        ]
+    else:
+        page_options = ["Judgment Analysis"]
+        st.sidebar.warning("Some modules failed to load. Showing Judgment Analysis only.")
+
+    page = st.sidebar.radio("Navigate", page_options)
     
     # Route to appropriate page
     if page == "Judgment Analysis":
