@@ -367,7 +367,7 @@ class AppealProbabilityEstimator:
                     numbers = re.findall(r'\d+', cost_str)
                     if numbers:
                         costs.append(int(numbers[0]))
-                except:
+                except Exception:
                     pass
             
             if case.outcome_data.time_to_appeal_verdict:

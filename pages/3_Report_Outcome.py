@@ -267,5 +267,5 @@ try:
         st.write(f"📤 Appeal feedback received from multiple users")
     else:
         st.info("Be the first to share your case outcome!")
-except:
+except Exception:
     st.info("Feedback statistics will appear here soon.")
