@@ -15,6 +15,7 @@ from .app_utils import (
     LANGUAGES,
     RETRO_STYLING,
     LEGAL_HELP_RESOURCES,
+    validate_pdf_metadata,
 )
 
 __all__ = [
@@ -33,4 +34,5 @@ __all__ = [
     'LANGUAGES',
     'RETRO_STYLING',
     'LEGAL_HELP_RESOURCES',
+    'validate_pdf_metadata',
 ]

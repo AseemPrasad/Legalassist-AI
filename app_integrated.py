@@ -59,10 +59,10 @@ try:
         page_notification_history,
     )
     # Import original app components
-    from app import (
         get_client,
         get_remedies_advice,
         get_default_model,
+        validate_pdf_metadata,
     )
     import core
     client = None
@@ -151,9 +151,18 @@ def show_judgment_analysis():
     language = st.selectbox("🌐 Select your language", 
                           ["English", "Hindi", "Bengali", "Urdu"])
     uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
+    
+    # PDF Validation for size and page count
+    is_valid_pdf, validation_msg, validation_level = validate_pdf_metadata(uploaded_file)
+    if validation_msg:
+        if validation_level == "error":
+            st.error(validation_msg)
+        else:
+            st.warning(validation_msg)
+
     st.markdown("---")
 
-    if uploaded_file and st.button("🚀 Generate Summary", use_container_width=True):
+    if uploaded_file and is_valid_pdf and st.button("🚀 Generate Summary", use_container_width=True):
         from app import get_client
         client = get_client()
         with st.spinner("Processing judgment…"):

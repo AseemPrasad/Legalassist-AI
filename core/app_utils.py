@@ -82,6 +82,32 @@ def extract_text_from_pdf(uploaded_pdf):
     return text
 
 
+def validate_pdf_metadata(uploaded_file):
+    """
+    Check PDF size and page count to warn user if it's too large.
+    Returns (is_valid, message, level) where level is 'warning' or 'error'.
+    """
+    if not uploaded_file:
+        return True, None, None
+    
+    # Size check (25MB)
+    if uploaded_file.size > 25 * 1024 * 1024:
+        return True, "⚠️ This file is quite large. Processing may take longer than usual.", "warning"
+        
+    try:
+        reader = PdfReader(uploaded_file)
+        num_pages = len(reader.pages)
+        if num_pages > 1000:
+            return False, "🛑 Extremely large PDF (1000+ pages) detected. Character limits will be exceeded, leading to a very poor summary. Please upload a shorter excerpt.", "error"
+        if num_pages > 100:
+            return True, f"⚠️ This document has {num_pages} pages. Summaries of long judgments may be less precise.", "warning"
+    except Exception as e:
+        logging.error(f"Validation PDF reader failed: {str(e)}")
+        return False, "Could not read PDF metadata. The file might be corrupted.", "error"
+        
+    return True, None, None
+
+
 def compress_text(text, limit=6000):
     """Compress text for token safety by keeping head and tail"""
     if len(text) <= limit:

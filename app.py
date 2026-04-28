@@ -23,6 +23,7 @@ from core.app_utils import (
     parse_remedies_response,
     get_remedies_advice,
     parse_summary_bullets,
+    validate_pdf_metadata,
 )
 
 # ==================== Notification System Setup ====================
@@ -165,9 +166,30 @@ def main():
 
     language = st.selectbox("🌐 Select your language", ["English", "Hindi", "Bengali", "Urdu"])
     uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
+    
+    # PDF Validation for size and page count
+    is_valid_pdf = True
+    if uploaded_file:
+        # Check file size (warn if > 25MB)
+        if uploaded_file.size > 25 * 1024 * 1024:
+            st.warning("⚠️ This file is quite large. Processing may take longer than usual.")
+            
+        # Check page count
+        try:
+            pdf_reader = PdfReader(uploaded_file)
+            num_pages = len(pdf_reader.pages)
+            if num_pages > 100:
+                st.warning(f"⚠️ This document has {num_pages} pages. Summaries of very long judgments may be less precise.")
+            if num_pages > 1000:
+                st.error("🛑 Extremely large PDF (1000+ pages) detected. Character limits will be exceeded, leading to a very poor summary. Please upload a shorter excerpt.")
+                is_valid_pdf = False
+        except Exception as e:
+            st.error("Could not read PDF metadata. The file might be corrupted.")
+            is_valid_pdf = False
+
     st.markdown("---")
 
-    generate_clicked = st.button("🚀 Generate Summary") if uploaded_file else False
+    generate_clicked = st.button("🚀 Generate Summary") if (uploaded_file and is_valid_pdf) else False
     if uploaded_file and generate_clicked:
         st.session_state.processed_file = uploaded_file.name
         st.session_state.last_language = language

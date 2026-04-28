@@ -37,7 +37,7 @@ class TestNotificationServiceExtended:
         # Test for each threshold
         for days in [30, 10, 3, 1]:
             deadline = create_case_deadline(
-                test_db, "U1", "C1", "Case", now + timedelta(days=days, hours=1), "appeal"
+                test_db, "U1", 101, "Case", now + timedelta(days=days, hours=1), "appeal"
             )
             pref = create_or_update_user_preference(
                 test_db, "U1", "u@e.com", 

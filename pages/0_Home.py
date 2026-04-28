@@ -20,6 +20,7 @@ from core.app_utils import (
     LEGAL_HELP_RESOURCES,
     LANGUAGES,
     parse_summary_bullets,
+    validate_pdf_metadata,
 )
 
 # Apply styling
@@ -40,9 +41,18 @@ def render_page():
     # Input section
     language = st.selectbox("🌐 Select your language", LANGUAGES)
     uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
+    
+    # PDF Validation for size and page count
+    is_valid_pdf, validation_msg, validation_level = validate_pdf_metadata(uploaded_file)
+    if validation_msg:
+        if validation_level == "error":
+            st.error(validation_msg)
+        else:
+            st.warning(validation_msg)
+
     st.markdown("---")
 
-    if uploaded_file and st.button("🚀 Generate Summary", use_container_width=True):
+    if uploaded_file and is_valid_pdf and st.button("🚀 Generate Summary", use_container_width=True):
         with st.spinner("Processing judgment…"):
             try:
                 # Get client
