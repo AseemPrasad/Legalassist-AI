@@ -178,7 +178,9 @@ def show_judgment_analysis():
                     temperature=0.05,
                 )
 
-                summary = response.choices[0].message.content.strip()
+                summary_raw = response.choices[0].message.content.strip()
+                # Structured parser ensures exactly 3 bullets and removes intros
+                summary = core.parse_summary_bullets(summary_raw)
 
                 # Retry if English leakage detected
                 if language.lower() != "english" and core.english_leakage_detected(summary):
@@ -192,9 +194,9 @@ def show_judgment_analysis():
                         max_tokens=260,
                         temperature=0.03,
                     )
-                    retry_summary = response2.choices[0].message.content.strip()
-                    if len(retry_summary) > 0 and not english_leakage_detected(retry_summary):
-                        summary = retry_summary
+                    retry_summary_raw = response2.choices[0].message.content.strip()
+                    if len(retry_summary_raw) > 0 and not core.english_leakage_detected(retry_summary_raw):
+                        summary = core.parse_summary_bullets(retry_summary_raw)
 
                 if not summary:
                     st.error("The model returned an empty summary. Try a shorter file or switch to English.")

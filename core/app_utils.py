@@ -475,3 +475,58 @@ LANGUAGES = ["English", "Hindi", "Bengali", "Urdu"]
 
 # Alias for backward compatibility
 build_summary_prompt = build_prompt
+
+def parse_summary_bullets(raw_text):
+    """
+    Structured parser to ensure exactly 3 bullet points are extracted from LLM output.
+    This eliminates introductory text (e.g., 'Here is your summary:') and 
+    excessive output beyond the requested 3 bullets.
+    """
+    if not raw_text:
+        return ""
+    
+    # Regex to identify lines starting with common bullet markers
+    # Covers: - *, •, and numbered bullets like 1. or 1)
+    # Using non-greedy match for content to avoid capturing too much if markers are repeated
+    bullet_marker_regex = re.compile(r"^\s*([\-\*\u2022\u25cf]|(\d+[\.\)]))\s*(.*)$")
+    
+    lines = raw_text.split('\n')
+    bullets = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        match = bullet_marker_regex.match(line)
+        if match:
+            # We found a bullet! Extract the content after the marker
+            content = match.group(3).strip()
+            if content:
+                bullets.append(content)
+        elif len(bullets) < 3:
+            # If no marker is found, but we still need bullets, check if this line
+            # is a substantive sentence (longer than 20 chars) and doesn't look like a heading.
+            if len(line) > 20 and not line.endswith(':'):
+                # Filter out obvious intro/outro phrases that LLMs sometimes add
+                lower_line = line.lower()
+                intro_keywords = ["here is", "summary", "analysis", "judgment", "result"]
+                if not any(keyword in lower_line for keyword in intro_keywords):
+                    bullets.append(line)
+        
+        # Stop once we have 3 points
+        if len(bullets) >= 3:
+            break
+                    
+    # Re-format as a clean markdown list with consistent bullet markers
+    final_bullets = bullets[:3]
+    
+    if not final_bullets:
+        # Fallback for very unstructured output: take first 3 substantial non-intro lines
+        final_bullets = [l.strip() for l in lines if len(l.strip()) > 15 and not l.endswith(':')][:3]
+        
+    if not final_bullets:
+        # Final fallback: return the raw text if all parsing heuristics failed
+        return raw_text
+        
+    return "\n".join([f"- {b}" for b in final_bullets])

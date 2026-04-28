@@ -22,6 +22,7 @@ from core.app_utils import (
     build_remedies_prompt,
     parse_remedies_response,
     get_remedies_advice,
+    parse_summary_bullets,
 )
 
 # ==================== Notification System Setup ====================
@@ -204,7 +205,11 @@ def main():
                         timeout=60.0,
                     )
 
-                    summary = response.choices[0].message.content.strip()
+                    summary_raw = response.choices[0].message.content.strip()
+                    
+                    # Use a structured parser to ensure exactly 3 bullet points 
+                    # and remove any introductory text like "Here is your summary:"
+                    summary = parse_summary_bullets(summary_raw)
 
                     # -----------------------------
                     # RETRY IF ENGLISH LEAKAGE
@@ -225,10 +230,11 @@ def main():
                             temperature=0.03,
                             timeout=60.0,
                         )
-                        retry_summary = response2.choices[0].message.content.strip()
+                        retry_summary_raw = response2.choices[0].message.content.strip()
 
-                        if len(retry_summary) > 0 and not english_leakage_detected(retry_summary):
-                            summary = retry_summary
+                        if len(retry_summary_raw) > 0 and not english_leakage_detected(retry_summary_raw):
+                            # Apply structured parsing to retry summary as well
+                            summary = parse_summary_bullets(retry_summary_raw)
 
                     remedies = get_remedies_advice(raw_text, language)
 
