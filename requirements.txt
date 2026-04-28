@@ -2,6 +2,9 @@ streamlit==1.56.0
 openai==2.30.0
 pypdf
 pdfplumber
+pytesseract
+pdf2image
+Pillow
 fpdf2
 pytest==9.0.2
 tqdm==4.67.1
