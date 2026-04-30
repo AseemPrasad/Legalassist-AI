@@ -5,7 +5,9 @@ pdfplumber
 fpdf2
 pytest==9.0.2
 tqdm==4.67.1
+rich>=13.7.0
 langdetect==1.0.9
+python-dotenv>=1.0.0
 
 # Database & ORM
 sqlalchemy>=2.0.0

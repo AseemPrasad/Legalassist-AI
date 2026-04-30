@@ -18,20 +18,48 @@ from pypdf import PdfReader
 from langdetect import DetectorFactory, LangDetectException, detect
 from openai import OpenAI, RateLimitError
 from tqdm import tqdm
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+try:
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+except ModuleNotFoundError:
+    class _ProgressColumn:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    SpinnerColumn = BarColumn = TextColumn = TimeElapsedColumn = _ProgressColumn
+
+    class Progress:
+        """Small tqdm-backed fallback when rich is not installed."""
+
+        def __init__(self, *args, **kwargs):
+            self._bar = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if self._bar:
+                self._bar.close()
+
+        def add_task(self, description, total):
+            self._bar = tqdm(total=total, desc=description)
+            return 0
+
+        def advance(self, task_id, advance=1):
+            if self._bar:
+                self._bar.update(advance)
+
+        def update(self, task_id, description=None, **kwargs):
+            if self._bar and description:
+                self._bar.set_description_str(description)
 from logging_config import configure_logging
 import core
 
 # Make language detection deterministic.
 DetectorFactory.seed = 0
 
-SUPPORTED_LANGUAGES = {"english", "hindi", "bengali", "urdu"}
-LANG_CODE_TO_NAME = {
-    "en": "English",
-    "hi": "Hindi",
-    "bn": "Bengali",
-    "ur": "Urdu",
-}
+SUPPORTED_LANGUAGES = set(core.LANGUAGE_ALIASES)
+LANG_CODE_TO_NAME = core.LANGUAGE_CODE_TO_NAME
+SUPPORTED_LANGUAGE_HELP = ", ".join(["auto", *core.LANGUAGES])
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", core.DEFAULT_MODEL)
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 LOGGER = structlog.get_logger(__name__)
@@ -116,7 +144,7 @@ def normalize_language(language: str, text_for_auto: str = "") -> str:
     if lower == "auto":
         return detect_language_name(text_for_auto)
     if lower in SUPPORTED_LANGUAGES:
-        return lower.capitalize()
+        return core.LANGUAGE_ALIASES[lower]
     return "English"
 
 
@@ -208,7 +236,7 @@ def generate_summary(
     summary = (resp_summary.choices[0].message.content or "").strip()
     p_sum, c_sum, t_sum = _usage_tokens(resp_summary)
 
-    if language.lower() != "english" and core.english_leakage_detected(summary):
+    if language.lower() != "english" and core.output_language_mismatch_detected(summary, language):
         retry_prompt = core.build_retry_prompt(safe_text, language)
         resp_retry = _chat_completion(
             client=client,
@@ -223,7 +251,7 @@ def generate_summary(
         p_sum += p_ret
         c_sum += c_ret
         t_sum += t_ret
-        if retry_summary and not core.english_leakage_detected(retry_summary):
+        if retry_summary and not core.output_language_mismatch_detected(retry_summary, language):
             summary = retry_summary
 
     if not summary:
@@ -599,7 +627,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--language",
         default="auto",
-        help="Output language: auto, English, Hindi, Bengali, Urdu. Default: auto",
+        help=f"Output language: {SUPPORTED_LANGUAGE_HELP}. Default: auto",
     )
     common.add_argument(
         "--max-chars",

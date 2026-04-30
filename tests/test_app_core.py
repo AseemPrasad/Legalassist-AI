@@ -12,13 +12,21 @@ from core.app_utils import (
     extract_text_from_pdf,
     compress_text,
     english_leakage_detected,
+    output_language_mismatch_detected,
     build_prompt,
     build_retry_prompt,
     build_remedies_prompt,
     parse_remedies_response,
     extract_appeal_info,
     LANGUAGES,
+    SCHEDULED_INDIAN_LANGUAGES,
+    LANGUAGE_ALIASES,
+    LANGUAGE_CODE_TO_NAME,
     DEFAULT_MODEL,
+    _read_dotenv_openrouter_config,
+    _select_openrouter_config,
+    get_localized_ui_text,
+    localize_yes_no,
 )
 
 
@@ -163,6 +171,16 @@ class TestEnglishLeakage:
         # For English output when language is English, this is expected
         # So we're checking it's detected properly
         assert isinstance(is_leakage, bool)
+
+    def test_wrong_indic_script_mismatch_detected(self):
+        """Test obvious non-target Indic script output triggers a retry."""
+        tamil_text = "\u0ba4\u0bc0\u0bb0\u0bcd\u0baa\u0bcd\u0baa\u0bc1 \u0ba4\u0bae\u0bbf\u0bb4\u0bbf\u0bb2\u0bcd \u0b89\u0bb3\u0bcd\u0bb3\u0ba4\u0bc1."
+        assert output_language_mismatch_detected(tamil_text, "Assamese") is True
+
+    def test_allowed_script_not_mismatch(self):
+        """Test target-script output is not rejected by script validation."""
+        assamese_script_text = "\u098f\u0987 \u09b0\u09be\u09af\u09bc\u099f\u09cb \u09b8\u09b0\u09b2 \u09ad\u09be\u09b7\u09be\u09a4 \u09b2\u09bf\u0996\u09be \u09b9\u09c8\u099b\u09c7."
+        assert output_language_mismatch_detected(assamese_script_text, "Assamese") is False
 
 
 # ==================== PROMPT BUILDING TESTS ====================
@@ -525,18 +543,122 @@ class TestConstants:
     
     def test_languages_list(self):
         """Test LANGUAGES constant"""
+        expected_scheduled_languages = [
+            "Assamese",
+            "Bengali",
+            "Bodo",
+            "Dogri",
+            "Gujarati",
+            "Hindi",
+            "Kannada",
+            "Kashmiri",
+            "Konkani",
+            "Maithili",
+            "Malayalam",
+            "Manipuri",
+            "Marathi",
+            "Nepali",
+            "Odia",
+            "Punjabi",
+            "Sanskrit",
+            "Santhali",
+            "Sindhi",
+            "Tamil",
+            "Telugu",
+            "Urdu",
+        ]
+
         assert isinstance(LANGUAGES, list)
-        assert len(LANGUAGES) == 4
-        assert "English" in LANGUAGES
-        assert "Hindi" in LANGUAGES
-        assert "Bengali" in LANGUAGES
-        assert "Urdu" in LANGUAGES
+        assert LANGUAGES == ["English", *expected_scheduled_languages]
+        assert SCHEDULED_INDIAN_LANGUAGES == expected_scheduled_languages
+        assert len(LANGUAGES) == 23
+        assert len(LANGUAGES) == len(set(LANGUAGES))
+
+    def test_language_aliases(self):
+        """Test language aliases used by CLI and integrations"""
+        assert LANGUAGE_ALIASES["tamil"] == "Tamil"
+        assert LANGUAGE_ALIASES["telugu"] == "Telugu"
+        assert LANGUAGE_ALIASES["marathi"] == "Marathi"
+        assert LANGUAGE_ALIASES["oriya"] == "Odia"
+        assert LANGUAGE_ALIASES["santali"] == "Santhali"
+        assert LANGUAGE_ALIASES["meitei"] == "Manipuri"
+
+    def test_language_code_mapping(self):
+        """Test language detection code mapping for supported scheduled languages"""
+        assert LANGUAGE_CODE_TO_NAME["ta"] == "Tamil"
+        assert LANGUAGE_CODE_TO_NAME["te"] == "Telugu"
+        assert LANGUAGE_CODE_TO_NAME["mr"] == "Marathi"
+        assert LANGUAGE_CODE_TO_NAME["or"] == "Odia"
+        assert LANGUAGE_CODE_TO_NAME["sat"] == "Santhali"
+        assert LANGUAGE_CODE_TO_NAME["ur"] == "Urdu"
     
     def test_default_model(self):
         """Test DEFAULT_MODEL constant"""
         assert isinstance(DEFAULT_MODEL, str)
         assert len(DEFAULT_MODEL) > 0
         assert "llama" in DEFAULT_MODEL.lower() or "meta" in DEFAULT_MODEL.lower()
+
+    def test_openrouter_config_ignores_placeholders(self):
+        """Test placeholder Streamlit secrets do not override real env config"""
+        api_key, base_url = _select_openrouter_config(
+            [
+                ("dummy", "dummy"),
+                ("sk-or-v1-valid-test-key", "https://openrouter.ai/api/v1"),
+            ]
+        )
+
+        assert api_key == "sk-or-v1-valid-test-key"
+        assert base_url == "https://openrouter.ai/api/v1"
+
+    def test_dotenv_openrouter_config_is_available(self):
+        """Test local .env OpenRouter config can be read directly"""
+        api_key, base_url = _read_dotenv_openrouter_config()
+
+        if not api_key and not base_url:
+            pytest.skip("Local .env OpenRouter config is not present")
+
+        assert api_key
+        assert base_url.startswith(("http://", "https://"))
+
+    def test_openrouter_config_requires_real_values(self):
+        """Test invalid OpenRouter config fails with a clear error"""
+        with pytest.raises(ValueError, match="real values"):
+            _select_openrouter_config([("test_key", "test_url")])
+
+    def test_tamil_ui_text_is_localized(self):
+        """Test result UI labels can be shown in Tamil"""
+        ui = get_localized_ui_text("Tamil")
+
+        assert ui["simplified_judgment"] == "✅ எளிய தீர்ப்பு"
+        assert ui["free_legal_help"] == "📞 இலவச சட்ட உதவி"
+        assert "National Legal Services (Free Lawyer)" not in ui["legal_help_resources"]
+        assert localize_yes_no("yes", ui) == "ஆம்"
+        assert localize_yes_no("no", ui) == "இல்லை"
+
+    def test_assamese_ui_text_uses_static_translation(self):
+        """Test Assamese UI does not depend on dynamic translation."""
+        mock_client = MagicMock()
+        ui = get_localized_ui_text("Assamese", mock_client)
+
+        assert ui["language_label"] == "🌐 আপোনাৰ ভাষা বাছনি কৰক"
+        assert ui["generate_summary"] == "🚀 সাৰাংশ সৃষ্টি কৰক"
+        assert ui["simplified_judgment"] == "✅ সৰলীকৃত ৰায়"
+        assert ui["what_happened"] == "কি ঘটিল?"
+        assert output_language_mismatch_detected(ui["language_label"], "Assamese") is False
+        assert mock_client.chat.completions.create.call_count == 0
+
+    def test_dynamic_ui_translation_rejects_wrong_script_values(self):
+        """Test dynamic UI translation cannot accept Kannada for Assamese."""
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_choice = MagicMock()
+        mock_choice.message.content = '{"upload_label": "ತೀರ್ಪು PDF ಅನ್ನು ಅಪ್ಲೋಡ್ ಮಾಡಿ"}'
+        mock_response.choices = [mock_choice]
+        mock_client.chat.completions.create.return_value = mock_response
+
+        ui = get_localized_ui_text("Bodo", mock_client)
+
+        assert ui["upload_label"] == "📄 Upload Judgment PDF"
 
 
 if __name__ == "__main__":

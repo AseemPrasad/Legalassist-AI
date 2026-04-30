@@ -8,6 +8,10 @@ Run with: streamlit run app_integrated.py
 import streamlit as st
 import logging
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ==================== CONFIGURATION ====================
 st.set_page_config(
@@ -139,28 +143,30 @@ def show_judgment_analysis():
     </style>
     """, unsafe_allow_html=True)
     
+    from app import get_client
+    client = get_client()
+    
+    current_language = st.session_state.get("integrated_judgment_language", "English")
+    ui = core.get_localized_ui_text(current_language, client)
+
     st.title("⚡ LegalEase AI")
-    st.subheader("Legal Judgment Simplifier")
+    st.subheader(ui["app_subtitle"])
 
-    st.markdown("""
-    LegalEase AI breaks the Information Barrier in the Judiciary by converting
-    complex court judgments into clear, 3-point summaries in your chosen language.
-    """)
+    st.markdown(ui["app_intro"])
     st.markdown("---")
 
-    language = st.selectbox("🌐 Select your language", 
-                          ["English", "Hindi", "Bengali", "Urdu"])
-    uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
+    language = st.selectbox(ui["language_label"], core.LANGUAGES, key="integrated_judgment_language")
+    ui = core.get_localized_ui_text(language, client)
+    uploaded_file = st.file_uploader(ui["upload_label"], type=["pdf"])
     st.markdown("---")
 
-    if uploaded_file and st.button("🚀 Generate Summary", use_container_width=True):
-        from app import get_client
-        client = get_client()
-        with st.spinner("Processing judgment…"):
+    if uploaded_file and st.button(ui["generate_summary"], use_container_width=True):
+        with st.spinner(ui["processing"]):
             try:
                 if not client:
-                    st.error("❌ OpenRouter client not configured. Check your API keys.")
+                    st.error(f"❌ {ui['openrouter_not_configured']}")
                     return
+                ui = core.get_localized_ui_text(language, client)
 
                 raw_text = core.extract_text_from_pdf(uploaded_file)
                 safe_text = core.compress_text(raw_text)
@@ -171,7 +177,7 @@ def show_judgment_analysis():
                 response = client.chat.completions.create(
                     model=get_default_model(),
                     messages=[
-                        {"role": "system", "content": "You are an expert legal simplification engine."},
+                        {"role": "system", "content": f"You are an expert legal simplification engine. Output only in {language}."},
                         {"role": "user", "content": prompt}
                     ],
                     max_tokens=280,
@@ -180,104 +186,83 @@ def show_judgment_analysis():
 
                 summary = response.choices[0].message.content.strip()
 
-                # Retry if English leakage detected
-                if language.lower() != "english" and core.english_leakage_detected(summary):
+                # Retry if output is not in the selected language
+                if language.lower() != "english" and core.output_language_mismatch_detected(summary, language):
                     retry_prompt = core.build_retry_prompt(safe_text, language)
                     response2 = client.chat.completions.create(
                         model=get_default_model(),
                         messages=[
-                            {"role": "system", "content": "Strict multilingual rewriting engine."},
+                            {"role": "system", "content": f"Strict multilingual rewriting engine. Output only in {language}."},
                             {"role": "user", "content": retry_prompt}
                         ],
                         max_tokens=260,
                         temperature=0.03,
                     )
                     retry_summary = response2.choices[0].message.content.strip()
-                    if len(retry_summary) > 0 and not english_leakage_detected(retry_summary):
+                    if len(retry_summary) > 0 and not core.output_language_mismatch_detected(retry_summary, language):
                         summary = retry_summary
 
                 if not summary:
-                    st.error("The model returned an empty summary. Try a shorter file or switch to English.")
+                    st.error(ui["empty_summary"])
                 else:
-                    st.markdown("## ✅ Simplified Judgment")
+                    st.markdown(f"## {ui['simplified_judgment']}")
                     st.write(summary)
-                    st.success("The judgment has been simplified successfully.")
+                    st.success(ui["summary_success"])
                     
                     # ===== REMEDIES SECTION =====
                     st.markdown("---")
-                    st.markdown("## ⚖️ What Can You Do Now?")
+                    st.markdown(f"## {ui['remedies_title']}")
                     
-                    with st.spinner("Analyzing your legal options..."):
+                    with st.spinner(ui["remedies_spinner"]):
                         try:
-                            remedies = get_remedies_advice(raw_text, language)
+                            remedies = get_remedies_advice(raw_text, language, client)
                             
                             if remedies.get("what_happened"):
-                                st.subheader("What Happened?")
+                                st.subheader(ui["what_happened"])
                                 st.write(remedies["what_happened"])
                             
                             if remedies.get("can_appeal"):
-                                st.subheader("Can You Appeal?")
-                                st.write(remedies["can_appeal"])
+                                st.subheader(ui["can_appeal"])
+                                can_appeal_value = remedies["can_appeal"]
+                                st.write(core.localize_yes_no(can_appeal_value, ui))
                                 
-                                if "yes" in remedies["can_appeal"].lower():
-                                    st.subheader("Appeal Details")
+                                if can_appeal_value.strip().lower() == "yes":
+                                    st.subheader(ui["appeal_details"])
                                     col1, col2 = st.columns(2)
                                     with col1:
                                         if remedies.get("appeal_days"):
-                                            st.metric("Days to File Appeal", remedies["appeal_days"])
+                                            st.metric(ui["days_to_file_appeal"], remedies["appeal_days"])
                                         if remedies.get("appeal_court"):
-                                            st.write(f"**Appeal to:** {remedies['appeal_court']}")
+                                            st.write(f"**{ui['appeal_to']}:** {remedies['appeal_court']}")
                                     with col2:
                                         if remedies.get("cost"):
-                                            st.write(f"**Estimated Cost:** {remedies['cost']}")
+                                            st.write(f"**{ui['estimated_cost']}:** {remedies['cost']}")
                             
                             if remedies.get("first_action"):
-                                st.subheader("What Should You Do First?")
+                                st.subheader(ui["first_action"])
                                 st.write(f"✅ {remedies['first_action']}")
                             
                             if remedies.get("deadline"):
-                                st.subheader("⏰ Important Deadline")
+                                st.subheader(ui["important_deadline"])
                                 st.write(remedies["deadline"])
                             
                         except Exception as e:
-                            st.error(f"Could not get remedies advice: {str(e)}")
+                            st.error(f"{ui['remedies_error']}: {str(e)}")
                     
                     # ===== FREE LEGAL HELP SECTION =====
                     st.markdown("---")
-                    st.markdown("## 📞 Free Legal Help")
-                    
-                    help_options = """
-                    **You don't have to handle this alone. Here are free resources:**
-                    
-                    🔗 **National Legal Services (Free Lawyer)**
-                    - Phone: 1800-180-8111
-                    - Website: nalsa.gov.in
-                    - For: Everyone (especially poor citizens)
-                    
-                    🔗 **Bar Council of India (Find Verified Lawyers)**
-                    - Website: bci.org.in
-                    - For: Finding qualified lawyers in your area
-                    
-                    🔗 **Legal Clinics (Law Colleges)**
-                    - Most law colleges offer free consultation
-                    - Search: "[Your City] law college legal clinic"
-                    
-                    🔗 **NGOs for Specific Cases**
-                    - Family cases: National Commission for Women (1800-123-4344)
-                    - Criminal cases: Criminal Law Clinic (project39a.com)
-                    - Tenant rights: Housing rights organizations
-                    
-                    **Tip:** Start with National Legal Services. They are free and available.
-                    """
-                    
-                    st.info(help_options)
+                    st.markdown(f"## {ui['free_legal_help']}")
+                    st.info(ui["legal_help_resources"])
 
             except Exception as e:
                 err = str(e)
+                logger.error(f"Full error in judgment analysis: {err}", exc_info=True)
                 if "402" in err or "credits" in err.lower():
-                    st.error("❌ Not enough OpenRouter credits. Please top up.")
+                    st.error(ui["not_enough_credits"])
+                elif "Connection" in err or "timeout" in err.lower():
+                    st.error(ui["connection_error"].format(error=err))
                 else:
-                    st.error(f"An error occurred: {err}")
+                    st.error(ui["generic_error"].format(error=err))
 
 
 if __name__ == "__main__":

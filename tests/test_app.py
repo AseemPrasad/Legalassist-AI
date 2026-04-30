@@ -102,7 +102,7 @@ def test_parse_remedies_response():
     assert remedies["first_action"] == "File a certified copy request."
     assert remedies["deadline"] == "The 30 day deadline."
 
-@pytest.mark.parametrize("language", ["English", "Hindi", "Bengali", "Urdu"])
+@pytest.mark.parametrize("language", core.LANGUAGES)
 def test_all_languages_prompt_building(language):
     """Test prompt building for all supported languages"""
     prompt = core.build_summary_prompt("Sample text", language)

@@ -1,7 +1,10 @@
 import logging
 
 import structlog
-from rich.logging import RichHandler
+try:
+    from rich.logging import RichHandler
+except ModuleNotFoundError:
+    RichHandler = None
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -11,10 +14,16 @@ def configure_logging(level: int = logging.INFO) -> None:
     a JSON renderer for structured logs.
     """
 
+    handler = (
+        RichHandler(rich_tracebacks=True, markup=True)
+        if RichHandler
+        else logging.StreamHandler()
+    )
+
     logging.basicConfig(
         level=level,
         format="%(message)s",
-        handlers=[RichHandler(rich_tracebacks=True, markup=True)],
+        handlers=[handler],
     )
 
     structlog.configure(

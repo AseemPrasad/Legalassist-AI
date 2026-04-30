@@ -96,7 +96,8 @@ python cli.py process_batch --input ./judgments_folder --output ./results.csv
 - Per-file error handling (one failure does not stop the run)
 - Real-time progress bar with status and running cost
 - Exports to CSV/JSON (`--format csv|json|both`, default `both`)
-- Language controls: fixed (`--language Hindi`) or auto-detect (`--language auto`)
+- Language controls: fixed (`--language Tamil`) or auto-detect (`--language auto`)
+- Supports English plus all 22 scheduled Indian languages: Assamese, Bengali, Bodo, Dogri, Gujarati, Hindi, Kannada, Kashmiri, Konkani, Maithili, Malayalam, Manipuri, Marathi, Nepali, Odia, Punjabi, Sanskrit, Santhali, Sindhi, Tamil, Telugu, and Urdu.
 
 ### Resume Behavior
 

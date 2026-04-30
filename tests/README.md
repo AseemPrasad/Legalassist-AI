@@ -78,7 +78,7 @@ Tests for judgment analysis pipeline:
 - Mixed language detection
 
 **Prompt Building**
-- All language support (English, Hindi, Bengali, Urdu)
+- All configured language support (English plus 22 scheduled Indian languages)
 - Model instructions included
 - Retry prompts for language correction
 - Remedies advisor prompts

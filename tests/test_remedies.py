@@ -12,6 +12,7 @@ from core.app_utils import (
     get_remedies_advice,
     parse_remedies_response,
     build_remedies_prompt,
+    LANGUAGES,
     DEFAULT_MODEL,
 )
 
@@ -365,7 +366,7 @@ class TestGetRemediesAdviceWithMocks:
         
         mock_openai_client.chat.completions.create.return_value = mock_response
         
-        for language in ["English", "Hindi", "Bengali", "Urdu"]:
+        for language in LANGUAGES:
             remedies = get_remedies_advice("Test judgment", language, mock_openai_client)
             
             # Verify language was passed in prompt
