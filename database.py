@@ -669,8 +669,19 @@ def create_otp_verification(
     email: str,
     otp_hash: str,
     expires_at: dt.datetime,
+    max_requests_per_hour: int = 5,
 ) -> OTPVerification:
-    """Create a new OTP verification record"""
+    """Create a new OTP verification record with rate limiting"""
+    # Check recent OTPs
+    one_hour_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
+    recent_otps = db.query(OTPVerification).filter(
+        OTPVerification.email == email,
+        OTPVerification.created_at > one_hour_ago,
+    ).count()
+
+    if recent_otps >= max_requests_per_hour:
+        raise ValueError("Too many OTP requests. Please try again later.")
+
     otp = OTPVerification(
         email=email,
         otp_hash=otp_hash,
