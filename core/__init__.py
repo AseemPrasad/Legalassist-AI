@@ -9,11 +9,13 @@ from .app_utils import (
     parse_remedies_response,
     extract_appeal_info,
     get_remedies_advice,
+    parse_summary_bullets,
     DEFAULT_MODEL,
     build_summary_prompt,
     LANGUAGES,
     RETRO_STYLING,
     LEGAL_HELP_RESOURCES,
+    validate_pdf_metadata,
 )
 
 __all__ = [
@@ -26,9 +28,11 @@ __all__ = [
     'parse_remedies_response',
     'extract_appeal_info',
     'get_remedies_advice',
+    'parse_summary_bullets',
     'DEFAULT_MODEL',
     'build_summary_prompt',
     'LANGUAGES',
     'RETRO_STYLING',
     'LEGAL_HELP_RESOURCES',
+    'validate_pdf_metadata',
 ]

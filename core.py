@@ -237,9 +237,9 @@ def _normalize_yes_no(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
     lower = value.lower()
-    if re.search(r"\byes\b", lower):
+    if re.search(r"\byes\b", lower) or any(x in lower for x in ["can appeal", "available", "allowed", "has right"]):
         return "yes"
-    if re.search(r"\bno\b", lower):
+    if re.search(r"\bno\b", lower) or any(x in lower for x in ["cannot appeal", "not available", "no right", "no appeal"]):
         return "no"
     return None
 
@@ -277,22 +277,22 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
         6: "first_action",
         7: "deadline",
     }
-    remedies: Dict[str, Optional[str]] = {
-        "what_happened": None,
-        "can_appeal": None,
-        "appeal_days": None,
-        "appeal_court": None,
-        "cost_estimate": None,
-        "cost": None, # For backward compatibility in app.py
-        "first_action": None,
-        "deadline": None,
-        "appeal_details": None # For backward compatibility in app.py
+    remedies: Dict[str, str] = {
+        "what_happened": "",
+        "can_appeal": "",
+        "appeal_days": "",
+        "appeal_court": "",
+        "cost_estimate": "",
+        "cost": "", # For backward compatibility in app.py
+        "first_action": "",
+        "deadline": "",
+        "appeal_details": "", # For backward compatibility in app.py
+        "_is_partial": False, # New field for status
     }
-
     text = response_text.strip()
     if not text:
         LOGGER.warning("parse_remedies_response: empty response text")
-        return None
+        return remedies
 
     # Use the more robust parsing from cli.py
     marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
@@ -300,7 +300,7 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
 
     if not matches:
         LOGGER.warning("parse_remedies_response: no numbered sections found")
-        return None
+        return remedies
 
     parsed_sections = 0
     for idx, match in enumerate(matches):
@@ -330,30 +330,30 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
         normalized = _normalize_yes_no(orig)
         if normalized is None:
             LOGGER.warning("parse_remedies_response: invalid can_appeal value: %s", orig)
-        remedies["can_appeal"] = normalized
+        remedies["can_appeal"] = normalized or ""
     
     if remedies["appeal_days"]:
         orig = remedies["appeal_days"]
         normalized = _extract_number(orig)
         if normalized is None:
             LOGGER.warning("parse_remedies_response: invalid appeal_days value: %s", orig)
-        remedies["appeal_days"] = normalized
+        remedies["appeal_days"] = normalized or ""
     
     if remedies["appeal_court"]:
         orig = remedies["appeal_court"]
         normalized = _validate_court_name(orig)
         if normalized is None:
             LOGGER.warning("parse_remedies_response: unknown appeal_court: %s", orig)
-        remedies["appeal_court"] = normalized
+        remedies["appeal_court"] = normalized or ""
     
     # Map 'cost_estimate' to 'cost' for app.py
     if remedies["cost_estimate"]:
         remedies["cost"] = remedies["cost_estimate"]
     
-    # Provide appeal_details for 5-section fallback if needed
-    if not remedies["appeal_days"] and not remedies["appeal_court"]:
-         # This part is tricky as the new logic is more structured.
-         # For now, we'll favor the 7-section structure.
-         pass
+    # Track if all main sections are present
+    required = ["what_happened", "can_appeal", "appeal_days", "appeal_court", "cost_estimate", "first_action", "deadline"]
+    missing = [f for f in required if not remedies[f]]
+    if missing:
+        remedies["_is_partial"] = True
 
     return remedies

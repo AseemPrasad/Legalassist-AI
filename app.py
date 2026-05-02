@@ -1,4 +1,5 @@
 import streamlit as st
+import openai
 from openai import OpenAI
 from pypdf import PdfReader
 import logging
@@ -21,6 +22,8 @@ from core.app_utils import (
     build_remedies_prompt,
     parse_remedies_response,
     get_remedies_advice,
+    parse_summary_bullets,
+    validate_pdf_metadata,
 )
 
 # ==================== Notification System Setup ====================
@@ -163,9 +166,30 @@ def main():
 
     language = st.selectbox("🌐 Select your language", ["English", "Hindi", "Bengali", "Urdu"])
     uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
+    
+    # PDF Validation for size and page count
+    is_valid_pdf = True
+    if uploaded_file:
+        # Check file size (warn if > 25MB)
+        if uploaded_file.size > 25 * 1024 * 1024:
+            st.warning("⚠️ This file is quite large. Processing may take longer than usual.")
+            
+        # Check page count
+        try:
+            pdf_reader = PdfReader(uploaded_file)
+            num_pages = len(pdf_reader.pages)
+            if num_pages > 100:
+                st.warning(f"⚠️ This document has {num_pages} pages. Summaries of very long judgments may be less precise.")
+            if num_pages > 1000:
+                st.error("🛑 Extremely large PDF (1000+ pages) detected. Character limits will be exceeded, leading to a very poor summary. Please upload a shorter excerpt.")
+                is_valid_pdf = False
+        except Exception as e:
+            st.error("Could not read PDF metadata. The file might be corrupted.")
+            is_valid_pdf = False
+
     st.markdown("---")
 
-    generate_clicked = st.button("🚀 Generate Summary") if uploaded_file else False
+    generate_clicked = st.button("🚀 Generate Summary") if (uploaded_file and is_valid_pdf) else False
     if uploaded_file and generate_clicked:
         st.session_state.processed_file = uploaded_file.name
         st.session_state.last_language = language
@@ -188,6 +212,10 @@ def main():
 
                     # ⚡ Best multilingual model for Hindi/Bengali/Urdu
                     model_id = get_default_model()
+                    
+                    # Added a 60-second timeout to prevent the Streamlit app
+                    # from spinning indefinitely in case the OpenAI API
+                    # hangs or becomes unresponsive.
                     response = client.chat.completions.create(
                         model=model_id,
                         messages=[
@@ -196,9 +224,14 @@ def main():
                         ],
                         max_tokens=280,
                         temperature=0.05,
+                        timeout=60.0,
                     )
 
-                    summary = response.choices[0].message.content.strip()
+                    summary_raw = response.choices[0].message.content.strip()
+                    
+                    # Use a structured parser to ensure exactly 3 bullet points 
+                    # and remove any introductory text like "Here is your summary:"
+                    summary = parse_summary_bullets(summary_raw)
 
                     # -----------------------------
                     # RETRY IF ENGLISH LEAKAGE
@@ -206,6 +239,9 @@ def main():
                     if language.lower() != "english" and english_leakage_detected(summary):
                         retry_prompt = build_retry_prompt(safe_text, language)
 
+                        # Added a 60-second timeout to prevent the Streamlit app
+                        # from spinning indefinitely in case the OpenAI API
+                        # hangs or becomes unresponsive.
                         response2 = client.chat.completions.create(
                             model=model_id,
                             messages=[
@@ -214,11 +250,13 @@ def main():
                             ],
                             max_tokens=260,
                             temperature=0.03,
+                            timeout=60.0,
                         )
-                        retry_summary = response2.choices[0].message.content.strip()
+                        retry_summary_raw = response2.choices[0].message.content.strip()
 
-                        if len(retry_summary) > 0 and not english_leakage_detected(retry_summary):
-                            summary = retry_summary
+                        if len(retry_summary_raw) > 0 and not english_leakage_detected(retry_summary_raw):
+                            # Apply structured parsing to retry summary as well
+                            summary = parse_summary_bullets(retry_summary_raw)
 
                     remedies = get_remedies_advice(raw_text, language)
 
@@ -246,6 +284,10 @@ def main():
                     
                     with st.spinner("Analyzing your legal options..."):
                         try:
+                            
+                            # Show warning if data is partial
+                            if remedies.get("_is_partial"):
+                                st.warning(remedies.get("_warning", "Note: Some information may be incomplete."))
                             
                             # Show each answer
                             if remedies.get("what_happened"):
@@ -407,13 +449,36 @@ def main():
                     st.markdown("---")
                     render_localized_legal_help()
 
-            except Exception as e:
-                err = str(e)
+            except ValueError as e:
+                st.error(f"❌ Extraction Error: {str(e)}")
+                logging.error(f"Text extraction failed: {str(e)}")
 
-                if "402" in err or "credits" in err.lower():
-                    st.error("❌ Not enough OpenRouter credits. Please top up.")
+            except openai.APIConnectionError as e:
+                st.error("❌ Network Error: Could not connect to the AI service. Please check your internet.")
+                logging.error(f"API Connection error: {str(e)}")
+
+            except openai.RateLimitError as e:
+                st.error("❌ Rate Limit: Too many requests. Please wait a moment before trying again.")
+                logging.error(f"API Rate limit: {str(e)}")
+
+            except openai.AuthenticationError as e:
+                st.error("❌ API Key Error: Your OpenRouter/OpenAI key is invalid or not found.")
+                logging.error(f"API Auth error: {str(e)}")
+
+            except openai.APIStatusError as e:
+                if e.status_code == 402:
+                    st.error("❌ Out of Credits: Please top up your OpenRouter account to continue.")
                 else:
-                    st.error(f"An error occurred: {err}")
+                    st.error(f"❌ AI Service Error ({e.status_code}): {e.message}")
+                logging.error(f"API Status error: {str(e)}")
+
+            except openai.APIError as e:
+                st.error(f"❌ AI Service Error: {str(e)}")
+                logging.error(f"OpenAI API error: {str(e)}")
+
+            except Exception as e:
+                st.error(f"❌ Unexpected Error: {str(e)}")
+                logging.exception("An unhandled exception occurred in the main loop")
 
 if __name__ == "__main__":
     main()

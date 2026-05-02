@@ -19,7 +19,3 @@ enableXsrfProtection = true
 
 [browser]
 gatherUsageStats = false
-
-# Multi-page app settings
-[client]
-showErrorDetails = true
