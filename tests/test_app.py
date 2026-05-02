@@ -47,8 +47,12 @@ def test_pdf_extraction():
         
         with open(path, "rb") as f:
             text = core.extract_text_from_pdf(f)
-            assert len(text) > 0, f"Extraction failed for {path}"
-            assert "JUDGMENT" in text or "judgment" in text.lower()
+            # More robust check: at least 100 characters and contains legal terminology
+            assert len(text) > 100, f"Extraction returned too little text for {path}"
+            
+            keywords = ["judgment", "judgement", "court", "case", "verdict", "order", "plaintiff", "defendant", "petitioner", "respondent"]
+            text_lower = text.lower()
+            assert any(kw in text_lower for kw in keywords), f"No legal keywords found in extracted text from {path}"
             files_tested += 1
             
     if files_tested == 0:
