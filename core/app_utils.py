@@ -9,6 +9,10 @@ import re
 import logging
 from openai import OpenAI
 from pypdf import PdfReader
+from langdetect import detect, DetectorFactory, detect_langs
+
+# For consistent language detection results
+DetectorFactory.seed = 0
 
 # ==================== MODEL CONFIGURATION ====================
 
@@ -78,6 +82,32 @@ def extract_text_from_pdf(uploaded_pdf):
     return text
 
 
+def validate_pdf_metadata(uploaded_file):
+    """
+    Check PDF size and page count to warn user if it's too large.
+    Returns (is_valid, message, level) where level is 'warning' or 'error'.
+    """
+    if not uploaded_file:
+        return True, None, None
+    
+    # Size check (25MB)
+    if uploaded_file.size > 25 * 1024 * 1024:
+        return True, "⚠️ This file is quite large. Processing may take longer than usual.", "warning"
+        
+    try:
+        reader = PdfReader(uploaded_file)
+        num_pages = len(reader.pages)
+        if num_pages > 1000:
+            return False, "🛑 Extremely large PDF (1000+ pages) detected. Character limits will be exceeded, leading to a very poor summary. Please upload a shorter excerpt.", "error"
+        if num_pages > 100:
+            return True, f"⚠️ This document has {num_pages} pages. Summaries of long judgments may be less precise.", "warning"
+    except Exception as e:
+        logging.error(f"Validation PDF reader failed: {str(e)}")
+        return False, "Could not read PDF metadata. The file might be corrupted.", "error"
+        
+    return True, None, None
+
+
 def compress_text(text, limit=6000):
     """Compress text for token safety by keeping head and tail"""
     if len(text) <= limit:
@@ -87,11 +117,37 @@ def compress_text(text, limit=6000):
     return head + "\n\n... [TRUNCATED] ...\n\n" + tail
 
 
-def english_leakage_detected(output_text, threshold=5):
-    """Detect if English words have leaked into non-English output"""
-    common_english = [" the ", " and ", " of ", " to ", " in ", " is ", " that ", " it ", " for ", " on "]
-    text_lower = " " + output_text.lower() + " "
+def english_leakage_detected(output_text, threshold=8):
+    """
+    Detect if English words have leaked into non-English output.
+    Uses langdetect for primary detection and a refined word-list heuristic for fallback.
+    """
+    if not output_text or len(output_text.strip()) < 10:
+        return False
+
+    try:
+        # Get probabilities for all detected languages
+        langs = detect_langs(output_text)
+        # If English is detected with high confidence (> 0.5), it's likely leakage
+        for l in langs:
+            if l.lang == 'en' and l.prob > 0.8:
+                return True
+            # If the top language is English and it's much more likely than others
+            if l.lang == 'en' and langs[0].lang == 'en' and l.prob > 0.5:
+                return True
+    except Exception as e:
+        logging.debug(f"langdetect failed: {e}")
+
+    # Refined heuristic: Use a more comprehensive list and higher threshold
+    # Legal summaries often contain some English names or terms, so we need to be careful
+    common_english = [
+        " the ", " and ", " of ", " to ", " in ", " is ", " that ", " it ", " for ", " on ", 
+        " with ", " as ", " this ", " was ", " are ", " at ", " by ", " be ", " or ", " has "
+    ]
+    text_lower = " " + re.sub(r'[^\w\s]', ' ', output_text.lower()) + " "
     count = sum(1 for word in common_english if word in text_lower)
+    
+    # Increased threshold to 8 to avoid false positives on short legal snippets
     return count >= threshold
 
 
@@ -165,91 +221,145 @@ Output in numbered form like:
 
 # ==================== REMEDIES PARSER ====================
 
+KNOWN_COURTS = {
+    "supreme court",
+    "high court",
+    "district court",
+    "sessions court",
+    "session court",
+    "civil court",
+    "family court",
+    "consumer court",
+    "tribunal",
+}
+
+def _clean_answer(value: str):
+    cleaned = re.sub(r"\s+", " ", (value or "")).strip(" -:\t\n")
+    return cleaned or ""
+
+def _strip_question_label(key: str, value: str) -> str:
+    if not value:
+        return ""
+
+    patterns = {
+        "what_happened": r"^(what happened\??)\s*",
+        "can_appeal": r"^(can the loser appeal\??)\s*",
+        "appeal_days": r"^(appeal timeline\??|how many days\??)\s*",
+        "appeal_court": r"^(appeal court\??|which court(?: should they go to)?\??)\s*",
+        "cost_estimate": r"^(cost estimate\??|rough cost(?: in rupees)?\??)\s*",
+        "first_action": r"^(first action\??|what should they do first\??)\s*",
+        "deadline": r"^(important deadline\??|important dates?\??)\s*",
+    }
+    pattern = patterns.get(key)
+    if pattern:
+        value = re.sub(pattern, "", value, flags=re.IGNORECASE).strip()
+    return value or ""
+
+def _normalize_yes_no(value: str) -> str:
+    if not value:
+        return ""
+    lower = value.lower()
+    if re.search(r"\byes\b", lower) or any(x in lower for x in ["can appeal", "available", "allowed", "has right"]):
+        return "yes"
+    if re.search(r"\bno\b", lower) or any(x in lower for x in ["cannot appeal", "not available", "no right", "no appeal"]):
+        return "no"
+    return ""
+
+def _extract_number(value: str) -> str:
+    if not value:
+        return ""
+    match = re.search(r"\b(\d{1,4})\b", value)
+    return match.group(1) if match else ""
+
+def _validate_court_name(value: str) -> str:
+    if not value:
+        return ""
+    cleaned = _clean_answer(value)
+    if not cleaned:
+        return ""
+
+    normalized = cleaned.lower()
+    if normalized in KNOWN_COURTS or any(court in normalized for court in KNOWN_COURTS):
+        return cleaned
+    return ""
+
 def parse_remedies_response(response_text):
     """
     Extract structured info from LLM response using flexible numbered-line parsing.
     Supports multiple separators: . ) : - 
     Handles both 5-section (old) and 7-section (new) formats.
     """
+    mapping = {
+        1: "what_happened",
+        2: "can_appeal",
+        3: "appeal_days",
+        4: "appeal_court",
+        5: "cost_estimate",
+        6: "first_action",
+        7: "deadline",
+    }
     remedies = {
         "what_happened": "",
         "can_appeal": "",
         "appeal_days": "",
         "appeal_court": "",
         "cost_estimate": "",
-        "cost": "",
+        "cost": "", # For backward compatibility
         "first_action": "",
         "deadline": "",
-        "appeal_details": ""
+        "appeal_details": "", # For backward compatibility
+        "_is_partial": False,
+        "_warning": ""
     }
 
     text = response_text.strip()
     if not text:
         return remedies
 
-    # Detect all numbered sections (flexible separators: . ) : -)
-    # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
-    pattern = r'^([1-9]\d?)\s*[.):‐-]\s*(.*?)$'
-    sections = {}
+    # Use robust marker-based parsing
+    marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
+    matches = list(marker_pattern.finditer(text))
+
+    if not matches:
+        logging.warning("parse_remedies_response: no numbered sections found")
+        return remedies
+
+    for idx, match in enumerate(matches):
+        section_num = int(match.group(1))
+        key = mapping.get(section_num)
+        if not key:
+            continue
+
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        inline_text = _clean_answer(match.group(2))
+        block_text = _clean_answer(text[start:end])
+        section_text = _clean_answer(" ".join(part for part in [inline_text, block_text] if part))
+        cleaned = _strip_question_label(key, section_text)
+        
+        if cleaned:
+            remedies[key] = cleaned
+
+    # Normalization & Compatibility
+    if remedies["can_appeal"]:
+        remedies["can_appeal"] = _normalize_yes_no(remedies["can_appeal"])
     
-    for line in text.split('\n'):
-        match = re.match(pattern, line.strip())
-        if match:
-            num = int(match.group(1))
-            header = match.group(2).strip()
-            sections[num] = {"header": header, "content": ""}
+    if remedies["appeal_days"]:
+        remedies["appeal_days"] = _extract_number(remedies["appeal_days"])
     
-    # Extract content for each section
-    lines = text.split('\n')
-    current_section = None
+    if remedies["appeal_court"]:
+        remedies["appeal_court"] = _validate_court_name(remedies["appeal_court"])
     
-    for line in lines:
-        match = re.match(pattern, line.strip())
-        if match:
-            current_section = int(match.group(1))
-        elif current_section is not None and current_section in sections:
-            if line.strip():  # Only add non-empty lines
-                sections[current_section]["content"] += line.strip() + " "
+    # Map 'cost_estimate' to 'cost' for backward compatibility
+    if remedies["cost_estimate"]:
+        remedies["cost"] = remedies["cost_estimate"]
     
-    # Clean up content
-    for num in sections:
-        sections[num]["content"] = sections[num]["content"].strip()
-    
-    # Map sections to keys based on count
-    is_7section = len(sections) >= 7
-    
-    if is_7section:
-        if 1 in sections:
-            remedies["what_happened"] = sections[1]["content"]
-        if 2 in sections:
-            can_appeal_text = sections[2]["content"].lower()
-            remedies["can_appeal"] = "yes" if "yes" in can_appeal_text else "no"
-        if 3 in sections:
-            # Extract just the number from "30 days"
-            appeal_days_text = sections[3]["content"]
-            match = re.search(r'\d+', appeal_days_text)
-            remedies["appeal_days"] = match.group() if match else appeal_days_text
-        if 4 in sections:
-            remedies["appeal_court"] = sections[4]["content"]
-        if 5 in sections:
-            remedies["cost_estimate"] = sections[5]["content"]
-            remedies["cost"] = sections[5]["content"]  # Support both keys
-        if 6 in sections:
-            remedies["first_action"] = sections[6]["content"]
-        if 7 in sections:
-            remedies["deadline"] = sections[7]["content"]
-    else:
-        # 5-section format (old)
-        if 1 in sections:
-            remedies["what_happened"] = sections[1]["content"]
-        if 2 in sections:
-            remedies["can_appeal"] = sections[2]["content"]
-        if 3 in sections:
-            remedies["appeal_details"] = sections[3]["content"]
-        if 4 in sections:
-            remedies["first_action"] = sections[4]["content"]
-        if 5 in sections:
-            remedies["deadline"] = sections[5]["content"]
+    # Track if all main sections are present
+    required = ["what_happened", "can_appeal", "appeal_days", "appeal_court", "cost", "first_action", "deadline"]
+    missing = [f for f in required if not remedies[f]]
+    if missing:
+        remedies["_is_partial"] = True
+        remedies["_warning"] = "Note: Some information may be incomplete."
 
     return remedies
 
@@ -391,3 +501,58 @@ LANGUAGES = ["English", "Hindi", "Bengali", "Urdu"]
 
 # Alias for backward compatibility
 build_summary_prompt = build_prompt
+
+def parse_summary_bullets(raw_text):
+    """
+    Structured parser to ensure exactly 3 bullet points are extracted from LLM output.
+    This eliminates introductory text (e.g., 'Here is your summary:') and 
+    excessive output beyond the requested 3 bullets.
+    """
+    if not raw_text:
+        return ""
+    
+    # Regex to identify lines starting with common bullet markers
+    # Covers: - *, •, and numbered bullets like 1. or 1)
+    # Using non-greedy match for content to avoid capturing too much if markers are repeated
+    bullet_marker_regex = re.compile(r"^\s*([\-\*\u2022\u25cf]|(\d+[\.\)]))\s*(.*)$")
+    
+    lines = raw_text.split('\n')
+    bullets = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        match = bullet_marker_regex.match(line)
+        if match:
+            # We found a bullet! Extract the content after the marker
+            content = match.group(3).strip()
+            if content:
+                bullets.append(content)
+        elif len(bullets) < 3:
+            # If no marker is found, but we still need bullets, check if this line
+            # is a substantive sentence (longer than 20 chars) and doesn't look like a heading.
+            if len(line) > 20 and not line.endswith(':'):
+                # Filter out obvious intro/outro phrases that LLMs sometimes add
+                lower_line = line.lower()
+                intro_keywords = ["here is", "summary", "analysis", "judgment", "result"]
+                if not any(keyword in lower_line for keyword in intro_keywords):
+                    bullets.append(line)
+        
+        # Stop once we have 3 points
+        if len(bullets) >= 3:
+            break
+                    
+    # Re-format as a clean markdown list with consistent bullet markers
+    final_bullets = bullets[:3]
+    
+    if not final_bullets:
+        # Fallback for very unstructured output: take first 3 substantial non-intro lines
+        final_bullets = [l.strip() for l in lines if len(l.strip()) > 15 and not l.endswith(':')][:3]
+        
+    if not final_bullets:
+        # Final fallback: return the raw text if all parsing heuristics failed
+        return raw_text
+        
+    return "\n".join([f"- {b}" for b in final_bullets])

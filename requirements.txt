@@ -16,6 +16,7 @@ twilio>=8.10.0
 sendgrid>=6.10.0
 apscheduler>=3.10.4
 pytz>=2024.1
+structlog>=24.1.0
 
 # Authentication
 pyjwt>=2.8.0

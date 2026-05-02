@@ -42,8 +42,8 @@ def check_and_send_reminders():
         # Import here to avoid circular imports
         from database import has_notification_been_sent
         
-        # Check for deadlines in the next 30 days
-        upcoming_deadlines = get_upcoming_deadlines(db, days_before=30)
+        # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
+        upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
         logger.info(f"Found {len(upcoming_deadlines)} upcoming deadlines")
 
         for deadline in upcoming_deadlines:
@@ -169,7 +169,7 @@ def check_reminders_sync(target_days: Optional[int] = None):
     db = SessionLocal()
     try:
         logger.info(f"Running synchronous reminder check (target_days={target_days})")
-        upcoming_deadlines = get_upcoming_deadlines(db, days_before=30)
+        upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
         
         sent_count = 0
         for deadline in upcoming_deadlines:

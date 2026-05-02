@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 from pypdf import PdfReader
 from langdetect import DetectorFactory, LangDetectException, detect
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from tqdm import tqdm
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 from logging_config import configure_logging
@@ -47,6 +47,10 @@ KNOWN_COURTS = {
     "consumer court",
     "tribunal",
 }
+
+# Global semaphore for API concurrency control
+API_SEMAPHORE = threading.Semaphore(5)
+
 
 
 class CLIError(Exception):
@@ -98,7 +102,20 @@ def get_client() -> OpenAI:
 def detect_language_name(text: str) -> str:
     if not text.strip():
         return "English"
-    sample = text[:3000]
+
+    length = len(text)
+    if length <= 3000:
+        sample = text
+    else:
+        # Sample beginning, middle, and end to avoid bias from English cover pages
+        # or administrative footers in local language documents.
+        parts = [
+            text[:1000],
+            text[length // 2 - 500 : length // 2 + 500],
+            text[-1000:]
+        ]
+        sample = " ".join(parts)
+
     try:
         code = detect(sample)
     except LangDetectException:
@@ -143,16 +160,43 @@ def _chat_completion(
     user_prompt: str,
     max_tokens: int,
     temperature: float,
+    max_retries: int = 5,
 ):
-    return client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            with API_SEMAPHORE:
+                return client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+        except RateLimitError as e:
+            last_err = e
+            if attempt == max_retries - 1:
+                LOGGER.error("api_rate_limit_exhausted", attempts=max_retries, error=str(e))
+                raise
+            
+            # Exponential backoff: 2, 4, 8, 16, 32 seconds
+            wait_time = 2 ** (attempt + 1)
+            LOGGER.warning(
+                "api_rate_limited",
+                attempt=attempt + 1,
+                wait_seconds=wait_time,
+                error=str(e)
+            )
+            time.sleep(wait_time)
+        except Exception as e:
+            # We don't retry on other errors here to avoid infinite loops on valid failures
+            raise e
+    
+    if last_err:
+        raise last_err
+
 
 
 def generate_summary(
@@ -356,12 +400,6 @@ def load_checkpoint(checkpoint_file: Path) -> List[Dict[str, object]]:
     return records
 
 
-def append_checkpoint(checkpoint_file: Path, record: Dict[str, object]) -> None:
-    checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-    with checkpoint_file.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
 def dedupe_latest_by_file(records: List[Dict[str, object]]) -> List[Dict[str, object]]:
     latest: Dict[str, Dict[str, object]] = {}
     for rec in records:
@@ -512,19 +550,27 @@ def batch_command(args: argparse.Namespace) -> int:
             for pdf_path in to_process
         }
 
+        checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
         with Progress(
             SpinnerColumn(),
             TextColumn("{task.description}"),
             BarColumn(),
             TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
-        ) as progress:
+        ) as progress, checkpoint_file.open("a", encoding="utf-8") as cp_file:
             task_id = progress.add_task("Processing PDFs", total=len(futures))
             try:
                 for future in as_completed(futures):
                     record = future.result()
                     run_records.append(record)
-                    append_checkpoint(checkpoint_file, record)
+
+                    # Write to checkpoint immediately and sync to disk to prevent data loss
+                    cp_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    cp_file.flush()
+                    try:
+                        os.fsync(cp_file.fileno())
+                    except OSError:
+                        pass
 
                     tracker.add(
                         int(record.get("prompt_tokens", 0) or 0),
@@ -587,6 +633,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Estimated USD cost per 1K completion tokens (for cost reporting).",
     )
+    common.add_argument(
+        "--concurrency",
+        type=int,
+        default=5,
+        help="Maximum concurrent API calls. Default: 5",
+    )
+
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -648,13 +701,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception:
         logging.basicConfig(level=logging.INFO)
 
-    if not os.getenv("OPENROUTER_API_KEY") and not os.getenv("OPENAI_API_KEY"):
-        LOGGER.warning(
-            "No API key found. Set OPENROUTER_API_KEY or OPENAI_API_KEY environment variable."
-        )
-
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    # Initialize global semaphore with user-specified concurrency
+    global API_SEMAPHORE
+    API_SEMAPHORE = threading.Semaphore(args.concurrency)
 
     if getattr(args, "workers", 1) < 1:
         raise CLIError("--workers must be >= 1")
