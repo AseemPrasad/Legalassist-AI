@@ -26,6 +26,7 @@ from database import (
     cleanup_expired_otps,
     update_user_last_login,
     User,
+    OTPVerification,
 )
 
 logger = logging.getLogger(__name__)
