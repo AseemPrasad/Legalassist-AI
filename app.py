@@ -170,8 +170,14 @@ def main():
     # PDF Validation for size and page count
     is_valid_pdf = True
     if uploaded_file:
-        # Check file size (warn if > 25MB)
-        if uploaded_file.size > 25 * 1024 * 1024:
+        # Check file size
+        MAX_FILE_SIZE_MB = 25
+        WARN_FILE_SIZE_MB = 10
+        file_size_mb = (uploaded_file.size or 0) / (1024 * 1024)
+        if file_size_mb > MAX_FILE_SIZE_MB:
+            st.error(f"🛑 File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.")
+            is_valid_pdf = False
+        elif file_size_mb > WARN_FILE_SIZE_MB:
             st.warning("⚠️ This file is quite large. Processing may take longer than usual.")
             
         # Check page count
