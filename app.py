@@ -29,22 +29,12 @@ from core.app_utils import (
 
 # ==================== Notification System Setup ====================
 from database import init_db, SessionLocal, get_db, DocumentType, db_session
-from scheduler import start_scheduler, stop_scheduler
+from scheduler import start_scheduler
 from auth import init_auth_session, require_auth, get_current_user_id, get_current_user_email, logout_user
 from case_manager import get_user_cases_summary, upload_case_document, create_new_case, get_case_detail
 
 # Initialize database
 init_db()
-
-# Start background scheduler on app startup
-if "scheduler_started" not in st.session_state:
-    try:
-        start_scheduler()
-        st.session_state.scheduler_started = True
-        logging.info("Background scheduler started")
-    except Exception as e:
-        logging.error(f"Failed to start scheduler: {str(e)}")
-        st.session_state.scheduler_started = False
 
 # ==================== Logging Setup ====================
 logging.basicConfig(
@@ -485,8 +475,8 @@ def main():
                 if not summary:
                     st.error(ui["empty_summary"])
                 else:
-                    summary_result_text = build_judgment_result_text(summary, {}, ui)
-                    render_shareable_result_box(summary_result_text, ui)
+                    st.markdown(f"## {ui['simplified_judgment']}")
+                    st.write(summary)
                     st.success(ui["summary_success"])
                     
                     # ===== REMEDIES SECTION =====

@@ -485,6 +485,11 @@ def generate_anonymized_pdf(case_id: int, anon_id: str) -> Optional[bytes]:
         if not case:
             return None
 
+        # Verify case ownership
+        if case.user_id != user_id:
+            logger.warning(f"Unauthorized access attempt: user {user_id} tried to export case {case_id}")
+            return None
+
         documents = db.query(CaseDocument).filter(CaseDocument.case_id == case_id).all()
         timeline = db.query(CaseTimeline).filter(CaseTimeline.case_id == case_id).all()
 

@@ -452,7 +452,7 @@ def main():
         anon_data = generate_anonymized_case_data(case_id)
         if anon_data:
             anon_id = anon_data["anonymized_id"]
-            anon_pdf_bytes = generate_anonymized_pdf(case_id, anon_id)
+            anon_pdf_bytes = generate_anonymized_pdf(case_id, anon_id, user_id)
             if anon_pdf_bytes:
                 st.download_button(
                     label="🔗 Download Anonymized PDF for Lawyer",

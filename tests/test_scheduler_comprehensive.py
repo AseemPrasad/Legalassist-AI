@@ -15,7 +15,7 @@ from database import (
 )
 from scheduler import (
     check_and_send_reminders,
-    get_scheduler,
+    _scheduler,
     start_scheduler,
     stop_scheduler,
     trigger_reminder_check_now,

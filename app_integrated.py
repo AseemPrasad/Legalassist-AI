@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== DATABASE & SCHEDULER SETUP ====================
 from database import init_db
-from scheduler import start_scheduler, stop_scheduler
+from scheduler import start_scheduler
 
 # Initialize database
 try:
@@ -41,15 +41,11 @@ try:
 except Exception as e:
     logger.error(f"Failed to initialize database: {str(e)}")
 
-# Start background scheduler on app startup
-if "scheduler_started" not in st.session_state:
-    try:
-        start_scheduler()
-        st.session_state.scheduler_started = True
-        logger.info("Background scheduler started")
-    except Exception as e:
-        logger.error(f"Failed to start scheduler: {str(e)}")
-        st.session_state.scheduler_started = False
+# ==================== Logging Setup ====================
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 
 # ==================== Import UI Modules ====================
 try:
@@ -79,12 +75,6 @@ def main():
     st.sidebar.markdown("# ⚖️ LegalEase AI")
     st.sidebar.markdown("**Convert Judgments to Simple Language**")
     st.sidebar.divider()
-    
-    # Display scheduler status
-    if st.session_state.get("scheduler_started"):
-        st.sidebar.success("✅ Notifications: Active")
-    else:
-        st.sidebar.warning("⚠️ Notifications: Offline")
     
     st.sidebar.markdown("---")
     st.sidebar.markdown(
@@ -213,16 +203,57 @@ def show_judgment_analysis():
                 if not summary:
                     st.error(ui["empty_summary"])
                 else:
-                    remedies = {}
+                    st.markdown(f"## {ui['simplified_judgment']}")
+                    st.write(summary)
+                    st.success(ui["summary_success"])
+                    
+                    # ===== REMEDIES SECTION =====
+                    st.markdown("---")
+                    st.markdown(f"## {ui['remedies_title']}")
                     
                     with st.spinner(ui["remedies_spinner"]):
                         try:
-                            remedies = get_remedies_advice(raw_text, language, client) or {}
+                            remedies = get_remedies_advice(raw_text, language, client)
+                            
+                            if remedies.get("what_happened"):
+                                st.subheader(ui["what_happened"])
+                                st.write(remedies["what_happened"])
+                            
+                            if remedies.get("can_appeal"):
+                                st.subheader(ui["can_appeal"])
+                                can_appeal_value = remedies["can_appeal"]
+                                st.write(core.localize_yes_no(can_appeal_value, ui))
+                                
+                                if can_appeal_value.strip().lower() == "yes":
+                                    st.subheader(ui["appeal_details"])
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        if remedies.get("appeal_days"):
+                                            st.metric(ui["days_to_file_appeal"], remedies["appeal_days"])
+                                        if remedies.get("appeal_court"):
+                                            st.write(f"**{ui['appeal_to']}:** {remedies['appeal_court']}")
+                                    with col2:
+                                        if remedies.get("cost"):
+                                            st.write(f"**{ui['estimated_cost']}:** {remedies['cost']}")
+                            
+                            if remedies.get("first_action"):
+                                st.subheader(ui["first_action"])
+                                st.write(f"✅ {remedies['first_action']}")
+                            
+                            if remedies.get("deadline"):
+                                st.subheader(ui["important_deadline"])
+                                st.write(remedies["deadline"])
+                            
                         except Exception as e:
                             st.error(f"{ui['remedies_error']}: {str(e)}")
+                    
+                    # ===== FREE LEGAL HELP SECTION =====
+                    st.markdown("---")
+                    st.markdown(f"## {ui['free_legal_help']}")
+                    st.info(ui["legal_help_resources"])
 
-                    result = core.build_judgment_result_text(summary, remedies, ui)
-                    core.render_shareable_result_box(result, ui)
+                    result_text = core.build_judgment_result_text(summary, remedies, ui)
+                    core.render_shareable_result_box(result_text, ui)
                     st.success(ui["summary_success"])
                     
             except Exception as e:

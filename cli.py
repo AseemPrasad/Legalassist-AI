@@ -387,6 +387,8 @@ def process_one_pdf(
         result["extraction_method"] = extraction_method
         result["ocr_used"] = ocr_used
         result["extraction_confidence"] = extraction_confidence
+        if client is None:
+            return result
 
         language = normalize_language(language_arg, text_for_auto=raw_text)
         result["language"] = language

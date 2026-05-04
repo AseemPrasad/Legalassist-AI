@@ -25,6 +25,8 @@ from database import (
     mark_otp_as_used,
     cleanup_expired_otps,
     update_user_last_login,
+    record_otp_failed_attempt,
+    reset_otp_failed_attempts,
     User,
     OTPVerification,  # Added to fix NameError in request_otp rate limiting
 )
@@ -98,6 +100,10 @@ JWT_EXPIRY_HOURS = 7 * 24  # 7 days
 OTP_EXPIRY_MINUTES = int(os.getenv("OTP_EXPIRY_MINUTES", "10"))
 OTP_RATE_LIMIT_HOURS = 1
 OTP_RATE_LIMIT_MAX = 3  # Max OTP requests per email per hour
+
+# OTP Verification Security - Failed Attempt Lockout
+OTP_MAX_FAILED_ATTEMPTS = int(os.getenv("OTP_MAX_FAILED_ATTEMPTS", "5"))  # Max failed verification attempts
+OTP_LOCKOUT_MINUTES = int(os.getenv("OTP_LOCKOUT_MINUTES", "15"))  # Lockout duration after max attempts
 
 
 def _hash_otp(otp: str) -> str:
@@ -304,8 +310,13 @@ def request_otp(email: str) -> Tuple[bool, str]:
 
 def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Optional[str]]:
     """
-    Verify OTP and create JWT token.
+    Verify OTP and create JWT token with brute-force protection.
     Returns (success, message, token).
+    
+    Security features:
+    - Track failed verification attempts per OTP
+    - Lock OTP after max failed attempts
+    - Require user to request a new OTP after lockout
     """
     db = SessionLocal()
     try:
@@ -315,11 +326,36 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
         if not otp_record:
             return False, "OTP expired or not found. Please request a new one.", None
 
+        # Check if OTP is locked due to too many failed attempts
+        if otp_record.is_locked():
+            remaining_time = (otp_record.locked_until - datetime.now(timezone.utc)).total_seconds() / 60
+            logger.warning(f"OTP verification attempt for {email} blocked - OTP is locked (remaining time: {remaining_time:.1f} minutes)")
+            return False, f"Too many failed attempts. Please request a new OTP after {int(remaining_time)} minutes.", None
+
         # Verify OTP
         if not _verify_otp_hash(otp, otp_record.otp_hash):
-            return False, "Invalid OTP code. Please try again.", None
+            # Record failed attempt and check if lockout is needed
+            record_otp_failed_attempt(
+                db, 
+                otp_record.id, 
+                lockout_duration_minutes=OTP_LOCKOUT_MINUTES,
+                max_failed_attempts=OTP_MAX_FAILED_ATTEMPTS
+            )
+            
+            # Check if OTP is now locked after this attempt
+            db.refresh(otp_record)
+            if otp_record.is_locked():
+                logger.warning(
+                    f"OTP for {email} locked after {otp_record.failed_attempts} failed verification attempts"
+                )
+                return False, f"Too many failed attempts (limit: {OTP_MAX_FAILED_ATTEMPTS}). OTP is now locked. Please request a new OTP.", None
+            
+            attempts_remaining = OTP_MAX_FAILED_ATTEMPTS - otp_record.failed_attempts
+            logger.info(f"Failed OTP verification for {email}. Attempts remaining: {attempts_remaining}")
+            return False, f"Invalid OTP code. {attempts_remaining} attempts remaining before lockout.", None
 
-        # Mark OTP as used
+        # OTP is valid - reset failed attempts and mark as used
+        reset_otp_failed_attempts(db, otp_record.id)
         mark_otp_as_used(db, otp_record.id)
 
         # Get or create user
@@ -333,7 +369,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
         # Create JWT token
         token = create_jwt_token(user.id, user.email)
 
-        logger.info(f"User logged in: {email} (user_id={user.id})")
+        logger.info(f"User logged in successfully: {email} (user_id={user.id})")
         return True, "Login successful", token
 
     except Exception as e:

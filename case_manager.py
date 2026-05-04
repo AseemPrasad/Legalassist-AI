@@ -345,6 +345,7 @@ def _auto_create_deadlines_from_remedies(
                     description=f"Appeal deadline - {remedies.get('appeal_court', 'Unknown court')}",
                 )
                 db.add(deadline)
+                db.flush()  # Flush to generate deadline.id before using it
 
                 # Create timeline event
                 create_timeline_event(

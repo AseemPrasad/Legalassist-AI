@@ -1,22 +1,19 @@
 """
 Home page - Judgment Analysis (Main page)
 This is the primary feature of LegalEase AI
+
+CHANGE: build_judgment_result_text now returns (plain_text, structured_dict).
+        render_shareable_result_box accepts the tuple directly — no other changes needed.
 """
 
 import streamlit as st
 import logging
 
-st.set_page_config(
-    page_title="LegalEase AI — Judgment Simplifier",
-    page_icon="⚡",
-    layout="centered",
-    initial_sidebar_state="collapsed",
-)
-
 from core.app_utils import (
     get_client,
     extract_text_from_pdf,
     compress_text,
+    english_leakage_detected,
     output_language_mismatch_detected,
     build_prompt,
     build_retry_prompt,
@@ -24,8 +21,6 @@ from core.app_utils import (
     extract_appeal_info,
     get_localized_ui_text,
     localize_yes_no,
-    build_judgment_result_text,
-    render_shareable_result_box,
     RETRO_STYLING,
     LANGUAGES,
     parse_summary_bullets,
@@ -80,20 +75,15 @@ MOBILE_HEADER_CSS = """
 
 
 def render_page():
+    """Render the judgment analysis page"""
+    # Get client early for translation
     client = get_client()
-
+    
     current_language = st.session_state.get("judgment_language", "English")
     ui = get_localized_ui_text(current_language, client)
 
-    # Inject CSS once
-    st.markdown(MOBILE_HEADER_CSS, unsafe_allow_html=True)
-
-    # Custom title + subtitle — plain divs, Streamlit h1/h2 rules never apply
-    st.markdown(
-        f'<div class="app-title">⚡ LegalEase AI</div>'
-        f'<div class="app-subtitle">{ui["app_subtitle"]}</div>',
-        unsafe_allow_html=True,
-    )
+    st.title("⚡ LegalEase AI")
+    st.subheader(ui["app_subtitle"])
 
     st.markdown(ui["app_intro"])
     st.markdown("---")
@@ -132,7 +122,7 @@ def render_page():
                     model=model_id,
                     messages=[
                         {"role": "system", "content": f"You are an expert legal simplification engine. Output only in {language}."},
-                        {"role": "user", "content": prompt},
+                        {"role": "user", "content": prompt}
                     ],
                     max_tokens=280,
                     temperature=0.05,
@@ -143,13 +133,14 @@ def render_page():
                 # and remove any introductory text
                 summary = parse_summary_bullets(summary_raw)
 
+                # Retry if English leakage detected
                 if language.lower() != "english" and output_language_mismatch_detected(summary, language):
                     retry_prompt = build_retry_prompt(safe_text, language)
                     response2 = client.chat.completions.create(
                         model=model_id,
                         messages=[
                             {"role": "system", "content": f"Strict multilingual rewriting engine. Output only in {language}."},
-                            {"role": "user", "content": retry_prompt},
+                            {"role": "user", "content": retry_prompt}
                         ],
                         max_tokens=260,
                         temperature=0.03,
@@ -161,28 +152,70 @@ def render_page():
                 if not summary:
                     st.error(ui["empty_summary"])
                 else:
-                    remedies = {}
-
+                    # Display results
+                    st.markdown(f"## {ui['simplified_judgment']}")
+                    st.write(summary)
+                    st.success(ui["summary_success"])
+                    
+                    # ===== REMEDIES SECTION =====
+                    st.markdown("---")
+                    st.markdown(f"## {ui['remedies_title']}")
+                    
                     with st.spinner(ui["remedies_spinner"]):
                         try:
-                            remedies = get_remedies_advice(raw_text, language, client) or {}
+                            remedies = get_remedies_advice(raw_text, language, client)
+                            
+                            if remedies.get("what_happened"):
+                                st.subheader(ui["what_happened"])
+                                st.write(remedies["what_happened"])
+                            
+                            if remedies.get("can_appeal"):
+                                st.subheader(ui["can_appeal"])
+                                can_appeal_value = remedies["can_appeal"]
+                                st.write(localize_yes_no(can_appeal_value, ui))
+                                
+                                if can_appeal_value.strip().lower() == "yes":
+                                    st.subheader(ui["appeal_details"])
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        if remedies.get("appeal_days"):
+                                            st.metric(ui["days_to_file_appeal"], remedies["appeal_days"])
+                                        if remedies.get("appeal_court"):
+                                            st.write(f"**{ui['appeal_to']}:** {remedies['appeal_court']}")
+                                    with col2:
+                                        if remedies.get("cost"):
+                                            st.write(f"**{ui['estimated_cost']}:** {remedies['cost']}")
+                            
+                            if remedies.get("first_action"):
+                                st.subheader(ui["first_action"])
+                                st.write(f"✅ {remedies['first_action']}")
+                            
+                            if remedies.get("deadline"):
+                                st.subheader(ui["important_deadline"])
+                                st.write(remedies["deadline"])
+                            
                         except Exception as e:
                             st.error(f"{ui['remedies_error']}: {str(e)}")
-
-                    result = build_judgment_result_text(summary, remedies, ui)
-                    render_shareable_result_box(result, ui)
-                    st.success(ui["summary_success"])
-
+                    
+                    # ===== ANALYTICS & TRACKING SECTION =====
                     st.markdown("---")
                     st.markdown(f"## {ui['track_title']}")
+                    
                     st.info(ui["track_info"])
+                    
+                    col1, col2, col3 = st.columns(3)
 
-                    if st.button(ui["view_analytics"], key="view_analytics", use_container_width=True):
-                        st.session_state.show_analytics = True
-                    if st.button(ui["estimate_chances"], key="estimate_chances", use_container_width=True):
-                        st.session_state.show_estimator = True
-                    if st.button(ui["report_outcome"], key="report_outcome", use_container_width=True):
-                        st.session_state.show_feedback = True
+                    with col1:
+                        if st.button(ui["view_analytics"], key="view_analytics"):
+                            st.session_state.show_analytics = True
+
+                    with col2:
+                        if st.button(ui["estimate_chances"], key="estimate_chances"):
+                            st.session_state.show_estimator = True
+
+                    with col3:
+                        if st.button(ui["report_outcome"], key="report_outcome"):
+                            st.session_state.show_feedback = True
 
                     if st.session_state.get("show_analytics"):
                         st.subheader(ui["quick_analytics_preview"])
@@ -194,18 +227,28 @@ def render_page():
                             summary_data = AnalyticsAggregator.get_dashboard_summary(db)
 
                             if summary_data.get("total_cases_processed", 0) > 0:
-                                st.metric(ui["total_cases_tracked"], summary_data["total_cases_processed"])
-                                trends = AnalyticsAggregator.get_regional_trends(db)
-                                success_rate = trends[0]['appeal_success_rate'] if trends else 'N/A'
-                                st.metric(ui["appeals_success_rate"], f"{success_rate}%")
-                                st.metric(ui["appeals_filed"], summary_data.get("appeals_filed", 0))
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric(ui["total_cases_tracked"], summary_data["total_cases_processed"])
+                                with col2:
+                                    trends = AnalyticsAggregator.get_regional_trends(db)
+                                    success_rate = trends[0]['appeal_success_rate'] if trends else 'N/A'
+                                    st.metric(ui["appeals_success_rate"], f"{success_rate}%")
+                                with col3:
+                                    st.metric(ui["appeals_filed"], summary_data.get("appeals_filed", 0))
+                                
                                 st.write(f"📌 **{ui['analytics_link_text']}**")
                             else:
                                 st.info(ui["analytics_empty"])
-
+                            
                             db.close()
-                        except Exception:
+                        except Exception as e:
                             st.info(ui["analytics_not_ready"])
+                    
+                    # ===== FREE LEGAL HELP SECTION =====
+                    st.markdown("---")
+                    st.markdown(f"## {ui['free_legal_help']}")
+                    st.info(ui["legal_help_resources"])
 
             except Exception as e:
                 err = str(e)

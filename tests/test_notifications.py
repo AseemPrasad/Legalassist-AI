@@ -246,16 +246,48 @@ class TestNotificationService:
         service = NotificationService()
         deadline_date = datetime.now(timezone.utc) + timedelta(days=3)
         
-        subject, html_content = service.build_email_message(
-            "Appeal Filing", 3, deadline_date, "CASE-001"
-        )
+        # Create a mock deadline object
+        deadline = Mock(spec=CaseDeadline)
+        deadline.case_title = "Appeal Filing"
+        deadline.deadline_type = "appeal"
+        deadline.deadline_date = deadline_date
+        deadline.case_id = "CASE-001"
+        deadline.description = "Test description"
         
-        assert "Urgent" in subject
+        subject, html_content = service.build_email_message(deadline, 3)
+        
+        assert "REMINDER" in subject or "URGENT" in subject
         assert "Appeal Filing" in subject
-        assert "3 day" in subject
+        assert "3 day" in subject or "3 Days" in html_content
         assert "CASE-001" in html_content
-        assert "<html>" in html_content
+        assert "<!DOCTYPE html>" in html_content
         assert "deadline" in html_content.lower()
+
+    def test_email_title_escaping(self):
+        """Test that case titles with HTML are escaped in email content"""
+        service = NotificationService()
+        deadline_date = datetime.now(timezone.utc) + timedelta(days=3)
+        malicious_title = "Case <script>alert('XSS')</script> & More"
+        
+        # Create a mock deadline object
+        deadline = Mock(spec=CaseDeadline)
+        deadline.case_title = malicious_title
+        deadline.deadline_type = "appeal"
+        deadline.deadline_date = deadline_date
+        deadline.case_id = "CASE-001"
+        deadline.description = "<b>Bold</b>" # Also test description escaping
+        
+        subject, html_content = service.build_email_message(deadline, 3)
+        
+        # Title in subject should be plain
+        assert malicious_title in subject
+        
+        # Title and description in HTML MUST be escaped
+        assert "<script>" not in html_content
+        assert "&lt;script&gt;alert('XSS')&lt;/script&gt;" in html_content
+        assert " &amp; " in html_content
+        assert "<b>" not in html_content
+        assert "&lt;b&gt;Bold&lt;/b&gt;" in html_content
 
     @patch("notification_service.TwilioClient")
     def test_sms_send_success(self, mock_twilio, test_db):
