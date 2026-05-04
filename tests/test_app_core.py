@@ -302,8 +302,7 @@ class TestRemediesParsing:
     def test_parse_empty_response(self):
         """Test parsing of empty response"""
         remedies = parse_remedies_response("")
-
-       assert isinstance(remedies, dict)
+        assert isinstance(remedies, dict)
     
     def test_parse_mixed_case_responses(self):
         """Test parsing with various text cases"""
