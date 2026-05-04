@@ -15,6 +15,9 @@ from database import (
     SessionLocal,
     NotificationStatus,
     NotificationChannel,
+    Case,
+    CaseStatus,
+    User,
     CaseDeadline,
     UserPreference,
     NotificationLog,
@@ -328,6 +331,57 @@ class TestNotificationService:
 
         assert result.success == True
         assert result.channel == NotificationChannel.EMAIL
+
+    @patch("notification_service.SendGridAPIClient")
+    def test_email_send_uses_case_number(self, mock_sendgrid, test_db):
+        """Test email reminder uses the case_number from the related case"""
+        mock_response = Mock()
+        mock_response.status_code = 202
+        mock_response.headers = {"X-Message-ID": "email_123"}
+        mock_sendgrid.return_value.send.return_value = mock_response
+
+        user = User(email="user123@example.com")
+        test_db.add(user)
+        test_db.commit()
+        test_db.refresh(user)
+
+        case = Case(
+            user_id=user.id,
+            case_number="CASE-9001",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Appeal Filing",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
+        deadline = CaseDeadline(
+            user_id=str(user.id),
+            case_id=case.id,
+            case_title="Appeal Filing",
+            deadline_date=datetime.now(timezone.utc) + timedelta(days=10),
+            deadline_type="appeal",
+        )
+        test_db.add(deadline)
+        test_db.commit()
+        test_db.refresh(deadline)
+
+        pref = create_or_update_user_preference(
+            test_db, str(user.id), "user@example.com",
+        )
+
+        with patch.dict(os.environ, {
+            "SENDGRID_API_KEY": "test_key",
+            "SENDGRID_FROM_EMAIL": "noreply@legalassist.ai",
+        }):
+            service = NotificationService()
+            with patch.object(service, "build_email_message", wraps=service.build_email_message) as mock_build:
+                result = service.send_email_reminder(test_db, deadline, pref, 10)
+
+        assert result.success == True
+        assert mock_build.call_args.args[3] == "CASE-9001"
 
     def test_mock_mode_sms(self, test_db):
         """Test SMS in mock mode (no credentials)"""
