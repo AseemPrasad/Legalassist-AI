@@ -27,10 +27,10 @@ from core.app_utils import (
 )
 
 # ==================== Notification System Setup ====================
-from database import init_db, SessionLocal, get_db, DocumentType
+from database import init_db, SessionLocal, get_db, DocumentType, db_session
 from scheduler import start_scheduler, stop_scheduler
 from auth import init_auth_session, require_auth, get_current_user_id, get_current_user_email, logout_user
-from case_manager import get_user_cases_summary, upload_case_document, create_new_case
+from case_manager import get_user_cases_summary, upload_case_document, create_new_case, get_case_detail
 
 # Initialize database
 init_db()
@@ -142,6 +142,207 @@ def render_localized_legal_help():
                 )
         else:
             st.write("No NGO records available.")
+
+# ==================== UI Helper Components ====================
+
+def render_remedies_section(remedies):
+    """
+    Renders the legal remedies and options section based on judgment analysis.
+    """
+    st.markdown("---")
+    st.markdown("## ⚖️ What Can You Do Now?")
+    
+    with st.spinner("Analyzing your legal options..."):
+        try:
+            # Show warning if data is partial
+            if remedies.get("_is_partial"):
+                st.warning(remedies.get("_warning", "Note: Some information may be incomplete."))
+            
+            # Show each answer with clean layout
+            if remedies.get("what_happened"):
+                st.markdown("### 📝 What Happened?")
+                st.info(remedies["what_happened"])
+            
+            if remedies.get("can_appeal"):
+                st.markdown("### 🏛️ Can You Appeal?")
+                st.write(remedies["can_appeal"])
+                
+                # Only show appeal details if they can appeal
+                if "yes" in remedies["can_appeal"].lower():
+                    st.markdown("#### Appeal Details")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if remedies.get("appeal_days"):
+                            st.metric("Days to File Appeal", remedies["appeal_days"], delta_color="inverse")
+                        if remedies.get("appeal_court"):
+                            st.markdown(f"**Appeal to:** `{remedies['appeal_court']}`")
+                    
+                    with col2:
+                        if remedies.get("cost"):
+                            st.markdown(f"**Estimated Cost:** `{remedies['cost']}`")
+                        if remedies.get("deadline"):
+                            st.markdown(f"**Deadline Note:** {remedies['deadline']}")
+            
+            if remedies.get("first_action"):
+                st.markdown("### 🚀 What Should You Do First?")
+                st.success(f"**Action Plan:** {remedies['first_action']}")
+            
+            if remedies.get("deadline") and not remedies.get("can_appeal"):
+                st.markdown("### ⏰ Important Deadline")
+                st.warning(remedies["deadline"])
+            
+        except Exception as e:
+            st.error(f"Could not render remedies advice: {str(e)}")
+            logging.exception("Remedies rendering failed")
+
+
+def render_save_to_case_section(user_id, raw_text, summary, remedies):
+    """
+    Renders the UI for saving the current analysis to a user's case history.
+    """
+    st.markdown("---")
+    st.markdown("## 💾 Save to Case History")
+    
+    if not require_auth():
+        st.info("Log in to save this document, track deadlines, and view timeline history.")
+        if st.button("Go to Login", key="login_to_save"):
+            st.switch_page("pages/0_Login.py")
+        return
+
+    cases = get_user_cases_summary(user_id, include_closed=False)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### Existing Cases")
+        if cases:
+            case_options = {f"{c['case_number']} - {c['title']}": c['id'] for c in cases}
+            selected_case_name = st.selectbox("Select Existing Case", options=list(case_options.keys()))
+            selected_case_id = case_options[selected_case_name]
+            
+            if st.button("Save to Selected Case", use_container_width=True):
+                with st.spinner("Saving..."):
+                    doc = upload_case_document(
+                        user_id=user_id,
+                        case_id=selected_case_id,
+                        document_type=DocumentType.JUDGMENT,
+                        document_content=raw_text,
+                        summary=summary,
+                        remedies=remedies
+                    )
+                    if doc:
+                        st.success("✅ Saved successfully! Deadlines auto-created.")
+                        st.session_state.selected_case_id = selected_case_id
+        else:
+            st.info("No active cases found. Create one to the right.")
+        
+        if st.session_state.get("selected_case_id"):
+            if st.button("🔍 View Case Details", key="view_existing_case", use_container_width=True):
+                st.switch_page("pages/2_Case_Details.py")
+            
+    with col2:
+        st.markdown("### New Case")
+        with st.expander("➕ Create & Save New Case"):
+            new_case_number = st.text_input("Case Number", placeholder="e.g. CA/123/2024")
+            new_case_title = st.text_input("Case Title (Optional)", placeholder="e.g. Sharma vs State")
+            new_case_type = st.selectbox("Type", ["civil", "criminal", "family", "other"])
+            new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court")
+            
+            if st.button("Create Case & Save Document", use_container_width=True):
+                if new_case_number and new_jurisdiction:
+                    new_case = create_new_case(
+                        user_id=user_id,
+                        case_number=new_case_number,
+                        case_type=new_case_type,
+                        jurisdiction=new_jurisdiction,
+                        title=new_case_title
+                    )
+                    if new_case:
+                        doc = upload_case_document(
+                            user_id=user_id,
+                            case_id=new_case.id,
+                            document_type=DocumentType.JUDGMENT,
+                            document_content=raw_text,
+                            summary=summary,
+                            remedies=remedies
+                        )
+                        if doc:
+                            st.success("✅ Case created and document saved!")
+                            st.session_state.selected_case_id = new_case.id
+                else:
+                    st.error("Case Number and Jurisdiction are required.")
+
+
+def render_analytics_preview_section():
+    """
+    Renders a premium analytics preview section with robust database session handling.
+    Fixes potential connection leaks by using the db_session context manager.
+    """
+    st.markdown("---")
+    st.markdown("## 📊 Case Tracking & Regional Trends")
+    
+    st.info("""
+    **Help us build better predictions!**
+    
+    By tracking your case, you help us understand appeal success rates in your jurisdiction.
+    The more data we have, the more accurately we can estimate your chances.
+    """)
+    
+    # Action buttons for the analytics module
+    act_col1, act_col2, act_col3 = st.columns(3)
+    with act_col1:
+        if st.button("📈 View Stats", key="view_analytics", use_container_width=True):
+            st.session_state.show_analytics = True
+    with act_col2:
+        if st.button("🎯 Est. Chances", key="estimate_chances", use_container_width=True):
+            st.switch_page("pages/2_Appeal_Estimator.py")
+    with act_col3:
+        if st.button("📝 Report Outcome", key="report_outcome", use_container_width=True):
+            st.switch_page("pages/3_Report_Outcome.py")
+    
+    # Detailed analytics preview
+    if st.session_state.get("show_analytics"):
+        st.markdown("### 📈 Quick Analytics Preview")
+        try:
+            from analytics_engine import AnalyticsAggregator
+            
+            with db_session() as db:
+                summary = AnalyticsAggregator.get_dashboard_summary(db)
+                
+                if summary.get("total_cases_processed", 0) > 0:
+                    m1, m2, m3 = st.columns(3)
+                    
+                    with m1:
+                        st.metric("Total Cases Tracked", summary["total_cases_processed"])
+                    
+                    with m2:
+                        trends = AnalyticsAggregator.get_regional_trends(db)
+                        success_rate = trends[0]['appeal_success_rate'] if trends else 'N/A'
+                        st.metric("Appeals Success Rate", f"{success_rate}%")
+                        
+                        # Visual indicator for success rate
+                        if success_rate != 'N/A':
+                            try:
+                                rate_f = float(success_rate) / 100.0
+                                st.progress(rate_f, text=f"Success Rate Intensity")
+                            except: pass
+                            
+                    with m3:
+                        st.metric("Appeals Filed", summary.get("appeals_filed", 0))
+                    
+                    st.markdown("""
+                    <div style="background-color: rgba(255, 255, 255, 0.05); padding: 10px; border-radius: 8px; border-left: 4px solid #00c853; margin: 10px 0;">
+                        📌 <b>Explore More:</b> Visit the <a href="/Analytics_Dashboard" target="_self">Full Analytics Dashboard</a> 
+                        for heatmaps, judge-specific data, and time-to-verdict projections.
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.info("✨ Community statistics will appear here once more users track their cases. Be the first to contribute!")
+        
+        except Exception as e:
+            logging.error(f"Analytics rendering error: {str(e)}")
+            st.info("The analytics module is currently being updated. Please try again later.")
+
 
 # ==================== Main UI Component ====================
 def main():
