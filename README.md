@@ -75,6 +75,12 @@ Process a single file:
 python cli.py process --file judgment.pdf --language Hindi
 ```
 
+Process a scanned/image PDF using OCR (Hindi + English):
+
+```bash
+python cli.py process --file scanned_judgment.pdf --enable-ocr --ocr-languages eng+hin
+```
+
 Batch process a folder (parallel workers):
 
 ```bash
@@ -97,6 +103,9 @@ python cli.py process_batch --input ./judgments_folder --output ./results.csv
 - Real-time progress bar with status and running cost
 - Exports to CSV/JSON (`--format csv|json|both`, default `both`)
 - Language controls: fixed (`--language Hindi`) or auto-detect (`--language auto`)
+- OCR fallback for scanned PDFs (`--enable-ocr`)
+- OCR language packs for local scripts (`--ocr-languages eng+hin`)
+- OCR quality signal via extraction confidence in output
 
 ### Resume Behavior
 

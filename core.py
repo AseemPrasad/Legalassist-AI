@@ -3,7 +3,7 @@ import pdfplumber
 import re
 import logging
 from pathlib import Path
-from typing import Dict, Optional, List, Union
+from typing import Dict, Optional, List, Union, Any
 
 # Allow this module to coexist with the core/ package so imports such as
 # `from core.app_utils import ...` continue to resolve.
@@ -19,31 +19,121 @@ DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 # -----------------------------
 # PDF to text
 # -----------------------------
-def extract_text_from_pdf(pdf_input: Union[str, Path, object]) -> str:
-    """
-    Extracts text from a PDF file or file-like object using pdfplumber 
-    for robustness, falling back to pypdf if necessary.
-    """
+def _read_pdf_bytes(pdf_input: Union[str, Path, object]) -> Optional[bytes]:
+    """Read PDF bytes when possible for OCR conversion."""
+    if isinstance(pdf_input, (str, Path)):
+        try:
+            with open(pdf_input, "rb") as f:
+                return f.read()
+        except Exception:
+            return None
+    try:
+        if hasattr(pdf_input, "seek"):
+            pdf_input.seek(0)
+        data = pdf_input.read()
+        if hasattr(pdf_input, "seek"):
+            pdf_input.seek(0)
+        return data
+    except Exception:
+        return None
+
+
+def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
+    """Reconstruct text using OCR bounding boxes with simple column-aware ordering."""
+    lines: Dict[tuple, Dict[str, Any]] = {}
+    texts = data.get("text", [])
+    confs = data.get("conf", [])
+    lefts = data.get("left", [])
+    tops = data.get("top", [])
+    widths = data.get("width", [])
+
+    for i, token in enumerate(texts):
+        token = (token or "").strip()
+        if not token:
+            continue
+        try:
+            conf = float(confs[i])
+        except Exception:
+            conf = -1.0
+        if conf < 0:
+            continue
+
+        key = (data["page_num"][i], data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        if key not in lines:
+            lines[key] = {
+                "tokens": [],
+                "left": lefts[i],
+                "top": tops[i],
+                "right": lefts[i] + widths[i],
+            }
+        lines[key]["tokens"].append(token)
+        lines[key]["left"] = min(lines[key]["left"], lefts[i])
+        lines[key]["right"] = max(lines[key]["right"], lefts[i] + widths[i])
+        lines[key]["top"] = min(lines[key]["top"], tops[i])
+
+    if not lines:
+        return ""
+
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for key, value in lines.items():
+        page_num = int(key[0])
+        value["text"] = " ".join(value["tokens"]).strip()
+        grouped.setdefault(page_num, []).append(value)
+
+    pages_out: List[str] = []
+    for page_num in sorted(grouped.keys()):
+        page_lines = [ln for ln in grouped[page_num] if ln["text"]]
+        if not page_lines:
+            continue
+        min_left = min(ln["left"] for ln in page_lines)
+        max_right = max(ln["right"] for ln in page_lines)
+        width = max(1, max_right - min_left)
+        threshold = min_left + (width // 2)
+        left_col = [ln for ln in page_lines if ln["left"] <= threshold]
+        right_col = [ln for ln in page_lines if ln["left"] > threshold]
+
+        use_two_cols = len(left_col) > 4 and len(right_col) > 4 and (min(ln["left"] for ln in right_col) - max(ln["right"] for ln in left_col)) > 10
+        if use_two_cols:
+            ordered = sorted(left_col, key=lambda x: (x["top"], x["left"])) + sorted(right_col, key=lambda x: (x["top"], x["left"]))
+        else:
+            ordered = sorted(page_lines, key=lambda x: (x["top"], x["left"]))
+        pages_out.append("\n".join(ln["text"] for ln in ordered))
+
+    return "\n\n".join(pages_out).strip()
+
+
+def extract_text_with_diagnostics(
+    pdf_input: Union[str, Path, object],
+    enable_ocr: bool = False,
+    ocr_languages: str = "eng+hin",
+    ocr_dpi: int = 300,
+) -> Dict[str, Any]:
+    """Extract text using PDF parsers, optionally falling back to OCR with confidence."""
     text = ""
-    
+    diagnostics: Dict[str, Any] = {
+        "text": "",
+        "method": "",
+        "ocr_used": False,
+        "confidence": None,
+    }
+
     # 1. Try pdfplumber (more robust for complex layouts)
     try:
         with pdfplumber.open(pdf_input) as pdf:
             pages_text = []
             for page in pdf.pages:
-                # Use default extraction which is usually better for flow
                 page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
                 if page_text:
                     pages_text.append(page_text)
             text = "\n".join(pages_text).strip()
-            
             if text:
+                diagnostics.update({"text": text, "method": "pdfplumber", "ocr_used": False})
                 LOGGER.info("Extracted text using pdfplumber.")
-                return text
+                return diagnostics
     except Exception as e:
         LOGGER.warning(f"pdfplumber extraction failed or not available: {e}. Falling back to pypdf.")
 
-    # 2. Fallback to pypdf (the successor to PyPDF2)
+    # 2. Fallback to pypdf
     try:
         if isinstance(pdf_input, (str, Path)):
             with open(pdf_input, "rb") as f:
@@ -52,17 +142,93 @@ def extract_text_from_pdf(pdf_input: Union[str, Path, object]) -> str:
         else:
             reader = PdfReader(pdf_input)
             text = _extract_pages_pypdf(reader)
-        
         if text:
+            diagnostics.update({"text": text, "method": "pypdf", "ocr_used": False})
             LOGGER.info("Extracted text using pypdf fallback.")
-            return text
+            return diagnostics
     except Exception as e:
-        LOGGER.error(f"pypdf extraction also failed: {e}")
+        LOGGER.warning(f"pypdf extraction failed: {e}")
 
-    if not text.strip():
-        raise ValueError("No extractable text found. The PDF may be image-only or empty.")
-    
-    return text
+    if not enable_ocr:
+        raise ValueError("No extractable text found. The PDF may be image-only or empty. Re-run with OCR enabled.")
+
+    # 3. OCR path for scanned/image PDFs
+    try:
+        from pdf2image import convert_from_bytes, convert_from_path
+        import pytesseract
+        from pytesseract import Output
+    except Exception as e:
+        raise RuntimeError(
+            f"OCR dependencies are missing ({e}). Install pytesseract, pdf2image, Pillow and Tesseract binaries."
+        ) from e
+
+    try:
+        images = []
+        if isinstance(pdf_input, (str, Path)):
+            images = convert_from_path(str(pdf_input), dpi=ocr_dpi)
+        else:
+            data = _read_pdf_bytes(pdf_input)
+            if not data:
+                raise ValueError("Unable to read PDF bytes for OCR.")
+            images = convert_from_bytes(data, dpi=ocr_dpi)
+    except Exception as e:
+        raise RuntimeError(f"Failed to convert PDF pages to images for OCR: {e}") from e
+
+    if not images:
+        raise ValueError("OCR could not read any pages from PDF.")
+
+    ocr_pages: List[str] = []
+    confidences: List[float] = []
+    for image in images:
+        data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
+        ocr_text = _extract_layout_text_from_tesseract_data(data)
+        if ocr_text:
+            ocr_pages.append(ocr_text)
+        raw_conf = data.get("conf", [])
+        valid_conf = []
+        for c in raw_conf:
+            try:
+                val = float(c)
+                if val >= 0:
+                    valid_conf.append(val)
+            except Exception:
+                continue
+        if valid_conf:
+            confidences.append(sum(valid_conf) / len(valid_conf))
+
+    final_text = "\n\n".join(ocr_pages).strip()
+    if not final_text:
+        raise ValueError("OCR completed but no readable text was extracted.")
+
+    avg_conf = round(sum(confidences) / len(confidences), 2) if confidences else None
+    diagnostics.update(
+        {
+            "text": final_text,
+            "method": "ocr_tesseract",
+            "ocr_used": True,
+            "confidence": avg_conf,
+        }
+    )
+    return diagnostics
+
+
+def extract_text_from_pdf(
+    pdf_input: Union[str, Path, object],
+    enable_ocr: bool = False,
+    ocr_languages: str = "eng+hin",
+    ocr_dpi: int = 300,
+) -> str:
+    """
+    Extracts text from a PDF file or file-like object using pdfplumber 
+    for robustness, falling back to pypdf if necessary.
+    """
+    diagnostics = extract_text_with_diagnostics(
+        pdf_input=pdf_input,
+        enable_ocr=enable_ocr,
+        ocr_languages=ocr_languages,
+        ocr_dpi=ocr_dpi,
+    )
+    return diagnostics["text"]
 
 def _extract_pages_pypdf(reader: PdfReader) -> str:
     """Helper for pypdf extraction fallback."""
@@ -220,13 +386,13 @@ def _strip_question_label(key: str, value: Optional[str]) -> Optional[str]:
         return None
 
     patterns = {
-        "what_happened": r"^(what happened\??)\s*",
-        "can_appeal": r"^(can the loser appeal\??)\s*",
-        "appeal_days": r"^(appeal timeline\??|how many days\??)\s*",
-        "appeal_court": r"^(appeal court\??|which court(?: should they go to)?\??)\s*",
-        "cost_estimate": r"^(cost estimate\??|rough cost(?: in rupees)?\??)\s*",
-        "first_action": r"^(first action\??|what should they do first\??)\s*",
-        "deadline": r"^(important deadline\??|important dates?\??)\s*",
+        "what_happened": r"^(?:\*\*)?(what happened\??)(?:\*\*)?\s*",
+        "can_appeal": r"^(?:\*\*)?(can the loser appeal\??)(?:\*\*)?\s*",
+        "appeal_days": r"^(?:\*\*)?(appeal timeline\??|how many days\??)(?:\*\*)?\s*",
+        "appeal_court": r"^(?:\*\*)?(appeal court\??|which court(?: should they go to)?\??)(?:\*\*)?\s*",
+        "cost_estimate": r"^(?:\*\*)?(cost estimate\??|rough cost(?: in rupees)?\??)(?:\*\*)?\s*",
+        "first_action": r"^(?:\*\*)?(first action\??|what should they do first\??)(?:\*\*)?\s*",
+        "deadline": r"^(?:\*\*)?(important deadline\??|important dates?\??)(?:\*\*)?\s*",
     }
     pattern = patterns.get(key)
     if pattern:
@@ -295,7 +461,7 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
         return remedies
 
     # Use the more robust parsing from cli.py
-    marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
+    marker_pattern = re.compile(r"(?m)^\s*(?:\*\*)?(\d{1,2})(?:\*\*)?\s*[\.|\)|:|-]\s*(.*)$")
     matches = list(marker_pattern.finditer(text))
 
     if not matches:
