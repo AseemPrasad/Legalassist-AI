@@ -38,6 +38,17 @@ from database import (
     log_notification,
 )
 
+# Import debug mode helper
+try:
+    from auth import _is_debug_or_testing_mode
+except ImportError:
+    # Fallback if auth module not available
+    def _is_debug_or_testing_mode() -> bool:
+        truthy = {"1", "true", "yes", "on"}
+        debug_enabled = os.getenv("DEBUG", "").strip().lower() in truthy
+        testing_enabled = os.getenv("TESTING", "").strip().lower() in truthy
+        return debug_enabled or testing_enabled
+
 logger = structlog.get_logger(__name__)
 
 
@@ -69,12 +80,22 @@ class SMSClient:
         """
         Send SMS message.
         Returns: (success, message_id, error)
+        
+        In debug/testing mode: Mocks the send and returns success
+        In production: Fails if Twilio is not configured
         """
         try:
             if not self.client:
-                # Mock mode - log instead of sending
-                logger.info(f"[MOCK SMS] To: {to_number}, Message: {message}")
-                return True, f"mock_sms_{datetime.now().timestamp()}", None
+                # Not configured - check if we should mock or fail
+                if _is_debug_or_testing_mode():
+                    # Mock mode allowed in debug/testing
+                    logger.info(f"[MOCK SMS] To: {to_number}, Message: {message}")
+                    return True, f"mock_sms_{datetime.now().timestamp()}", None
+                else:
+                    # Production misconfiguration - fail loud
+                    error_msg = "SMS credentials not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_FROM_NUMBER."
+                    logger.error(error_msg)
+                    return False, None, error_msg
 
             message_obj = self.client.messages.create(
                 body=message,
@@ -107,12 +128,22 @@ class EmailClient:
         """
         Send email.
         Returns: (success, message_id, error)
+        
+        In debug/testing mode: Mocks the send and returns success
+        In production: Fails if SendGrid is not configured
         """
         try:
             if not self.client:
-                # Mock mode - log instead of sending
-                logger.info(f"[MOCK EMAIL] To: {to_email}, Subject: {subject}")
-                return True, f"mock_email_{datetime.now().timestamp()}", None
+                # Not configured - check if we should mock or fail
+                if _is_debug_or_testing_mode():
+                    # Mock mode allowed in debug/testing
+                    logger.info(f"[MOCK EMAIL] To: {to_email}, Subject: {subject}")
+                    return True, f"mock_email_{datetime.now().timestamp()}", None
+                else:
+                    # Production misconfiguration - fail loud
+                    error_msg = "Email credentials not configured. Set SENDGRID_API_KEY environment variable."
+                    logger.error(error_msg)
+                    return False, None, error_msg
 
             message = Mail(
                 from_email=self.from_email,
