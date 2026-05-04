@@ -448,20 +448,65 @@ def process_one_pdf(
     return result
 
 
-def load_checkpoint(checkpoint_file: Path) -> List[Dict[str, object]]:
+def load_checkpoint(checkpoint_file: Path, corruption_threshold: float = 0.1) -> List[Dict[str, object]]:
+    """Load checkpoint records from a JSONL file.
+    
+    Args:
+        checkpoint_file: Path to the checkpoint file.
+        corruption_threshold: Maximum fraction of lines that can be corrupted before failing (0.0-1.0).
+                             Defaults to 0.1 (10%).
+    
+    Returns:
+        List of valid checkpoint records.
+    
+    Raises:
+        CLIError: If corruption exceeds the threshold.
+    """
     if not checkpoint_file.exists():
         return []
 
     records: List[Dict[str, object]] = []
+    skipped_lines: List[Tuple[int, str]] = []
+    line_num = 0
+    
     with checkpoint_file.open("r", encoding="utf-8") as f:
         for line in f:
+            line_num += 1
             line = line.strip()
             if not line:
                 continue
             try:
                 records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+            except json.JSONDecodeError as e:
+                skipped_lines.append((line_num, str(e)))
+                LOGGER.warning(
+                    "checkpoint_line_corrupted",
+                    line_number=line_num,
+                    error=str(e),
+                    line_preview=line[:100],
+                )
+    
+    # Check if corruption exceeds threshold
+    total_lines = line_num
+    if total_lines > 0 and skipped_lines:
+        corruption_rate = len(skipped_lines) / total_lines
+        if corruption_rate > corruption_threshold:
+            error_msg = (
+                f"Checkpoint file corruption rate {corruption_rate:.1%} exceeds threshold {corruption_threshold:.1%}. "
+                f"Skipped {len(skipped_lines)} out of {total_lines} lines. "
+                f"First corrupted line: {skipped_lines[0][0]} ({skipped_lines[0][1]})"
+            )
+            LOGGER.error("checkpoint_corruption_threshold_exceeded", corruption_rate=corruption_rate, skipped_count=len(skipped_lines))
+            raise CLIError(error_msg)
+        elif skipped_lines:
+            LOGGER.info(
+                "checkpoint_partially_corrupted",
+                skipped_count=len(skipped_lines),
+                total_lines=total_lines,
+                corruption_rate=f"{corruption_rate:.1%}",
+                recovered_records=len(records),
+            )
+    
     return records
 
 
@@ -577,7 +622,12 @@ def batch_command(args: argparse.Namespace) -> int:
     output_path = Path(args.output)
     checkpoint_file = Path(args.checkpoint) if args.checkpoint else output_path.with_suffix(output_path.suffix + ".checkpoint.jsonl")
 
-    existing_records = load_checkpoint(checkpoint_file) if args.resume else []
+    try:
+        existing_records = load_checkpoint(checkpoint_file) if args.resume else []
+    except CLIError as e:
+        LOGGER.error("checkpoint_load_failed", error=str(e))
+        raise
+
     done_success = {
         str(rec.get("file_path"))
         for rec in existing_records
