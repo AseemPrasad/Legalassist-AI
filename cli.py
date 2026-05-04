@@ -294,6 +294,9 @@ def process_one_pdf(
     max_chars: int,
     prompt_cost_per_1k: float,
     completion_cost_per_1k: float,
+    enable_ocr: bool = False,
+    ocr_languages: str = "eng+hin",
+    ocr_dpi: int = 300,
 ) -> Dict[str, object]:
     started = time.time()
     processed_at = datetime.now(timezone.utc).isoformat()
@@ -318,12 +321,44 @@ def process_one_pdf(
         "api_cost_usd": 0.0,
         "duration_seconds": 0.0,
         "processed_at": processed_at,
+        "extraction_method": "",
+        "ocr_enabled": enable_ocr,
+        "ocr_used": False,
+        "extraction_confidence": "",
     }
 
     try:
-        raw_text = core.extract_text_from_pdf(pdf_path)
+        raw_text = ""
+        extraction_method = "unknown"
+        extraction_confidence = ""
+        ocr_used = False
+
+        if hasattr(core, "extract_text_with_diagnostics"):
+            diagnostics = core.extract_text_with_diagnostics(
+                pdf_input=pdf_path,
+                enable_ocr=enable_ocr,
+                ocr_languages=ocr_languages,
+                ocr_dpi=ocr_dpi,
+            )
+            raw_text = str(diagnostics.get("text", "") or "")
+            extraction_method = str(diagnostics.get("method", "") or "unknown")
+            ocr_used = bool(diagnostics.get("ocr_used", False))
+            conf = diagnostics.get("confidence")
+            extraction_confidence = "" if conf is None else str(conf)
+        else:
+            raw_text = core.extract_text_from_pdf(
+                pdf_path,
+                enable_ocr=enable_ocr,
+                ocr_languages=ocr_languages,
+                ocr_dpi=ocr_dpi,
+            )
+            extraction_method = "ocr_or_standard"
+
         if not raw_text:
             raise CLIError("No extractable text found in PDF.")
+        result["extraction_method"] = extraction_method
+        result["ocr_used"] = ocr_used
+        result["extraction_confidence"] = extraction_confidence
 
         language = normalize_language(language_arg, text_for_auto=raw_text)
         result["language"] = language
@@ -480,6 +515,9 @@ def process_command(args: argparse.Namespace) -> int:
         max_chars=args.max_chars,
         prompt_cost_per_1k=args.prompt_cost_per_1k,
         completion_cost_per_1k=args.completion_cost_per_1k,
+        enable_ocr=args.enable_ocr,
+        ocr_languages=args.ocr_languages,
+        ocr_dpi=args.ocr_dpi,
     )
 
     LOGGER.info("process_result", result=result)
@@ -546,6 +584,9 @@ def batch_command(args: argparse.Namespace) -> int:
                 max_chars=args.max_chars,
                 prompt_cost_per_1k=args.prompt_cost_per_1k,
                 completion_cost_per_1k=args.completion_cost_per_1k,
+                enable_ocr=args.enable_ocr,
+                ocr_languages=args.ocr_languages,
+                ocr_dpi=args.ocr_dpi,
             ): pdf_path
             for pdf_path in to_process
         }
@@ -638,6 +679,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="Maximum concurrent API calls. Default: 5",
+    )
+    common.add_argument(
+        "--enable-ocr",
+        action="store_true",
+        help="Enable OCR fallback for scanned/image-only PDFs.",
+    )
+    common.add_argument(
+        "--ocr-languages",
+        default="eng+hin",
+        help="Tesseract OCR languages, e.g. eng+hin (supports Hindi and local script packs).",
+    )
+    common.add_argument(
+        "--ocr-dpi",
+        type=int,
+        default=300,
+        help="DPI for PDF-to-image OCR conversion. Default: 300",
     )
 
 

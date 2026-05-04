@@ -20,6 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import enum
 import os
+from contextlib import contextmanager
 
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./legalassist.db")
@@ -351,13 +352,30 @@ def init_db():
     Base.metadata.create_all(bind=engine)
 
 
-def get_db() -> Session:
-    """Dependency for getting DB session"""
+@contextmanager
+def db_session():
+    """
+    Context manager for database sessions.
+    Ensures the session is closed after use, even if an exception occurs.
+    """
     db = SessionLocal()
     try:
-        return db
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
+
+
+def get_db():
+    """
+    Helper function to get a database session.
+    Note: The caller is responsible for closing the session.
+    For safer usage, use the db_session context manager instead.
+    """
+    return SessionLocal()
 
 
 # ==================== Helper Functions ====================
