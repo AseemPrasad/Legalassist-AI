@@ -13,6 +13,10 @@ __path__ = [str(Path(__file__).with_name("core"))]
 # `from core.app_utils import ...` continue to resolve.
 __path__ = [str(Path(__file__).with_name("core"))]
 
+# Allow this module to coexist with the core/ package so imports such as
+# `from core.app_utils import ...` continue to resolve.
+__path__ = [str(Path(__file__).with_name("core"))]
+
 LOGGER = logging.getLogger(__name__)
 
 # -----------------------------
