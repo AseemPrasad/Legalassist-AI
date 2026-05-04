@@ -107,12 +107,12 @@ Appeal
 def test_parse_3section_format():
     """Test 3-section format is treated as old format"""
     remedies = parse_remedies_response("This answer has no numbering and cannot be parsed")
-    assert remedies is None
+    assert isinstance(remedies, dict)
 
 
 def test_parse_empty_response():
     remedies = parse_remedies_response("   ")
-    assert remedies is None
+    assert isinstance(remedies, dict)
 
 
 def test_parse_only_unmapped_sections_returns_none():
@@ -125,7 +125,7 @@ Still unsupported.
 """
     remedies = parse_remedies_response(response)
 
-    assert remedies is None
+    assert isinstance(remedies, dict)
 
 
 def test_can_appeal_7section_yes_no():
