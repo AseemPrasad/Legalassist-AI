@@ -220,13 +220,13 @@ def _strip_question_label(key: str, value: Optional[str]) -> Optional[str]:
         return None
 
     patterns = {
-        "what_happened": r"^(what happened\??)\s*",
-        "can_appeal": r"^(can the loser appeal\??)\s*",
-        "appeal_days": r"^(appeal timeline\??|how many days\??)\s*",
-        "appeal_court": r"^(appeal court\??|which court(?: should they go to)?\??)\s*",
-        "cost_estimate": r"^(cost estimate\??|rough cost(?: in rupees)?\??)\s*",
-        "first_action": r"^(first action\??|what should they do first\??)\s*",
-        "deadline": r"^(important deadline\??|important dates?\??)\s*",
+        "what_happened": r"^(?:\*\*)?(what happened\??)(?:\*\*)?\s*",
+        "can_appeal": r"^(?:\*\*)?(can the loser appeal\??)(?:\*\*)?\s*",
+        "appeal_days": r"^(?:\*\*)?(appeal timeline\??|how many days\??)(?:\*\*)?\s*",
+        "appeal_court": r"^(?:\*\*)?(appeal court\??|which court(?: should they go to)?\??)(?:\*\*)?\s*",
+        "cost_estimate": r"^(?:\*\*)?(cost estimate\??|rough cost(?: in rupees)?\??)(?:\*\*)?\s*",
+        "first_action": r"^(?:\*\*)?(first action\??|what should they do first\??)(?:\*\*)?\s*",
+        "deadline": r"^(?:\*\*)?(important deadline\??|important dates?\??)(?:\*\*)?\s*",
     }
     pattern = patterns.get(key)
     if pattern:
@@ -295,7 +295,7 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
         return remedies
 
     # Use the more robust parsing from cli.py
-    marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
+    marker_pattern = re.compile(r"(?m)^\s*(?:\*\*)?(\d{1,2})(?:\*\*)?\s*[\.|\)|:|-]\s*(.*)$")
     matches = list(marker_pattern.finditer(text))
 
     if not matches:
