@@ -17,6 +17,18 @@ services:
       - db
       - redis
 
+  worker:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./:/app:cached
+    command: bash -c "pip install -r requirements.txt && python scheduler.py"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/legalassist
+      - LOG_LEVEL=INFO
+    depends_on:
+      - db
+
   db:
     image: postgres:15
     environment:

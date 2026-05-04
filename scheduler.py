@@ -1,29 +1,39 @@
 """
 Background job scheduler for sending deadline reminders.
 Uses APScheduler to run daily checks for upcoming deadlines.
+Can be run as a standalone worker or integrated into an application.
 """
 
 import logging
-from datetime import datetime, timezone, timedelta
+import signal
+import sys
+import os
+from datetime import datetime, timezone
 from typing import Optional
-import pytz
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from database import (
+    init_db,
     SessionLocal,
     get_upcoming_deadlines,
-    NotificationChannel,
-    CaseDeadline,
     UserPreference,
-    has_notification_been_sent,
 )
 from notification_service import NotificationService
 
+# Configure logging for standalone mode
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 logger = logging.getLogger(__name__)
 
-# Global scheduler instance
+# Global instances
 _scheduler: Optional[BackgroundScheduler] = None
 notification_service = NotificationService()
 
@@ -39,13 +49,11 @@ def check_and_send_reminders():
 
     db = SessionLocal()
     try:
-        # Import here to avoid circular imports
-        from database import has_notification_been_sent
-        
         # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
         upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
         logger.info(f"Found {len(upcoming_deadlines)} upcoming deadlines")
 
+        sent_count = 0
         for deadline in upcoming_deadlines:
             days_left = deadline.days_until_deadline()
             
@@ -79,24 +87,17 @@ def check_and_send_reminders():
                 logger.debug(f"Notifications disabled for this threshold ({days_left} days)")
                 continue
 
-            # Check if reminder was already sent
-            if user_preference.notification_channel in [NotificationChannel.SMS, NotificationChannel.BOTH]:
-                if has_notification_been_sent(db, deadline.id, days_left, NotificationChannel.SMS):
-                    logger.debug(f"SMS reminder already sent for deadline {deadline.id}")
+            # Send reminders using the notification service
+            results = notification_service.send_reminders(db, deadline, user_preference, days_left)
+            
+            for res in results:
+                if res.success:
+                    sent_count += 1
+                    logger.info(f"✓ {res.channel.upper()} sent to {res.recipient}")
                 else:
-                    result = notification_service.send_sms_reminder(db, deadline, user_preference, days_left)
-                    status = "✓" if result.success else "✗"
-                    logger.info(f"{status} SMS sent to {result.recipient}")
+                    logger.error(f"✗ {res.channel.upper()} failed for {res.recipient}: {res.error}")
 
-            if user_preference.notification_channel in [NotificationChannel.EMAIL, NotificationChannel.BOTH]:
-                if has_notification_been_sent(db, deadline.id, days_left, NotificationChannel.EMAIL):
-                    logger.debug(f"Email reminder already sent for deadline {deadline.id}")
-                else:
-                    result = notification_service.send_email_reminder(db, deadline, user_preference, days_left)
-                    status = "✓" if result.success else "✗"
-                    logger.info(f"{status} Email sent to {result.recipient}")
-
-        logger.info("Deadline reminder check job completed successfully")
+        logger.info(f"Deadline reminder check job completed. Total reminders sent: {sent_count}")
         logger.info("=" * 60)
 
     except Exception as e:
@@ -105,35 +106,37 @@ def check_and_send_reminders():
         db.close()
 
 
-def get_scheduler() -> BackgroundScheduler:
-    """Get or create the background scheduler"""
-    global _scheduler
+def setup_scheduler(scheduler_class):
+    """Initialize and configure a scheduler instance"""
+    # BackgroundScheduler needs daemon=True, BlockingScheduler does not
+    is_background = (scheduler_class == BackgroundScheduler)
+    scheduler = scheduler_class(daemon=is_background)
     
-    if _scheduler is None:
-        _scheduler = BackgroundScheduler(daemon=True)
-        
-        # Schedule daily job at 8 AM UTC
-        # You can customize the timezone by setting pytz timezone
-        _scheduler.add_job(
-            check_and_send_reminders,
-            trigger=CronTrigger(hour=8, minute=0, second=0),  # 8 AM UTC daily
-            id="deadline_reminder_job",
-            name="Daily Deadline Reminder Check",
-            replace_existing=True,
-            misfire_grace_time=300,  # 5 minute grace for misfires
-        )
-        
-        logger.info("Scheduler initialized. Job scheduled for 8:00 AM UTC daily.")
+    # Schedule daily job at 8 AM UTC
+    scheduler.add_job(
+        check_and_send_reminders,
+        trigger=CronTrigger(hour=8, minute=0, second=0),  # 8 AM UTC daily
+        id="deadline_reminder_job",
+        name="Daily Deadline Reminder Check",
+        replace_existing=True,
+        misfire_grace_time=300,  # 5 minute grace for misfires
+    )
     
-    return _scheduler
+    return scheduler
 
 
 def start_scheduler():
-    """Start the background scheduler"""
-    scheduler = get_scheduler()
-    if not scheduler.running:
-        scheduler.start()
-        logger.info("Background scheduler started")
+    """
+    Start the background scheduler (legacy support for app.py).
+    Note: Moving to standalone worker is recommended for production.
+    """
+    global _scheduler
+    if _scheduler is None:
+        _scheduler = setup_scheduler(BackgroundScheduler)
+    
+    if not _scheduler.running:
+        _scheduler.start()
+        logger.info("Background scheduler started (integrated mode)")
     else:
         logger.info("Scheduler already running")
 
@@ -141,7 +144,6 @@ def start_scheduler():
 def stop_scheduler():
     """Stop the background scheduler"""
     global _scheduler
-    
     if _scheduler and _scheduler.running:
         _scheduler.shutdown()
         _scheduler = None
@@ -151,21 +153,53 @@ def stop_scheduler():
 def trigger_reminder_check_now():
     """
     Manually trigger the reminder check (useful for testing/debugging).
-    Will be run directly without waiting for scheduled time.
     """
     logger.info("Manually triggering reminder check...")
     check_and_send_reminders()
 
 
-# For development/testing: synchronous version
+def run_worker():
+    """
+    Run the scheduler as a standalone blocking worker process.
+    This is the preferred way to run background tasks in production.
+    """
+    logger.info("Starting LegalAssist AI Worker...")
+    
+    # Initialize database
+    init_db()
+    
+    # Setup blocking scheduler
+    scheduler = setup_scheduler(BlockingScheduler)
+    
+    # Signal handling for graceful shutdown
+    def signal_handler(sig, frame):
+        logger.info("Shutting down worker...")
+        scheduler.shutdown()
+        sys.exit(0)
+    
+    # Only register signals if we are in the main thread (standalone mode)
+    if os.name != 'nt': # Signals have limited support on Windows
+        try:
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+        except ValueError:
+            logger.warning("Could not register signal handlers (not in main thread?)")
+    
+    logger.info("Worker initialized. Job scheduled for 08:00 UTC daily.")
+    logger.info("Press Ctrl+C to exit.")
+    
+    try:
+        scheduler.start()
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Worker stopped.")
+
+
 def check_reminders_sync(target_days: Optional[int] = None):
     """
     Synchronous version for testing. Optionally check only specific day threshold.
     Args:
         target_days: If specified, only check this day threshold (e.g., 30, 10, 3, 1)
     """
-    from database import has_notification_been_sent
-    
     db = SessionLocal()
     try:
         logger.info(f"Running synchronous reminder check (target_days={target_days})")
@@ -189,7 +223,7 @@ def check_reminders_sync(target_days: Optional[int] = None):
                 continue
 
             # Send reminders
-            results = notification_service.send_reminders(db, deadline, user_preference)
+            results = notification_service.send_reminders(db, deadline, user_preference, days_left)
             sent_count += len([r for r in results if r.success])
 
         logger.info(f"Synchronous check complete. Reminders sent: {sent_count}")
@@ -197,3 +231,8 @@ def check_reminders_sync(target_days: Optional[int] = None):
 
     finally:
         db.close()
+
+
+if __name__ == "__main__":
+    # If run directly, start the worker
+    run_worker()

@@ -330,39 +330,47 @@ class NotificationService:
         db: Session,
         deadline: CaseDeadline,
         user_preference: UserPreference,
+        days_left: Optional[int] = None,
     ) -> List[NotificationResult]:
         """
         Send appropriate reminders based on days until deadline and user preferences.
         Checks which reminders should be sent for 30, 10, 3, and 1 day marks.
         """
         results = []
-        days_left = deadline.days_until_deadline()
+        if days_left is None:
+            days_left = deadline.days_until_deadline()
 
-        # Determine which reminders should be sent
-        reminder_thresholds = []
-        if days_left == 30 and user_preference.notify_30_days:
-            reminder_thresholds.append(30)
-        elif days_left == 10 and user_preference.notify_10_days:
-            reminder_thresholds.append(10)
-        elif days_left == 3 and user_preference.notify_3_days:
-            reminder_thresholds.append(3)
-        elif days_left == 1 and user_preference.notify_1_day:
-            reminder_thresholds.append(1)
+        logger.debug("Checking reminders for deadline", 
+                    case_id=deadline.case_id, 
+                    days_left=days_left, 
+                    user_id=deadline.user_id)
 
-        for threshold in reminder_thresholds:
-            # Send based on user's notification channel preference
-            if user_preference.notification_channel in [NotificationChannel.SMS, NotificationChannel.BOTH]:
-                from database import has_notification_been_sent
-                
-                if not has_notification_been_sent(db, deadline.id, threshold, NotificationChannel.SMS):
-                    result = self.send_sms_reminder(db, deadline, user_preference, threshold)
+        # Only process at specific thresholds
+        if days_left not in [30, 10, 3, 1]:
+            return results
+
+        # Send based on user's notification channel preference
+        channels = []
+        if user_preference.notification_channel == NotificationChannel.BOTH:
+            channels = [NotificationChannel.SMS, NotificationChannel.EMAIL]
+        else:
+            channels = [user_preference.notification_channel]
+
+        from database import has_notification_been_sent
+
+        for channel in channels:
+            # Check if reminder was already sent for this specific threshold and channel
+            if not has_notification_been_sent(db, deadline.id, days_left, channel):
+                if channel == NotificationChannel.SMS:
+                    result = self.send_sms_reminder(db, deadline, user_preference, days_left)
                     results.append(result)
-
-            if user_preference.notification_channel in [NotificationChannel.EMAIL, NotificationChannel.BOTH]:
-                from database import has_notification_been_sent
-                
-                if not has_notification_been_sent(db, deadline.id, threshold, NotificationChannel.EMAIL):
-                    result = self.send_email_reminder(db, deadline, user_preference, threshold)
+                elif channel == NotificationChannel.EMAIL:
+                    result = self.send_email_reminder(db, deadline, user_preference, days_left)
                     results.append(result)
+            else:
+                logger.debug("Notification already sent", 
+                            channel=channel.value, 
+                            days_left=days_left, 
+                            deadline_id=deadline.id)
 
         return results
