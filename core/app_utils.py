@@ -25,6 +25,8 @@ from pathlib import Path
 from openai import OpenAI
 from pypdf import PdfReader
 from langdetect import detect, DetectorFactory, detect_langs
+import pdfplumber
+from typing import Any, Dict, List
 
 try:
     from dotenv import dotenv_values, load_dotenv
@@ -146,15 +148,130 @@ def get_client():
 
 # ==================== TEXT PROCESSING ====================
 
-def extract_text_from_pdf(uploaded_pdf):
-    reader = PdfReader(uploaded_pdf)
+def _extract_pages_pypdf(reader: PdfReader) -> str:
     text = ""
     for page in reader.pages:
         page_text = page.extract_text()
         if page_text:
             text += page_text + "\n"
-    if not text.strip():
-        raise ValueError("No extractable text found. The PDF may be image-only or empty.")
+    return text.strip()
+
+
+def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
+    lines: Dict[tuple, Dict[str, Any]] = {}
+    for i, token in enumerate(data.get("text", [])):
+        token = (token or "").strip()
+        if not token:
+            continue
+        try:
+            conf = float(data["conf"][i])
+        except Exception:
+            conf = -1.0
+        if conf < 0:
+            continue
+        key = (data["page_num"][i], data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        if key not in lines:
+            lines[key] = {"tokens": [], "left": data["left"][i], "top": data["top"][i], "right": data["left"][i] + data["width"][i]}
+        lines[key]["tokens"].append(token)
+        lines[key]["left"] = min(lines[key]["left"], data["left"][i])
+        lines[key]["right"] = max(lines[key]["right"], data["left"][i] + data["width"][i])
+        lines[key]["top"] = min(lines[key]["top"], data["top"][i])
+
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for key, value in lines.items():
+        page_num = int(key[0])
+        value["text"] = " ".join(value["tokens"]).strip()
+        grouped.setdefault(page_num, []).append(value)
+
+    pages_out: List[str] = []
+    for page_num in sorted(grouped.keys()):
+        page_lines = [ln for ln in grouped[page_num] if ln["text"]]
+        if not page_lines:
+            continue
+        min_left = min(ln["left"] for ln in page_lines)
+        max_right = max(ln["right"] for ln in page_lines)
+        width = max(1, max_right - min_left)
+        threshold = min_left + (width // 2)
+        left_col = [ln for ln in page_lines if ln["left"] <= threshold]
+        right_col = [ln for ln in page_lines if ln["left"] > threshold]
+        use_two_cols = len(left_col) > 4 and len(right_col) > 4 and (min(ln["left"] for ln in right_col) - max(ln["right"] for ln in left_col)) > 10
+        if use_two_cols:
+            ordered = sorted(left_col, key=lambda x: (x["top"], x["left"])) + sorted(right_col, key=lambda x: (x["top"], x["left"]))
+        else:
+            ordered = sorted(page_lines, key=lambda x: (x["top"], x["left"]))
+        pages_out.append("\n".join(ln["text"] for ln in ordered))
+    return "\n\n".join(pages_out).strip()
+
+
+def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages: str = "eng+hin", ocr_dpi: int = 300):
+    """Extract text from PDF. Uses parser extraction first, then optional OCR fallback."""
+    text = ""
+    try:
+        with pdfplumber.open(uploaded_pdf) as pdf:
+            pages = []
+            for page in pdf.pages:
+                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                if page_text:
+                    pages.append(page_text)
+            text = "\n".join(pages).strip()
+            if text:
+                return text
+    except Exception:
+        pass
+
+    try:
+        if hasattr(uploaded_pdf, "seek"):
+            uploaded_pdf.seek(0)
+        reader = PdfReader(uploaded_pdf)
+        text = _extract_pages_pypdf(reader)
+        if text:
+            return text
+    except Exception:
+        pass
+
+    if not enable_ocr:
+        raise ValueError("No extractable text found. The PDF may be image-only or empty. Re-run with OCR enabled.")
+
+    try:
+        from pdf2image import convert_from_bytes
+        import pytesseract
+        from pytesseract import Output
+    except Exception as e:
+        raise RuntimeError(
+            f"OCR dependencies are missing ({e}). Install pytesseract, pdf2image, Pillow and Tesseract binaries."
+        ) from e
+
+    if hasattr(uploaded_pdf, "seek"):
+        uploaded_pdf.seek(0)
+    data = uploaded_pdf.read() if hasattr(uploaded_pdf, "read") else None
+    if hasattr(uploaded_pdf, "seek"):
+        uploaded_pdf.seek(0)
+    if not data:
+        raise ValueError("Unable to read PDF bytes for OCR.")
+
+    images = convert_from_bytes(data, dpi=ocr_dpi)
+    pages_out: List[str] = []
+    conf_scores: List[float] = []
+    for image in images:
+        ocr_data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
+        page_text = _extract_layout_text_from_tesseract_data(ocr_data)
+        if page_text:
+            pages_out.append(page_text)
+        vals = []
+        for c in ocr_data.get("conf", []):
+            try:
+                cv = float(c)
+                if cv >= 0:
+                    vals.append(cv)
+            except Exception:
+                continue
+        if vals:
+            conf_scores.append(sum(vals) / len(vals))
+    text = "\n\n".join(pages_out).strip()
+    if not text:
+        raise ValueError("OCR completed but no readable text was extracted.")
+    if conf_scores:
+        logging.info("ocr_confidence_avg=%.2f", sum(conf_scores) / len(conf_scores))
     return text
 
 
@@ -436,13 +553,13 @@ def _strip_question_label(key: str, value: str) -> str:
     if not value:
         return ""
     patterns = {
-        "what_happened": r"^(what happened\??)\s*",
-        "can_appeal": r"^(can the loser appeal\??)\s*",
-        "appeal_days": r"^(appeal timeline\??|how many days\??)\s*",
-        "appeal_court": r"^(appeal court\??|which court(?: should they go to)?\??)\s*",
-        "cost_estimate": r"^(cost estimate\??|rough cost(?: in rupees)?\??)\s*",
-        "first_action": r"^(first action\??|what should they do first\??)\s*",
-        "deadline": r"^(important deadline\??|important dates?\??)\s*",
+        "what_happened": r"^(?:\*\*)?(what happened\??)(?:\*\*)?\s*",
+        "can_appeal": r"^(?:\*\*)?(can the loser appeal\??)(?:\*\*)?\s*",
+        "appeal_days": r"^(?:\*\*)?(appeal timeline\??|how many days\??)(?:\*\*)?\s*",
+        "appeal_court": r"^(?:\*\*)?(appeal court\??|which court(?: should they go to)?\??)(?:\*\*)?\s*",
+        "cost_estimate": r"^(?:\*\*)?(cost estimate\??|rough cost(?: in rupees)?\??)(?:\*\*)?\s*",
+        "first_action": r"^(?:\*\*)?(first action\??|what should they do first\??)(?:\*\*)?\s*",
+        "deadline": r"^(?:\*\*)?(important deadline\??|important dates?\??)(?:\*\*)?\s*",
     }
     pattern = patterns.get(key)
     if pattern:
@@ -556,7 +673,8 @@ def parse_remedies_response(response_text):
     if not text:
         return remedies
 
-    marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
+    # Use robust marker-based parsing
+    marker_pattern = re.compile(r"(?m)^\s*(?:\*\*)?(\d{1,2})(?:\*\*)?\s*[\.|\)|:|-]\s*(.*)$")
     matches = list(marker_pattern.finditer(text))
 
     if not matches:
@@ -1580,8 +1698,8 @@ def parse_summary_bullets(raw_text):
     
     # Regex to identify lines starting with common bullet markers
     # Covers: - *, •, and numbered bullets like 1. or 1)
-    # Using non-greedy match for content to avoid capturing too much if markers are repeated
-    bullet_marker_regex = re.compile(r"^\s*([\-\*\u2022\u25cf]|(\d+[\.\)]))\s*(.*)$")
+    # Added optional markdown bolding support
+    bullet_marker_regex = re.compile(r"^\s*([\-\*\u2022\u25cf]|(?:\*\*)?(\d+)(?:\*\*)?[\.\)])\s*(.*)$")
     
     lines = raw_text.split('\n')
     bullets = []

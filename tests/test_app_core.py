@@ -304,10 +304,8 @@ class TestRemediesParsing:
     def test_parse_empty_response(self):
         """Test parsing of empty response"""
         remedies = parse_remedies_response("")
-        
-        assert remedies["what_happened"] == ""
-        assert remedies["can_appeal"] == ""
-        assert remedies["appeal_days"] == ""
+
+        assert remedies is None
     
     def test_parse_mixed_case_responses(self):
         """Test parsing with various text cases"""

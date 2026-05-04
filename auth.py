@@ -26,6 +26,7 @@ from database import (
     cleanup_expired_otps,
     update_user_last_login,
     User,
+    OTPVerification,  # Added to fix NameError in request_otp rate limiting
 )
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,77 @@ def send_otp_email(email: str, otp: str) -> bool:
         return False
 
 
+def _handle_test_account_bypass(db: SessionLocal, email: str, now: datetime) -> Tuple[bool, str]:
+    """
+    Handles automated OTP bypass for designated test accounts in non-production environments.
+    
+    CRITICAL SECURITY DESIGN:
+    The previous implementation allowed a bypass for 'test@example.com' based solely 
+    on the 'DEBUG' flag. This was dangerous because 'DEBUG' is often accidentally 
+    left enabled in staging or even production misconfigurations.
+    
+    This new implementation implements 'Defense in Depth' by requiring:
+    1. ACCOUNT MATCH: The email must exactly match the hardcoded test account.
+    2. ENVIRONMENT LOCK: The APP_ENV must NOT be 'production'.
+    3. EXPLICIT OPT-IN: A specific 'ALLOW_UNSAFE_TEST_BYPASS' variable must be 'true'.
+    4. MODE VERIFICATION: Standard 'DEBUG' or 'TESTING' flags must still be active.
+    
+    If any of these conditions are missing, the bypass is skipped entirely and 
+    the system falls back to the secure, real OTP flow.
+    """
+    # Step 1: Identity Verification
+    # We only ever allow a bypass for this specific, low-privilege test account.
+    if email.lower() != "test@example.com":
+        return False, "Not a designated test account"
+
+    # Step 2: Production Safeguard
+    # Explicitly block this logic if we detect we are in a production environment.
+    # We default to 'production' if the variable is missing to fail-safe.
+    app_env = os.getenv("APP_ENV", "production").strip().lower()
+    if app_env == "production":
+        logger.error(
+            "SECURITY WARNING: Bypass attempt for %s blocked because APP_ENV is 'production'.",
+            email
+        )
+        return False, "Bypass strictly forbidden in production"
+
+    # Step 3: Explicit Opt-In Flag
+    # This requires the administrator to set a very specific, scary-sounding 
+    # environment variable, making it harder to enable by mistake.
+    truthy = {"1", "true", "yes", "on"}
+    allow_bypass = os.getenv("ALLOW_UNSAFE_TEST_BYPASS", "").strip().lower() in truthy
+    if not allow_bypass:
+        return False, "Explicit bypass flag (ALLOW_UNSAFE_TEST_BYPASS) is not enabled"
+
+    # Step 4: Mode Verification
+    # Ensure we are actually in a debug/testing context as defined by the app.
+    if not _is_debug_or_testing_mode():
+        return False, "Standard debug or testing flags are not active"
+
+    # --- ALL SECURITY CHECKS PASSED ---
+    # We proceed with generating a deterministic 'test' OTP for CI/CD or local dev.
+    test_otp = "123456"
+    test_otp_hash = _hash_otp(test_otp)
+    expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
+    
+    # Register the bypass in the database so the verification step works correctly.
+    create_otp_verification(db, email, test_otp_hash, expires_at)
+    
+    # Ensure the test user exists in the system.
+    user = get_user_by_email(db, email)
+    if not user:
+        create_user(db, email)
+        logger.info("Created new test user for bypass: %s", email)
+        
+    logger.warning(
+        "SECURITY ALERT: Active OTP bypass for %s (Env: %s). "
+        "Remove ALLOW_UNSAFE_TEST_BYPASS in non-test environments.", 
+        email, app_env
+    )
+    
+    return True, "Test bypass activated successfully"
+
+
 def request_otp(email: str) -> Tuple[bool, str]:
     """
     Request OTP for email authentication.
@@ -181,17 +253,15 @@ def request_otp(email: str) -> Tuple[bool, str]:
         # Check rate limiting
         now = datetime.now(timezone.utc)
         
-        # Test OTP bypass is only allowed with explicit debug/testing flags.
-        if _is_debug_or_testing_mode() and email.lower() == "test@example.com":
-            otp = "123456"
-            otp_hash = _hash_otp(otp)
-            expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
-            create_otp_verification(db, email, otp_hash, expires_at)
-            user = get_user_by_email(db, email)
-            if not user:
-                create_user(db, email)
-            logger.warning("Using test OTP bypass for test@example.com in debug/testing mode")
-            return True, "Test OTP sent"
+        # SECURITY: Check for isolated test account bypass.
+        # This replaces the previous vulnerable inline check.
+        # It uses multiple layers of environment validation to prevent 
+        # accidental backdoors in production builds.
+        bypass_success, bypass_msg = _handle_test_account_bypass(db, email, now)
+        if bypass_success:
+            # We return a generic 'success' message to the frontend to maintain 
+            # consistent UI behavior and avoid leaking bypass status.
+            return True, "OTP sent to your email"
 
         rate_limit_start = now - timedelta(hours=OTP_RATE_LIMIT_HOURS)
 

@@ -107,16 +107,25 @@ Appeal
 def test_parse_3section_format():
     """Test 3-section format is treated as old format"""
     remedies = parse_remedies_response("This answer has no numbering and cannot be parsed")
-    # Implementation returns dict with empty strings, not None
-    assert remedies is not None
-    assert remedies["what_happened"] == ""
+    assert remedies is None
 
 
 def test_parse_empty_response():
     remedies = parse_remedies_response("   ")
-    # Implementation returns empty dict, not None
-    assert remedies is not None
-    assert remedies["what_happened"] == ""
+    assert remedies is None
+
+
+def test_parse_only_unmapped_sections_returns_none():
+    """Test that numbered input with no valid sections returns None"""
+    response = """
+8. Extra section
+Not part of the supported schema.
+9. Another extra section
+Still unsupported.
+"""
+    remedies = parse_remedies_response(response)
+
+    assert remedies is None
 
 
 def test_can_appeal_7section_yes_no():
