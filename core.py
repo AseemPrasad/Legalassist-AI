@@ -1,21 +1,9 @@
-from pypdf import PdfReader
-import pdfplumber
+from pypdf import PdfReader # type: ignore
+import pdfplumber # type: ignore
 import re
 import logging
 from pathlib import Path
 from typing import Dict, Optional, List, Union, Any
-
-# Allow this module to coexist with the core/ package so imports such as
-# `from core.app_utils import ...` continue to resolve.
-__path__ = [str(Path(__file__).with_name("core"))]
-
-# Allow this module to coexist with the core/ package so imports such as
-# `from core.app_utils import ...` continue to resolve.
-__path__ = [str(Path(__file__).with_name("core"))]
-
-# Allow this module to coexist with the core/ package so imports such as
-# `from core.app_utils import ...` continue to resolve.
-__path__ = [str(Path(__file__).with_name("core"))]
 
 # Allow this module to coexist with the core/ package so imports such as
 # `from core.app_utils import ...` continue to resolve.
@@ -166,9 +154,9 @@ def extract_text_with_diagnostics(
 
     # 3. OCR path for scanned/image PDFs
     try:
-        from pdf2image import convert_from_bytes, convert_from_path
-        import pytesseract
-        from pytesseract import Output
+        from pdf2image import convert_from_bytes, convert_from_path # type: ignore
+        import pytesseract # type: ignore
+        from pytesseract import Output # type: ignore
     except Exception as e:
         raise RuntimeError(
             f"OCR dependencies are missing ({e}). Install pytesseract, pdf2image, Pillow and Tesseract binaries."

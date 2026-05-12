@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session # type: ignore
 
 from database import (
     SessionLocal,

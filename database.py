@@ -6,7 +6,7 @@ Uses SQLAlchemy ORM with SQLite for persistence.
 import datetime as dt
 import logging
 from typing import Optional, List
-from sqlalchemy import (
+from sqlalchemy import ( # type: ignore
     create_engine,
     Column,
     Integer,
@@ -19,7 +19,7 @@ from sqlalchemy import (
     JSON,
     UniqueConstraint,
 )
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session # type: ignore
 import enum
 from contextlib import contextmanager
 from config import Config
