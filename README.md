@@ -297,4 +297,19 @@ See [ANALYTICS.md](ANALYTICS.md) for:
 - Sample data generation
 - Integration examples
 
+---
 
+## 📚 Documentation & Resources
+
+Explore the following documents to learn more about the project:
+
+- 🏗️ **[Architecture Diagrams](ARCHITECTURE_DIAGRAMS.md)** - Visual breakdown of the system components.
+- 📖 **[Instructions](INSTRUCTIONS.md)** - Comprehensive guide to the codebase and file roles.
+- 🤝 **[Contributing Guidelines](CONTRIBUTING.md)** - How to get involved and contribute to LegalAssist AI.
+- ✅ **[Completion Checklist](COMPLETION_CHECKLIST.md)** - Tracking development milestones and tasks.
+- 🛠️ **[Language Conversion Fix](LANGUAGE_CONVERSION_FIX.md)** - Technical details on how we handle multilingual translations.
+- ⚖️ **[License](LICENSE)** - Information about the project's legal usage and distribution.
+
+---
+
+*“Justice delayed is justice denied. We make justice understandable.”* ⚖️
