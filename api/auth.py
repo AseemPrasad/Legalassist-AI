@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict
 import jwt
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthCredentials, OAuth2PasswordBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
 import secrets
 import hashlib
 
@@ -121,7 +121,7 @@ class CurrentUser:
 
 async def get_current_user(
     token: Optional[str] = Depends(oauth2_scheme),
-    http_auth: Optional[HTTPAuthCredentials] = Depends(security),
+    http_auth: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> CurrentUser:
     """Get current authenticated user"""
     
@@ -147,13 +147,25 @@ async def get_current_user(
         except HTTPException:
             raise
     
-    # Try API Key from header
+    # Try API Key from header — validate as a signed JWT.
+    # Arbitrary or unsigned tokens are rejected by verify_token with a 401.
     if http_auth:
         api_key = http_auth.credentials
-        # In production, validate against database
-        # For now, accept any API key in development
-        user_id = "api-user"
-        return CurrentUser(user_id, "api@example.com", "user")
+        try:
+            payload = verify_token(api_key)
+            user_id = payload.get("sub")
+            email = payload.get("email", "api@example.com")
+            role = payload.get("role", "user")
+
+            if not user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid API key payload"
+                )
+
+            return CurrentUser(user_id, email, role)
+        except HTTPException:
+            raise
     
     # Try X-API-Key header
     # This would typically be validated against database
@@ -162,6 +174,23 @@ async def get_current_user(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Not authenticated"
     )
+
+
+async def get_current_user_optional(
+    token: Optional[str] = Depends(oauth2_scheme),
+    http_auth: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> Optional[CurrentUser]:
+    """Get current user without raising on missing credentials.
+
+    Returns the authenticated CurrentUser when valid credentials are present,
+    or None for unauthenticated requests.  Use this dependency wherever the
+    caller must handle anonymous traffic gracefully (e.g. rate-limit key
+    generation) rather than enforcing authentication.
+    """
+    try:
+        return await get_current_user(token=token, http_auth=http_auth)
+    except HTTPException:
+        return None
 
 
 async def get_admin_user(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:

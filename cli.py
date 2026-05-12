@@ -1,5 +1,6 @@
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import structlog
@@ -53,6 +54,7 @@ except ModuleNotFoundError:
                 self._bar.set_description_str(description)
 from logging_config import configure_logging
 import core
+from config import Config
 
 # Make language detection deterministic.
 DetectorFactory.seed = 0
@@ -77,7 +79,41 @@ KNOWN_COURTS = {
 }
 
 # Global semaphore for API concurrency control
-API_SEMAPHORE = threading.Semaphore(5)
+_API_SEMAPHORE: Optional[threading.Semaphore] = None
+_SEMAPHORE_LOCK = threading.Lock()
+
+
+def _reinitialize_semaphore(concurrency: int) -> None:
+    """Replace the global API semaphore with a new one sized to *concurrency*.
+
+    Calling this before any worker threads are spawned ensures the correct
+    limit is applied regardless of whether execution entered through main()
+    or directly via process_command / batch_command (e.g. in tests).
+    """
+    global _API_SEMAPHORE
+    with _SEMAPHORE_LOCK:
+        _API_SEMAPHORE = threading.Semaphore(concurrency)
+
+
+def get_api_semaphore() -> threading.Semaphore:
+    """Get the API semaphore, initializing it lazily with default concurrency if needed."""
+    global _API_SEMAPHORE
+    if _API_SEMAPHORE is None:
+        with _SEMAPHORE_LOCK:
+            if _API_SEMAPHORE is None:
+                _API_SEMAPHORE = threading.Semaphore(5)
+    return _API_SEMAPHORE
+
+
+def _reinitialize_semaphore(concurrency: int) -> None:
+    """Replace the global API semaphore with a new one sized to *concurrency*.
+
+    Calling this before any worker threads are spawned ensures the correct
+    limit is applied regardless of whether execution entered through main()
+    or directly via process_command / batch_command (e.g. in tests).
+    """
+    global API_SEMAPHORE
+    API_SEMAPHORE = threading.Semaphore(concurrency)
 
 
 
@@ -189,12 +225,41 @@ def _chat_completion(
     max_tokens: int,
     temperature: float,
     max_retries: int = 5,
+    timeout: float = None,
 ):
+    """
+    Internal helper to handle chat completion requests with retries and concurrency control.
+    
+    This function wraps the OpenAI client call, providing:
+    1. Concurrency control via a global semaphore.
+    2. Exponential backoff for rate limiting (429 errors).
+    3. Timeout management.
+    4. Detailed debug logging when verbose mode is enabled.
+    """
+    if timeout is None:
+        # Fallback to default timeout from configuration if not specified.
+        timeout = Config.LLM_TIMEOUT
+    
     last_err = None
+    
+    # Debug log the start of the completion request.
+    # This helps track how many requests are being sent and to which model.
+    LOGGER.debug(
+        "chat_completion_start",
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=timeout
+    )
+    
     for attempt in range(max_retries):
         try:
-            with API_SEMAPHORE:
-                return client.chat.completions.create(
+            # Concurrency control is critical to avoid overwhelming the API provider
+            # or exceeding local resource limits.
+            with get_api_semaphore():
+                # Perform the actual API call.
+                # Note: We pass both system and user prompts to provide context.
+                response = client.chat.completions.create(
                     model=model,
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -202,14 +267,26 @@ def _chat_completion(
                     ],
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    timeout=timeout,
                 )
+                
+                # Log success at debug level for auditing.
+                LOGGER.debug(
+                    "chat_completion_success",
+                    model=model,
+                    attempt=attempt + 1
+                )
+                return response
+                
         except RateLimitError as e:
             last_err = e
+            # If we've exhausted all retries, log the error and propagate.
             if attempt == max_retries - 1:
                 LOGGER.error("api_rate_limit_exhausted", attempts=max_retries, error=str(e))
                 raise
             
-            # Exponential backoff: 2, 4, 8, 16, 32 seconds
+            # Exponential backoff: 2, 4, 8, 16, 32 seconds.
+            # This gives the API time to recover from traffic spikes.
             wait_time = 2 ** (attempt + 1)
             LOGGER.warning(
                 "api_rate_limited",
@@ -219,7 +296,9 @@ def _chat_completion(
             )
             time.sleep(wait_time)
         except Exception as e:
-            # We don't retry on other errors here to avoid infinite loops on valid failures
+            # We don't retry on other errors (like auth or invalid params) 
+            # to avoid infinite loops on fatal configuration issues.
+            LOGGER.debug("chat_completion_fatal_error", error=str(e), error_type=type(e).__name__)
             raise e
     
     if last_err:
@@ -243,7 +322,7 @@ def generate_summary(
         model=model,
         system_prompt="You are an expert legal simplification engine.",
         user_prompt=summary_prompt,
-        max_tokens=280,
+        max_tokens=Config.SUMMARY_MAX_TOKENS,
         temperature=0.05,
     )
     
@@ -257,7 +336,7 @@ def generate_summary(
             model=model,
             system_prompt="Strict multilingual rewriting engine.",
             user_prompt=retry_prompt,
-            max_tokens=260,
+            max_tokens=Config.SUMMARY_MAX_TOKENS,
             temperature=0.03,
         )
         retry_summary = (resp_retry.choices[0].message.content or "").strip()
@@ -288,7 +367,7 @@ def get_remedies(
         model=model,
         system_prompt="You are a helpful legal advisor. Answer questions about legal remedies in India.",
         user_prompt=remedies_prompt,
-        max_tokens=500,
+        max_tokens=Config.REMEDIES_MAX_TOKENS,
         temperature=0.1,
     )
     
@@ -326,8 +405,21 @@ def process_one_pdf(
     ocr_languages: str = "eng+hin",
     ocr_dpi: int = 300,
 ) -> Dict[str, object]:
+    """
+    Core logic to process a single PDF file and extract legal insights.
+    
+    Steps:
+    1. Extract text (using OCR if enabled and necessary).
+    2. Detect/Normalize language.
+    3. Call LLM for summarization.
+    4. Call LLM for remedy extraction.
+    5. Calculate metrics (tokens, cost, duration).
+    """
     started = time.time()
     processed_at = datetime.now(timezone.utc).isoformat()
+    
+    # Debug logging to track which file is being handled in which thread.
+    LOGGER.debug("process_one_pdf_start", file_path=str(pdf_path))
 
     result: Dict[str, object] = {
         "file_name": pdf_path.name,
@@ -361,7 +453,10 @@ def process_one_pdf(
         extraction_confidence = ""
         ocr_used = False
 
+        # Attempt to extract text with diagnostics if available in core.
+        # Diagnostics provide more metadata about HOW the text was extracted.
         if hasattr(core, "extract_text_with_diagnostics"):
+            LOGGER.debug("extracting_text_with_diagnostics", file=pdf_path.name)
             diagnostics = core.extract_text_with_diagnostics(
                 pdf_input=pdf_path,
                 enable_ocr=enable_ocr,
@@ -373,7 +468,17 @@ def process_one_pdf(
             ocr_used = bool(diagnostics.get("ocr_used", False))
             conf = diagnostics.get("confidence")
             extraction_confidence = "" if conf is None else str(conf)
+            
+            LOGGER.debug(
+                "extraction_metadata",
+                method=extraction_method,
+                ocr_used=ocr_used,
+                confidence=extraction_confidence,
+                text_length=len(raw_text)
+            )
         else:
+            # Fallback to standard text extraction if diagnostics are not supported.
+            LOGGER.debug("extracting_text_standard", file=pdf_path.name)
             raw_text = core.extract_text_from_pdf(
                 pdf_path,
                 enable_ocr=enable_ocr,
@@ -383,17 +488,26 @@ def process_one_pdf(
             extraction_method = "ocr_or_standard"
 
         if not raw_text:
+            # If no text is found, we cannot proceed with LLM processing.
             raise CLIError("No extractable text found in PDF.")
+            
         result["extraction_method"] = extraction_method
         result["ocr_used"] = ocr_used
         result["extraction_confidence"] = extraction_confidence
+        
+        # If client is None, it means we are in 'dry run' or 'extraction only' mode.
         if client is None:
+            LOGGER.debug("skipping_llm_processing", reason="no_client_provided")
             return result
 
+        # Language normalization determines the prompt language and leakage protection.
         language = normalize_language(language_arg, text_for_auto=raw_text)
         result["language"] = language
+        LOGGER.debug("language_determined", language=language)
 
-        # 1. Generate Summary
+        # Phase 1: Generate Summary
+        # This condenses the legal document into a layman-friendly summary.
+        LOGGER.debug("generating_summary", file=pdf_path.name)
         summary, p_sum, c_sum, t_sum = generate_summary(
             client=client,
             model=model,
@@ -402,7 +516,9 @@ def process_one_pdf(
             max_chars=max_chars
         )
 
-        # 2. Get Remedies
+        # Phase 2: Get Remedies
+        # This extracts specific actionable legal items from the judgment.
+        LOGGER.debug("extracting_remedies", file=pdf_path.name)
         remedies, p_rem, c_rem, t_rem = get_remedies(
             client=client,
             model=model,
@@ -411,7 +527,8 @@ def process_one_pdf(
             file_name=pdf_path.name
         )
 
-        # 3. Aggregate Metrics and Results
+        # Phase 3: Aggregate Metrics and Results
+        # Tokens and costs are tracked for auditing and budget management.
         prompt_tokens = p_sum + p_rem
         completion_tokens = c_sum + c_rem
         total_tokens = t_sum + t_rem
@@ -423,6 +540,7 @@ def process_one_pdf(
             completion_cost_per_1k=completion_cost_per_1k,
         )
 
+        # Update result dictionary with extracted content and metrics.
         result.update(
             {
                 "summary": summary,
@@ -439,10 +557,14 @@ def process_one_pdf(
                 "api_cost_usd": round(cost_usd, 8),
             }
         )
+        
+        LOGGER.debug("process_one_pdf_success", file=pdf_path.name, cost=result["api_cost_usd"])
 
     except Exception as exc:
+        # Catch any unexpected errors to ensure the rest of the batch can continue.
         result["status"] = "error"
         result["error"] = str(exc)
+        LOGGER.error("process_one_pdf_failed", file=pdf_path.name, error=str(exc))
 
     result["duration_seconds"] = round(time.time() - started, 3)
     return result
@@ -577,6 +699,7 @@ def print_cost_summary(snapshot: Dict[str, float]) -> None:
 
 
 def process_command(args: argparse.Namespace) -> int:
+    _reinitialize_semaphore(args.concurrency)
     file_path = Path(args.file)
     if not file_path.exists() or file_path.suffix.lower() != ".pdf":
         raise CLIError(f"Invalid PDF file: {file_path}")
@@ -610,6 +733,7 @@ def process_command(args: argparse.Namespace) -> int:
 
 
 def batch_command(args: argparse.Namespace) -> int:
+    _reinitialize_semaphore(args.concurrency)
     folder = Path(args.folder)
     if not folder.exists() or not folder.is_dir():
         raise CLIError(f"Invalid folder: {folder}")
@@ -621,6 +745,10 @@ def batch_command(args: argparse.Namespace) -> int:
 
     output_path = Path(args.output)
     checkpoint_file = Path(args.checkpoint) if args.checkpoint else output_path.with_suffix(output_path.suffix + ".checkpoint.jsonl")
+
+    # Delete stale checkpoint BEFORE loading so --no-resume truly starts fresh.
+    if not args.resume and checkpoint_file.exists():
+        checkpoint_file.unlink()
 
     try:
         existing_records = load_checkpoint(checkpoint_file) if args.resume else []
@@ -635,9 +763,6 @@ def batch_command(args: argparse.Namespace) -> int:
     }
 
     to_process = [p for p in all_files if str(p.resolve()) not in done_success]
-
-    if not args.resume and checkpoint_file.exists():
-        checkpoint_file.unlink()
 
     LOGGER.info("batch_discovery", total_found=len(all_files), already_completed=len(done_success), pending=len(to_process))
 
@@ -672,6 +797,7 @@ def batch_command(args: argparse.Namespace) -> int:
         }
 
         checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        interrupted = False
         with Progress(
             SpinnerColumn(),
             TextColumn("{task.description}"),
@@ -703,16 +829,40 @@ def batch_command(args: argparse.Namespace) -> int:
                     progress.advance(task_id, 1)
                     status = str(record.get("status"))
                     progress.update(task_id, description=f"last={status} cost_usd={tracker.snapshot()['total_cost_usd']:.4f}")
+            except KeyboardInterrupt:
+                # User pressed Ctrl+C — cancel futures that haven't started yet,
+                # then fall through to the finally block for a clean export.
+                interrupted = True
+                LOGGER.warning("batch_interrupted", completed=len(run_records), pending=len(futures) - len(run_records))
+                for f in futures:
+                    f.cancel()
             finally:
-                pass
+                # Always flush the checkpoint file before leaving the context so
+                # the on-disk state matches run_records regardless of how we exit.
+                try:
+                    cp_file.flush()
+                    os.fsync(cp_file.fileno())
+                except OSError:
+                    pass
 
+    # Export whatever was completed — covers both normal finish and interruption.
     all_records = existing_records + run_records
     csv_path, json_path = export_results(all_records, output_path, args.format)
 
     success_count = sum(1 for x in run_records if x.get("status") == "success")
     error_count = len(run_records) - success_count
 
-    LOGGER.info("batch_summary", processed=len(run_records), successful=success_count, failed=error_count)
+    if interrupted:
+        LOGGER.warning(
+            "batch_interrupted_export",
+            processed=len(run_records),
+            successful=success_count,
+            failed=error_count,
+            msg="Run was interrupted. Partial results exported. Re-run without --no-resume to continue.",
+        )
+    else:
+        LOGGER.info("batch_summary", processed=len(run_records), successful=success_count, failed=error_count)
+
     if args.format in {"csv", "both"}:
         LOGGER.info("wrote_file", path=str(csv_path), format="csv")
     if args.format in {"json", "both"}:
@@ -720,106 +870,131 @@ def batch_command(args: argparse.Namespace) -> int:
 
     print_cost_summary(tracker.snapshot())
 
+    if interrupted:
+        return 130  # Standard UNIX exit code for Ctrl+C termination
+
     return 0 if error_count == 0 else 2
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """
+    Constructs the CLI argument parser with comprehensive help and options.
+    
+    The parser supports:
+    - process: Single file processing.
+    - batch/process_batch: Bulk processing of directories.
+    - Global flags like --verbose for debugging.
+    """
     parser = argparse.ArgumentParser(
         prog="LegalEase CLI",
         description="CLI for single and batch processing of legal judgment PDFs.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
+    # Global options that apply to all commands
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose output for debugging. Changes logging level from INFO to DEBUG.",
+    )
+
+    # Common arguments shared between single and batch processing modes
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--model", default=DEFAULT_MODEL, help="Model name for generation.")
+    common.add_argument(
+        "--model", 
+        default=DEFAULT_MODEL, 
+        help="LLM model name for generation (e.g., gpt-4, claude-3-opus)."
+    )
     common.add_argument(
         "--language",
         default="auto",
-        help=f"Output language: {SUPPORTED_LANGUAGE_HELP}. Default: auto",
+        help=f"Target output language for summaries: {SUPPORTED_LANGUAGE_HELP}. Default: auto",
     )
     common.add_argument(
         "--max-chars",
         type=int,
         default=6000,
-        help="Max characters to send for summary prompt. Default: 6000",
+        help="Max characters of PDF text to send to the LLM. Prevents context window overflows. Default: 6000",
     )
     common.add_argument(
         "--prompt-cost-per-1k",
         type=float,
         default=0.0,
-        help="Estimated USD cost per 1K prompt tokens (for cost reporting).",
+        help="Estimated USD cost per 1K prompt tokens for cost reporting.",
     )
     common.add_argument(
         "--completion-cost-per-1k",
         type=float,
         default=0.0,
-        help="Estimated USD cost per 1K completion tokens (for cost reporting).",
+        help="Estimated USD cost per 1K completion tokens for cost reporting.",
     )
     common.add_argument(
         "--concurrency",
         type=int,
         default=5,
-        help="Maximum concurrent API calls. Default: 5",
+        help="Maximum concurrent API calls allowed at once. Default: 5",
     )
     common.add_argument(
         "--enable-ocr",
         action="store_true",
-        help="Enable OCR fallback for scanned/image-only PDFs.",
+        help="Enable Tesseract OCR fallback for scanned or image-based PDF documents.",
     )
     common.add_argument(
         "--ocr-languages",
         default="eng+hin",
-        help="Tesseract OCR languages, e.g. eng+hin (supports Hindi and local script packs).",
+        help="OCR language codes (e.g., 'eng+hin'). Requires Tesseract language packs.",
     )
     common.add_argument(
         "--ocr-dpi",
         type=int,
         default=300,
-        help="DPI for PDF-to-image OCR conversion. Default: 300",
+        help="DPI resolution for PDF-to-image conversion during OCR. Default: 300",
     )
-
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    # Single file processing command
     p_process = subparsers.add_parser("process", parents=[common], help="Process a single PDF file.")
-    p_process.add_argument("--file", required=True, help="Path to a PDF file.")
-    p_process.add_argument("--output", help="Output base path, e.g. ./result.csv")
+    p_process.add_argument("--file", required=True, help="Path to the source PDF file.")
+    p_process.add_argument("--output", help="Output file path (e.g., ./result.csv). If omitted, only logs to stdout.")
     p_process.add_argument(
         "--format",
         choices=["csv", "json", "both"],
         default="both",
-        help="Export format when --output is provided.",
+        help="Desired export format if --output is specified.",
     )
     p_process.set_defaults(func=process_command)
 
-    p_batch = subparsers.add_parser("batch", parents=[common], help="Process all PDFs from a folder.")
-    p_batch.add_argument("--folder", "--input", dest="folder", required=True, help="Folder containing PDFs.")
-    p_batch.add_argument("--output", required=True, help="Output base path, e.g. ./results.csv")
-    p_batch.add_argument("--workers", type=int, default=4, help="Parallel workers. Default: 4")
-    p_batch.add_argument("--recursive", action="store_true", help="Scan folder recursively for PDFs.")
-    p_batch.add_argument("--checkpoint", help="Checkpoint file path. Default: <output>.checkpoint.jsonl")
-    p_batch.add_argument("--resume", dest="resume", action="store_true", default=True, help="Resume from checkpoint (default).")
-    p_batch.add_argument("--no-resume", dest="resume", action="store_false", help="Start a fresh run and overwrite checkpoint.")
+    # Batch processing command
+    p_batch = subparsers.add_parser("batch", parents=[common], help="Process multiple PDFs from a folder.")
+    p_batch.add_argument("--folder", "--input", dest="folder", required=True, help="Input directory containing PDF files.")
+    p_batch.add_argument("--output", required=True, help="Base path for exported results.")
+    p_batch.add_argument("--workers", type=int, default=4, help="Number of parallel file processing workers. Default: 4")
+    p_batch.add_argument("--recursive", action="store_true", help="Whether to search for PDFs in subdirectories.")
+    p_batch.add_argument("--checkpoint", help="Path to the checkpoint file to track progress. Default: <output>.checkpoint.jsonl")
+    p_batch.add_argument("--resume", dest="resume", action="store_true", default=True, help="Resume from an existing checkpoint if found.")
+    p_batch.add_argument("--no-resume", dest="resume", action="store_false", help="Ignore existing checkpoints and start fresh.")
     p_batch.add_argument(
         "--format",
         choices=["csv", "json", "both"],
         default="both",
-        help="Export format.",
+        help="Desired export format for batch results.",
     )
     p_batch.set_defaults(func=batch_command)
 
-    # Alias for requested command style.
+    # process_batch alias for better UX/compatibility
     p_batch_alias = subparsers.add_parser(
         "process_batch",
         parents=[common],
-        help="Alias of batch command.",
+        help="Alias for the 'batch' command.",
     )
-    p_batch_alias.add_argument("--folder", "--input", dest="folder", required=True, help="Folder containing PDFs.")
-    p_batch_alias.add_argument("--output", required=True, help="Output base path, e.g. ./results.csv")
-    p_batch_alias.add_argument("--workers", type=int, default=4, help="Parallel workers. Default: 4")
-    p_batch_alias.add_argument("--recursive", action="store_true", help="Scan folder recursively for PDFs.")
-    p_batch_alias.add_argument("--checkpoint", help="Checkpoint file path. Default: <output>.checkpoint.jsonl")
-    p_batch_alias.add_argument("--resume", dest="resume", action="store_true", default=True, help="Resume from checkpoint (default).")
-    p_batch_alias.add_argument("--no-resume", dest="resume", action="store_false", help="Start a fresh run and overwrite checkpoint.")
+    p_batch_alias.add_argument("--folder", "--input", dest="folder", required=True, help="Input directory.")
+    p_batch_alias.add_argument("--output", required=True, help="Output base path.")
+    p_batch_alias.add_argument("--workers", type=int, default=4, help="Parallel workers.")
+    p_batch_alias.add_argument("--recursive", action="store_true", help="Search subdirectories.")
+    p_batch_alias.add_argument("--checkpoint", help="Checkpoint file path.")
+    p_batch_alias.add_argument("--resume", dest="resume", action="store_true", default=True, help="Resume progress.")
+    p_batch_alias.add_argument("--no-resume", dest="resume", action="store_false", help="Fresh start.")
     p_batch_alias.add_argument(
         "--format",
         choices=["csv", "json", "both"],
@@ -832,28 +1007,55 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """
+    Main entry point for the LegalEase CLI application.
+    
+    Responsibilities:
+    1. Parse command line arguments.
+    2. Configure logging level (dynamic based on --verbose).
+    3. Initialize global state (semaphores, clients).
+    4. Execute the requested command (process/batch).
+    5. Handle global exceptions and exit codes.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     
-    # Configure structured logging and rich output
+    # Determine the appropriate logging level.
+    # DEBUG level enables detailed tracing of PDF extraction and LLM calls.
+    # INFO level is the standard operational mode.
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    
+    # Configure structured logging and rich output.
+    # We attempt to use our custom logging configuration, falling back
+    # to standard library basicConfig if it fails (e.g., missing dependencies).
     try:
-        configure_logging()
-    except Exception:
-        logging.basicConfig(level=logging.INFO)
+        configure_logging(level=log_level)
+        LOGGER.debug("logging_initialized", level=logging.getLevelName(log_level))
+    except Exception as e:
+        # Fallback configuration to ensure we don't lose logs if the complex setup fails.
+        logging.basicConfig(level=log_level)
+        LOGGER.warning("logging_config_fallback", error=str(e))
 
-    # Initialize global semaphore with user-specified concurrency
-    global API_SEMAPHORE
-    API_SEMAPHORE = threading.Semaphore(args.concurrency)
+    # Initialize global semaphore with user-specified concurrency.
+    # This prevents the CLI from exceeding API rate limits or system memory.
+    _reinitialize_semaphore(args.concurrency)
+    LOGGER.debug("semaphore_initialized", concurrency=args.concurrency)
 
+    # Basic validation for worker counts in batch mode.
     if getattr(args, "workers", 1) < 1:
+        LOGGER.error("validation_error", detail="--workers must be >= 1")
         raise CLIError("--workers must be >= 1")
 
     try:
+        # Route execution to the function associated with the chosen subcommand.
         return args.func(args)
     except CLIError as exc:
+        # Known application errors are logged cleanly without stack traces.
         LOGGER.error("cli_error", error=str(exc))
         return 2
-    except Exception as exc:  # Defensive catch to keep CLI stable.
+    except Exception as exc:
+        # Unexpected errors are logged with full stack traces in verbose mode
+        # or simplified logs in standard mode.
         LOGGER.exception("unexpected_error", error=str(exc))
         return 3
 

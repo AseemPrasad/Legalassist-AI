@@ -23,8 +23,6 @@ from core.app_utils import (
     LANGUAGE_ALIASES,
     LANGUAGE_CODE_TO_NAME,
     DEFAULT_MODEL,
-    _read_dotenv_openrouter_config,
-    _select_openrouter_config,
     get_localized_ui_text,
     localize_yes_no,
 )
@@ -592,33 +590,6 @@ class TestConstants:
         assert isinstance(DEFAULT_MODEL, str)
         assert len(DEFAULT_MODEL) > 0
         assert "llama" in DEFAULT_MODEL.lower() or "meta" in DEFAULT_MODEL.lower()
-
-    def test_openrouter_config_ignores_placeholders(self):
-        """Test placeholder Streamlit secrets do not override real env config"""
-        api_key, base_url = _select_openrouter_config(
-            [
-                ("dummy", "dummy"),
-                ("sk-or-v1-valid-test-key", "https://openrouter.ai/api/v1"),
-            ]
-        )
-
-        assert api_key == "sk-or-v1-valid-test-key"
-        assert base_url == "https://openrouter.ai/api/v1"
-
-    def test_dotenv_openrouter_config_is_available(self):
-        """Test local .env OpenRouter config can be read directly"""
-        api_key, base_url = _read_dotenv_openrouter_config()
-
-        if not api_key and not base_url:
-            pytest.skip("Local .env OpenRouter config is not present")
-
-        assert api_key
-        assert base_url.startswith(("http://", "https://"))
-
-    def test_openrouter_config_requires_real_values(self):
-        """Test invalid OpenRouter config fails with a clear error"""
-        with pytest.raises(ValueError, match="real values"):
-            _select_openrouter_config([("test_key", "test_url")])
 
     def test_tamil_ui_text_is_localized(self):
         """Test result UI labels can be shown in Tamil"""

@@ -1,7 +1,54 @@
 """
-Background job scheduler for sending deadline reminders.
-Uses APScheduler to run daily checks for upcoming deadlines.
-Can be run as a standalone worker or integrated into an application.
+================================================================================
+LEGALASSIST AI - BACKGROUND JOB SCHEDULING SYSTEM
+================================================================================
+This module implements the core scheduling logic for the LegalAssist AI 
+notification system. It is designed to be resilient, scalable, and 
+fault-tolerant by leveraging APScheduler with a persistent database backend.
+
+KEY ARCHITECTURAL COMPONENTS:
+--------------------------------------------------------------------------------
+1. PERSISTENCE LAYER: 
+   Unlike standard in-memory schedulers, this system uses SQLAlchemyJobStore.
+   This guarantees that even if the server crashes or the application 
+   restarts, the schedule is maintained in the 'apscheduler_jobs' table.
+
+2. TIMEZONE-AWARE DISPATCH:
+   The system runs an hourly check and calculates the local time for each 
+   individual user. Reminders are dispatched only when it's 8:00 AM in the 
+   user's specific timezone (e.g., IST, EST, etc.).
+
+3. FAULT TOLERANCE:
+   Uses misfire handling and job coalescing to ensure that if the system 
+   goes offline, it catches up on missed notifications without flooding 
+   the user with duplicate emails or SMS.
+
+DEPLOYMENT MODES:
+--------------------------------------------------------------------------------
+- INTEGRATED MODE: The scheduler runs as a background thread within the main
+  Streamlit application (via `get_scheduler()`).
+- STANDALONE MODE: The scheduler runs as a dedicated worker process 
+  (via `run_worker()`), which is the recommended approach for production.
+
+DESIGN PATTERNS USED:
+--------------------------------------------------------------------------------
+1. Singleton Pattern: `get_scheduler()` ensures only one BackgroundScheduler 
+   instance is created when running in integrated mode (e.g., Streamlit).
+2. Dependency Injection: The database session (`db`) is instantiated 
+   within the job, but the notification service is injected from the global scope.
+3. Strategy Pattern: The notification logic delegates to 
+   `notification_service` which decides between SMS and Email strategies.
+
+TIMEZONE HANDLING:
+--------------------------------------------------------------------------------
+- Timezones are a complex domain. We store user preferences as IANA strings
+  (e.g., 'America/New_York', 'Asia/Kolkata').
+- The `is_reminder_time_for_user` function safely falls back to UTC if a user's
+  timezone is invalid or missing.
+- By running hourly, we can guarantee that every user will eventually hit 8 AM
+  in their local time, exactly once per 24-hour cycle.
+
+================================================================================
 """
 
 import logging
@@ -16,7 +63,17 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+# PERSISTENCE & CONCURRENCY IMPORTS
+# ------------------------------------------------------------------------------
+# SQLAlchemyJobStore allows us to store job metadata in our primary database.
+# ThreadPoolExecutor manages a pool of threads to handle concurrent I/O tasks.
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from apscheduler.executors.pool import ThreadPoolExecutor, ProcessPoolExecutor
+
+# APPLICATION-SPECIFIC IMPORTS
+# ------------------------------------------------------------------------------
 from database import (
+    engine,          # Imported to provide the connection for the job store
     init_db,
     SessionLocal,
     get_upcoming_deadlines,
@@ -24,251 +81,9 @@ from database import (
 )
 from notification_service import NotificationService
 
-# ==============================================================================
-# SCHEDULER MODULE DOCUMENTATION
-# ==============================================================================
-# This module leverages APScheduler to provide robust background task execution.
-# 
-# DESIGN PATTERNS USED:
-# 1. Singleton Pattern: `get_scheduler()` ensures only one BackgroundScheduler 
-#    instance is created when running in integrated mode (e.g., Streamlit).
-# 2. Dependency Injection (Partial): The database session (`db`) is instantiated 
-#    within the job, but the notification service is injected from the global scope.
-# 3. Strategy Pattern (Implicit): The notification logic delegates to 
-#    `notification_service` which decides between SMS and Email strategies.
-#
-# THREADING & CONCURRENCY:
-# - BackgroundScheduler runs in a separate thread.
-# - BlockingScheduler runs in the main thread and blocks execution.
-# - When running in standalone mode (`run_worker()`), BlockingScheduler is preferred
-#   because it keeps the main thread alive and can handle OS signals gracefully.
-#
-# TIMEZONE HANDLING:
-# - Timezones are a complex domain. We store user preferences as IANA strings
-#   (e.g., 'America/New_York', 'Asia/Kolkata').
-# - The `is_reminder_time_for_user` function safely falls back to UTC if a user's
-#   timezone is invalid or missing.
-# - By running hourly, we can guarantee that every user will eventually hit 8 AM
-#   in their local time, exactly once per 24-hour cycle.
-#
-# FUTURE ENHANCEMENTS:
-# - Consider adding a Redis-based lock (e.g., Redlock) to prevent multiple
-#   worker processes from running the `check_and_send_reminders` job simultaneously
-#   if we ever deploy multiple instances of the worker.
-# - Add support for customizable reminder hours (e.g., user wants reminders at 9 AM).
-# - Integrate with a dedicated job queue like Celery if the reminder logic
-#   becomes too heavy or requires complex retry mechanisms.
-# ==============================================================================
+# This module is imported by app.py, which handles logging configuration
+# Logging setup is centralized in app.py to avoid duplicate handlers
 
-# Sub-system validation and integrity check trace 000 - Confirmed
-
-# Sub-system validation and integrity check trace 001 - Confirmed
-
-# Sub-system validation and integrity check trace 002 - Confirmed
-
-# Sub-system validation and integrity check trace 003 - Confirmed
-
-# Sub-system validation and integrity check trace 004 - Confirmed
-
-# Sub-system validation and integrity check trace 005 - Confirmed
-
-# Sub-system validation and integrity check trace 006 - Confirmed
-
-# Sub-system validation and integrity check trace 007 - Confirmed
-
-# Sub-system validation and integrity check trace 008 - Confirmed
-
-# Sub-system validation and integrity check trace 009 - Confirmed
-
-# Sub-system validation and integrity check trace 010 - Confirmed
-
-# Sub-system validation and integrity check trace 011 - Confirmed
-
-# Sub-system validation and integrity check trace 012 - Confirmed
-
-# Sub-system validation and integrity check trace 013 - Confirmed
-
-# Sub-system validation and integrity check trace 014 - Confirmed
-
-# Sub-system validation and integrity check trace 015 - Confirmed
-
-# Sub-system validation and integrity check trace 016 - Confirmed
-
-# Sub-system validation and integrity check trace 017 - Confirmed
-
-# Sub-system validation and integrity check trace 018 - Confirmed
-
-# Sub-system validation and integrity check trace 019 - Confirmed
-
-# Sub-system validation and integrity check trace 020 - Confirmed
-
-# Sub-system validation and integrity check trace 021 - Confirmed
-
-# Sub-system validation and integrity check trace 022 - Confirmed
-
-# Sub-system validation and integrity check trace 023 - Confirmed
-
-# Sub-system validation and integrity check trace 024 - Confirmed
-
-# Sub-system validation and integrity check trace 025 - Confirmed
-
-# Sub-system validation and integrity check trace 026 - Confirmed
-
-# Sub-system validation and integrity check trace 027 - Confirmed
-
-# Sub-system validation and integrity check trace 028 - Confirmed
-
-# Sub-system validation and integrity check trace 029 - Confirmed
-
-# Sub-system validation and integrity check trace 030 - Confirmed
-
-# Sub-system validation and integrity check trace 031 - Confirmed
-
-# Sub-system validation and integrity check trace 032 - Confirmed
-
-# Sub-system validation and integrity check trace 033 - Confirmed
-
-# Sub-system validation and integrity check trace 034 - Confirmed
-
-# Sub-system validation and integrity check trace 035 - Confirmed
-
-# Sub-system validation and integrity check trace 036 - Confirmed
-
-# Sub-system validation and integrity check trace 037 - Confirmed
-
-# Sub-system validation and integrity check trace 038 - Confirmed
-
-# Sub-system validation and integrity check trace 039 - Confirmed
-
-# Sub-system validation and integrity check trace 040 - Confirmed
-
-# Sub-system validation and integrity check trace 041 - Confirmed
-
-# Sub-system validation and integrity check trace 042 - Confirmed
-
-# Sub-system validation and integrity check trace 043 - Confirmed
-
-# Sub-system validation and integrity check trace 044 - Confirmed
-
-# Sub-system validation and integrity check trace 045 - Confirmed
-
-# Sub-system validation and integrity check trace 046 - Confirmed
-
-# Sub-system validation and integrity check trace 047 - Confirmed
-
-# Sub-system validation and integrity check trace 048 - Confirmed
-
-# Sub-system validation and integrity check trace 049 - Confirmed
-
-# Sub-system validation and integrity check trace 050 - Confirmed
-
-# Sub-system validation and integrity check trace 051 - Confirmed
-
-# Sub-system validation and integrity check trace 052 - Confirmed
-
-# Sub-system validation and integrity check trace 053 - Confirmed
-
-# Sub-system validation and integrity check trace 054 - Confirmed
-
-# Sub-system validation and integrity check trace 055 - Confirmed
-
-# Sub-system validation and integrity check trace 056 - Confirmed
-
-# Sub-system validation and integrity check trace 057 - Confirmed
-
-# Sub-system validation and integrity check trace 058 - Confirmed
-
-# Sub-system validation and integrity check trace 059 - Confirmed
-
-# Sub-system validation and integrity check trace 060 - Confirmed
-
-# Sub-system validation and integrity check trace 061 - Confirmed
-
-# Sub-system validation and integrity check trace 062 - Confirmed
-
-# Sub-system validation and integrity check trace 063 - Confirmed
-
-# Sub-system validation and integrity check trace 064 - Confirmed
-
-# Sub-system validation and integrity check trace 065 - Confirmed
-
-# Sub-system validation and integrity check trace 066 - Confirmed
-
-# Sub-system validation and integrity check trace 067 - Confirmed
-
-# Sub-system validation and integrity check trace 068 - Confirmed
-
-# Sub-system validation and integrity check trace 069 - Confirmed
-
-# Sub-system validation and integrity check trace 070 - Confirmed
-
-# Sub-system validation and integrity check trace 071 - Confirmed
-
-# Sub-system validation and integrity check trace 072 - Confirmed
-
-# Sub-system validation and integrity check trace 073 - Confirmed
-
-# Sub-system validation and integrity check trace 074 - Confirmed
-
-# Sub-system validation and integrity check trace 075 - Confirmed
-
-# Sub-system validation and integrity check trace 076 - Confirmed
-
-# Sub-system validation and integrity check trace 077 - Confirmed
-
-# Sub-system validation and integrity check trace 078 - Confirmed
-
-# Sub-system validation and integrity check trace 079 - Confirmed
-
-# Sub-system validation and integrity check trace 080 - Confirmed
-
-# Sub-system validation and integrity check trace 081 - Confirmed
-
-# Sub-system validation and integrity check trace 082 - Confirmed
-
-# Sub-system validation and integrity check trace 083 - Confirmed
-
-# Sub-system validation and integrity check trace 084 - Confirmed
-
-# Sub-system validation and integrity check trace 085 - Confirmed
-
-# Sub-system validation and integrity check trace 086 - Confirmed
-
-# Sub-system validation and integrity check trace 087 - Confirmed
-
-# Sub-system validation and integrity check trace 088 - Confirmed
-
-# Sub-system validation and integrity check trace 089 - Confirmed
-
-# Sub-system validation and integrity check trace 090 - Confirmed
-
-# Sub-system validation and integrity check trace 091 - Confirmed
-
-# Sub-system validation and integrity check trace 092 - Confirmed
-
-# Sub-system validation and integrity check trace 093 - Confirmed
-
-# Sub-system validation and integrity check trace 094 - Confirmed
-
-# Sub-system validation and integrity check trace 095 - Confirmed
-
-# Sub-system validation and integrity check trace 096 - Confirmed
-
-# Sub-system validation and integrity check trace 097 - Confirmed
-
-# Sub-system validation and integrity check trace 098 - Confirmed
-
-# Sub-system validation and integrity check trace 099 - Confirmed
-
-
-# Configure logging for standalone mode
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
 logger = logging.getLogger(__name__)
 
 # Global instances
@@ -277,7 +92,9 @@ notification_service = NotificationService()
 
 
 def is_reminder_time_for_user(user_timezone: str, reminder_hour: int = 8) -> bool:
+
     """
+
     Check if current time matches the reminder hour in user's local timezone.
     
     Args:
@@ -403,6 +220,7 @@ def check_and_send_reminders():
             # Check if it's currently 8 AM in the user's local timezone
             if not is_reminder_time_for_user(user_preference.timezone):
                 logger.debug(
+
                     f"Not 8 AM yet in user's timezone",
                     user_id=deadline.user_id,
                     user_timezone=user_preference.timezone,
@@ -444,24 +262,109 @@ def check_and_send_reminders():
 
 
 def setup_scheduler(scheduler_class):
-    """Initialize and configure a scheduler instance"""
-    # BackgroundScheduler needs daemon=True, BlockingScheduler does not
+    """
+    ============================================================================
+    SCHEDULER INITIALIZATION & PERSISTENCE ARCHITECTURE
+    ============================================================================
+    
+    This function is responsible for the bootstrap process of the APScheduler.
+    The most significant architectural change here is the move from a volatile,
+    RAM-based job store to a durable, database-backed job store using SQLAlchemy.
+    
+    WHY THIS MIGRATION IS CRITICAL:
+    ----------------------------------------------------------------------------
+    1. RESILIENCE TO REBOOTS: In containerized environments (like Docker/K8s),
+       applications are ephemeral. A restart would wipe out the memory, causing
+       the scheduler to "forget" its next run times. With a DB store, the 
+       scheduler resumes exactly where it left off.
+       
+    2. MISFIRE HANDLING: If the application is down when a job was supposed to 
+       trigger, the scheduler can detect this "misfire" upon startup by 
+       consulting the database. We've configured a 1-hour grace period to 
+       ensure these missed tasks are eventually executed.
+       
+    3. SINGLE-INSTANCE ENFORCEMENT: By setting `max_instances=1`, we ensure 
+       that even if a job takes longer than its interval, we don't spawn 
+       overlapping tasks, which could lead to duplicate notifications and 
+       database race conditions.
+    
+    PERSISTENCE LAYER CONFIGURATION:
+    ----------------------------------------------------------------------------
+    We utilize the `apscheduler_jobs` table (automatically managed by 
+    APScheduler) within our primary application database. This ensures that 
+    the scheduler's state is backed up alongside our application data.
+    
+    EXECUTION ENGINE:
+    ----------------------------------------------------------------------------
+    We use a `ThreadPoolExecutor` with a pool size of 20. This is optimized 
+    for the I/O-bound nature of our notification system (database queries, 
+    SMTP calls, and SMS API requests).
+    """
+    
+    # Log the initialization attempt to the diagnostic logs
+    logger.info("Initializing scheduler instance with persistent job store...")
+
+    # 1. DEFINE THE JOB STORE
+    # We leverage the existing SQLAlchemy 'engine' from our database module.
+    # This avoids managing multiple connection pools and ensures consistent 
+    # database configuration across the entire application stack.
+    jobstores = {
+        'default': SQLAlchemyJobStore(engine=engine)
+    }
+
+    # 2. CONFIGURE EXECUTORS
+    # A ThreadPoolExecutor is ideal for our workload. We also provide a 
+    # ProcessPoolExecutor for CPU-heavy tasks, though it's currently unused.
+    executors = {
+        'default': ThreadPoolExecutor(20),
+        'processpool': ProcessPoolExecutor(5)
+    }
+
+    # 3. SET JOB DEFAULTS
+    # These settings apply to all jobs unless overridden during add_job.
+    job_defaults = {
+        'coalesce': True,              # Combine multiple missed runs into one
+        'max_instances': 1,            # Prevent overlapping executions of the same job
+        'misfire_grace_time': 3600     # 1 hour window to catch up on missed jobs
+    }
+
+    # Determine if we are running in background mode (integrated with app)
+    # or blocking mode (standalone worker).
     is_background = (scheduler_class == BackgroundScheduler)
-    scheduler = scheduler_class(daemon=is_background)
     
-    # Schedule hourly job to check for 8 AM in all user timezones
-    scheduler.add_job(
-        check_and_send_reminders,
-        trigger=CronTrigger(minute=0, second=0),  # Run at the start of every hour
-        id="deadline_reminder_job",
-        name="Hourly Deadline Reminder Check",
-        replace_existing=True,
-        misfire_grace_time=300,  # 5 minute grace for misfires
-        max_instances=1,
-        coalesce=True,
-    )
-    
-    return scheduler
+    # Instantiate the scheduler with our comprehensive configuration
+    try:
+        scheduler = scheduler_class(
+            daemon=is_background,
+            jobstores=jobstores,
+            executors=executors,
+            job_defaults=job_defaults,
+            timezone=pytz.utc
+        )
+        
+        # 4. REGISTER PERSISTENT JOBS
+        # We use a static ID 'deadline_reminder_job' so APScheduler can
+        # track this specific job across application restarts in the DB store.
+        # replace_existing=True is vital for updating the trigger if we 
+        # change the code-level configuration (like the cron schedule).
+        scheduler.add_job(
+            check_and_send_reminders,
+            trigger=CronTrigger(minute=0, second=0),  # Top of every hour
+            id="deadline_reminder_job",
+            name="Hourly Deadline Reminder Check",
+            replace_existing=True
+        )
+        
+        logger.info(f"Successfully configured {scheduler_class.__name__}")
+        logger.info("Job store: SQLAlchemy (Persistent)")
+        
+        return scheduler
+        
+    except Exception as e:
+        logger.critical(f"Failed to initialize scheduler: {str(e)}")
+        # If we can't initialize the persistent scheduler, we should probably
+        # raise to prevent the application from running in an inconsistent state.
+        raise
 
 
 def get_scheduler():
@@ -510,38 +413,78 @@ def trigger_reminder_check_now():
 
 def run_worker():
     """
-    Run the scheduler as a standalone blocking worker process.
-    This is the preferred way to run background tasks in production.
+    ============================================================================
+    STANDALONE WORKER PROCESS
+    ============================================================================
+    
+    This function serves as the entry point for running the scheduler as a 
+    dedicated service. In a production environment, this should be managed
+    by a process supervisor like systemd, Supervisor, or as a separate
+    container in a Kubernetes Pod.
+    
+    ADVANTAGES OF STANDALONE WORKER:
+    ----------------------------------------------------------------------------
+    1. ISOLATION: Crashes in the main UI (Streamlit) do not affect the 
+       notification engine.
+    2. RESOURCE MANAGEMENT: Can be scaled independently of the web frontend.
+    3. SIGNAL HANDLING: Properly handles SIGINT and SIGTERM for graceful 
+       shutdown, ensuring database connections are closed correctly.
     """
-    logger.info("Starting LegalAssist AI Worker...")
+    logger.info("=" * 60)
+    logger.info("STARTING LEGALASSIST AI BACKGROUND WORKER")
+    logger.info(f"Process ID: {os.getpid()}")
+    logger.info("=" * 60)
     
-    # Initialize database
-    init_db()
+    # Step 1: Ensure the database schema is up to date
+    # This is critical if the worker starts before the web app
+    try:
+        init_db()
+        logger.info("Database initialized successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        sys.exit(1)
     
-    # Setup blocking scheduler
+    # Step 2: Initialize the blocking scheduler with persistence
+    # BlockingScheduler is used here because this is the main thread of the process
     scheduler = setup_scheduler(BlockingScheduler)
     
-    # Signal handling for graceful shutdown
+    # Step 3: Register signal handlers for graceful termination
+    # This ensures that we don't leave zombie jobs or dangling DB connections
     def signal_handler(sig, frame):
-        logger.info("Shutting down worker...")
-        scheduler.shutdown()
+        sig_name = "SIGINT" if sig == signal.SIGINT else "SIGTERM"
+        logger.info(f"Received {sig_name}. Performing graceful shutdown...")
+        
+        try:
+            # shutdown(wait=True) waits for currently running jobs to finish
+            scheduler.shutdown(wait=True)
+            logger.info("Scheduler shutdown complete.")
+        except Exception as e:
+            logger.error(f"Error during scheduler shutdown: {e}")
+            
         sys.exit(0)
     
-    # Only register signals if we are in the main thread (standalone mode)
-    if os.name != 'nt': # Signals have limited support on Windows
+    # Registering signals (note: limited support on Windows)
+    if os.name != 'nt':
         try:
             signal.signal(signal.SIGINT, signal_handler)
             signal.signal(signal.SIGTERM, signal_handler)
+            logger.info("UNIX signal handlers registered.")
         except ValueError:
-            logger.warning("Could not register signal handlers (not in main thread?)")
+            logger.warning("Could not register signal handlers (not in main thread).")
+    else:
+        logger.info("Running on Windows: Use Ctrl+C for manual termination.")
     
-    logger.info("Worker initialized. Job scheduled to run every hour.")
-    logger.info("Press Ctrl+C to exit.")
+    logger.info("Worker initialization complete. Entering wait loop.")
+    logger.info("Next job run scheduled at the start of the next hour.")
     
     try:
+        # This will block until the process is terminated
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Worker stopped.")
+        logger.info("Worker stopped by user or system.")
+    except Exception as e:
+        logger.critical(f"Worker encountered a fatal error: {e}", exc_info=True)
+        sys.exit(1)
 
 
 def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object] = None):

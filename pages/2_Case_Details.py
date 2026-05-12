@@ -9,10 +9,13 @@ from typing import Optional, Dict, Any
 
 from auth import require_auth, redirect_to_login, get_current_user_id
 from case_manager import get_case_detail, upload_case_document, mark_deadline_completed, mark_deadline_incomplete, add_manual_deadline, mark_case_appealed, mark_case_closed, mark_case_active, generate_case_summary_text
+from case_manager import upload_case_attachment
 from core import extract_text_from_pdf
 from database import DocumentType, CaseStatus, SessionLocal, UserPreference
 import pytz
 import html
+from config import Config
+from pypdf import PdfReader
 
 # Page config
 st.set_page_config(
@@ -46,22 +49,41 @@ def render_timeline_section(timeline: list):
         st.info("No timeline events yet. Upload a document to start tracking.")
         return
 
-    # Sort by date descending (most recent first)
-    sorted_timeline = sorted(timeline, key=lambda x: x["event_date"], reverse=True)
+    # Sort by date descending (most recent first). Support both old and new timeline formats.
+    sorted_timeline = sorted(timeline, key=lambda x: x.get("timestamp") or x.get("event_date") or "", reverse=True)
 
     for event in sorted_timeline:
-        icon = get_timeline_icon(event["event_type"])
-        event_date = datetime.fromisoformat(event["event_date"])
-        date_str = event_date.strftime("%d %b %Y, %H:%M")
+        ev_type = event.get("type") or event.get("event_type")
+        icon = get_timeline_icon(ev_type)
+        ts = event.get("timestamp") or event.get("event_date") or ""
+        try:
+            event_date = datetime.fromisoformat(ts)
+            date_str = event_date.strftime("%d %b %Y, %H:%M")
+        except Exception:
+            date_str = ts
+
+        desc = event.get("description", "")
+
+        # Build HTML block; include message preview for notifications
+        msg_preview_html = ""
+        if event.get("source") == "notification":
+            mp = event.get("message_preview")
+            if mp:
+                # If the preview looks like HTML, render as HTML inside an expander
+                if bool(mp.strip().startswith("<")):
+                    msg_preview_html = f"<div style=\"margin-top:8px;\"><details><summary>Rendered Message Preview</summary>{mp}</details></div>"
+                else:
+                    safe_text = html.escape(str(mp))
+                    msg_preview_html = f"<div style=\"margin-top:8px;\"><details><summary>Rendered Message Preview</summary><pre style=\"white-space:pre-wrap;\">{safe_text}</pre></details></div>"
 
         with st.container():
             st.markdown(
                 f"""
                 <div class="timeline-item">
                     <div class="timeline-date">{date_str}</div>
-                    <div>{icon} <strong>{event["event_type"].replace("_", " ").title()}</strong></div>
-                    <div style="margin-top: 8px;">{html.escape(str(event.get("description", "")))}</div>
-
+                    <div>{icon} <strong>{ev_type.replace("_", " ").title()}</strong></div>
+                    <div style="margin-top: 8px;">{html.escape(str(desc))}</div>
+                    {msg_preview_html}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -125,10 +147,27 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
             uploaded_pdf = st.file_uploader("Upload Judgment PDF", type=["pdf"])
             document_text = None
             if uploaded_pdf:
-                try:
-                    document_text = extract_text_from_pdf(uploaded_pdf, enable_ocr=True)
-                except Exception as e:
-                    st.error(f"Error reading PDF: {str(e)}")
+                # Validate file size
+                file_size_mb = uploaded_pdf.size / (1024 * 1024)
+                is_valid = True
+                
+                if file_size_mb > Config.MAX_FILE_SIZE_MB:
+                    st.error(f"🛑 File too large. Maximum size is {Config.MAX_FILE_SIZE_MB}MB.")
+                    is_valid = False
+                elif file_size_mb > Config.WARN_FILE_SIZE_MB:
+                    st.warning("⚠️ This file is quite large. Processing may take longer than usual.")
+                
+                if is_valid:
+                    try:
+                        # Check page count
+                        pdf_reader = PdfReader(uploaded_pdf)
+                        num_pages = len(pdf_reader.pages)
+                        if num_pages > 100:
+                            st.warning(f"⚠️ This document has {num_pages} pages. Analysis may be less precise.")
+                        
+                        document_text = extract_text_from_pdf(uploaded_pdf, enable_ocr=True)
+                    except Exception as e:
+                        st.error(f"Error reading PDF: {str(e)}")
 
         if st.button("📤 Upload Document", use_container_width=True):
             if document_text:
@@ -147,6 +186,71 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
                         st.rerun()
                     else:
                         st.error("Failed to upload document.")
+
+        # Attachments / Evidence
+        st.markdown("---")
+        st.subheader("📎 Attachments / Evidence")
+
+        # List existing attachments
+        attachments = st.session_state.get("case_attachments")
+        if attachments:
+            for a in attachments:
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.markdown(f"**{a['original_filename']}**")
+                    st.caption(f"Uploaded: {a['uploaded_at']} • {a.get('size_bytes', 0)} bytes")
+                with col2:
+                    try:
+                        from core.storage import get_attachment_path
+                        path = get_attachment_path(a.get('stored_path') or a.get('stored_path'))
+                        if path:
+                            with open(path, 'rb') as f:
+                                file_bytes = f.read()
+                            st.download_button(label="Download", data=file_bytes, file_name=a['original_filename'], key=f"dl_att_{a['id']}")
+                    except Exception:
+                        st.button("Download", key=f"dl_att_{a['id']}")
+        else:
+            st.info("No attachments uploaded yet.")
+
+        # Upload new attachment
+        with st.expander("➕ Upload Attachment / Evidence"):
+            uploaded = st.file_uploader("Select file (PDF / Image)", type=["pdf", "png", "jpg", "jpeg"], key="attachment_uploader")
+            attach_deadline = None
+            # Optionally link to a deadline
+            if uploaded:
+                # Show deadline select if deadlines exist
+                deadlines = st.session_state.get("current_deadlines") or []
+                if deadlines:
+                    options = {f"{d['deadline_type']} - {d['deadline_date']}": d['id'] for d in deadlines}
+                    sel = st.selectbox("Link to deadline (optional)", options=["None"] + list(options.keys()))
+                    if sel != "None":
+                        attach_deadline = options[sel]
+
+            if st.button("Upload Attachment", use_container_width=True, key="upload_attachment_btn"):
+                if not uploaded:
+                    st.error("Please select a file to upload.")
+                else:
+                    try:
+                        bytes_data = uploaded.read()
+                        result = upload_case_attachment(
+                            user_id=user_id,
+                            case_id=case_id,
+                            file_bytes=bytes_data,
+                            filename=uploaded.name,
+                            content_type=uploaded.type,
+                            deadline_id=attach_deadline,
+                        )
+                        if result:
+                            st.success("Attachment uploaded successfully")
+                            # Refresh attachments in session so UI updates without full reload
+                            if st.session_state.get("case_attachments") is None:
+                                st.session_state["case_attachments"] = []
+                            st.session_state["case_attachments"].insert(0, result)
+                            st.rerun()
+                        else:
+                            st.error("Failed to upload attachment.")
+                    except Exception as e:
+                        st.error(f"Upload failed: {str(e)}")
 
 
 def render_deadlines_section(case_id: int, deadlines: list, user_id: int):
@@ -388,9 +492,12 @@ def main():
 
     case = case_data["case"]
     documents = case_data["documents"]
-    timeline = case_data["timeline"]
     deadlines = case_data["deadlines"]
     remedies = case_data.get("remedies")
+
+    # Keep attachments and deadlines in session for uploader convenience
+    st.session_state.setdefault("case_attachments", case_data.get("attachments", []))
+    st.session_state.setdefault("current_deadlines", deadlines)
 
     # Store case title in session for deadline creation
     st.session_state.current_case_title = case.get("title") or case.get("case_number")

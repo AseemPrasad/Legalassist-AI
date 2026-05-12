@@ -68,7 +68,6 @@ opentelemetry-instrumentation-redis>=0.41b0
 
 # Elasticsearch & Log Aggregation
 elasticsearch>=8.0.0
-filebeat>=8.0.0
 
 # Production Server (for Prometheus metrics endpoint)
 gunicorn>=21.0.0

@@ -174,6 +174,90 @@ def page_notification_preferences():
                 st.error(f"❌ Error saving preferences: {str(e)}")
                 logger.error(f"Error saving preferences: {str(e)}")
 
+    # --- Template Builder ---
+    st.divider()
+    st.subheader("✉️ Reminder Template Builder")
+    st.markdown("Customize the SMS and Email templates used for reminders. Use only allowed variables listed below.")
+
+    allowed = ["{case_title}", "{case_number}", "{deadline_date}", "{days_left}", "{court}", "{deadline_type}", "{deadline_description}", "{link}"]
+    st.markdown("**Allowed variables:** " + ", ".join(allowed))
+
+    db = SessionLocal()
+    try:
+        tmpl = db.query(__import__("database").NotificationTemplate).filter(__import__("database").NotificationTemplate.user_id == int(user_id)).first()
+
+        sms_val = tmpl.sms_template if tmpl and tmpl.sms_template else "⚖️ Reminder: {case_title} has a deadline in {days_left} day(s). {link}"
+        subj_val = tmpl.email_subject_template if tmpl and tmpl.email_subject_template else "⚖️ Reminder: {case_title} - {deadline_type} due"
+        html_val = tmpl.email_html_template if tmpl and tmpl.email_html_template else ("<p>Dear user,</p><p>Your case <strong>{case_title}</strong> has a {deadline_type} deadline on {deadline_date} ({days_left} days left).</p><p><a href=\"{link}\">View case</a></p>")
+
+        sms_input = st.text_area("SMS Template", value=sms_val, height=120, key="sms_template_input")
+        subj_input = st.text_input("Email Subject Template", value=subj_val, key="email_subject_input")
+        html_input = st.text_area("Email HTML Template", value=html_val, height=220, key="email_html_input")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Preview Templates"):
+                from core.template_renderer import validate_template, render_template, TemplateValidationError
+                sample_values = {
+                    "case_title": "Sharma vs State",
+                    "case_number": "CA/123/2024",
+                    "deadline_date": "12 May 2026",
+                    "days_left": 3,
+                    "court": "Delhi High Court",
+                    "deadline_type": "appeal",
+                    "deadline_description": "File appeal against lower court order",
+                    "link": "https://legalassist.ai/cases/1",
+                }
+
+                ok_sms, unknown_sms = validate_template(sms_input)
+                ok_subj, unknown_subj = validate_template(subj_input)
+                ok_html, unknown_html = validate_template(html_input)
+
+                if not ok_sms:
+                    st.error(f"SMS template contains unknown variables: {unknown_sms}")
+                else:
+                    try:
+                        st.markdown("**SMS Preview**")
+                        st.write(render_template(sms_input, sample_values))
+                    except TemplateValidationError as e:
+                        st.error(str(e))
+
+                if not ok_subj:
+                    st.error(f"Email subject contains unknown variables: {unknown_subj}")
+                else:
+                    st.markdown("**Email Subject Preview**")
+                    try:
+                        st.write(render_template(subj_input, sample_values))
+                    except TemplateValidationError as e:
+                        st.error(str(e))
+
+                if not ok_html:
+                    st.error(f"Email HTML contains unknown variables: {unknown_html}")
+                else:
+                    st.markdown("**Email HTML Preview**")
+                    try:
+                        rendered_html = render_template(html_input, sample_values)
+                        st.write(rendered_html, unsafe_allow_html=True)
+                    except TemplateValidationError as e:
+                        st.error(str(e))
+
+        with col2:
+            if st.button("Save Templates", use_container_width=True):
+                try:
+                    from database import create_or_update_notification_template
+                    create_or_update_notification_template(
+                        db=db,
+                        user_id=int(user_id),
+                        sms_template=sms_input,
+                        email_subject_template=subj_input,
+                        email_html_template=html_input,
+                    )
+                    st.success("✅ Templates saved")
+                except Exception as e:
+                    st.error(f"Failed to save templates: {str(e)}")
+    finally:
+        db.close()
+
     finally:
         db.close()
 
@@ -209,7 +293,7 @@ def page_manage_deadlines():
         if not user_pref:
             st.warning("⚠️ Please set up your notification preferences first!")
             if st.button("Go to Preferences"):
-                st.switch_page("pages/notifications.py")
+                st.switch_page("pages/3_Settings.py")
             return
 
         # Add new deadline

@@ -1,16 +1,28 @@
 """
 Case Search Endpoints
 POST /api/v1/cases/search - Search for similar cases
+POST /api/v1/cases/similarity-feedback - Save similarity feedback
 GET /api/v1/cases/{id}/timeline - Get case timeline
 """
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, HTTPException, status, Depends
 from api.models import (
     CaseSearchRequest, CaseSearchResponse, CaseResult,
-    CaseTimeline, CaseEvent
+    CaseTimeline, CaseEvent, SimilarityFeedbackRequest,
+    SimilarityFeedbackResponse,
 )
 from api.auth import get_current_user, CurrentUser
 import structlog
-from datetime import datetime, timedelta
+from sqlalchemy import func
+
+from database import (
+    CaseRecord,
+    CaseOutcome,
+    get_db,
+    submit_similarity_feedback,
+)
+from analytics_engine import CaseSimilarityCalculator
 
 router = APIRouter(prefix="/api/v1/cases", tags=["cases"])
 logger = structlog.get_logger(__name__)
@@ -47,39 +59,194 @@ async def search_cases(
         jurisdiction=request.jurisdiction
     )
     
-    # Mock results for demonstration
-    mock_results = [
-        CaseResult(
-            case_id="case_001",
-            case_number="2023-CV-12345",
-            title="Smith v. Jones",
-            year=2023,
-            jurisdiction=request.jurisdiction,
-            case_type=request.case_type,
-            summary="Example case summary",
-            verdict="Plaintiff won",
-            relevance_score=0.95,
-            url="https://example.com/cases/case_001"
-        ),
-        CaseResult(
-            case_id="case_002",
-            case_number="2022-CV-67890",
-            title="Brown v. Davis",
-            year=2022,
-            jurisdiction=request.jurisdiction,
-            case_type=request.case_type,
-            summary="Another example case",
-            verdict="Settled",
-            relevance_score=0.87,
-            url="https://example.com/cases/case_002"
-        ),
+    from time import perf_counter
+
+    start = perf_counter()
+
+    # Similarity constraints/knobs
+    min_similarity = request.relevance_threshold
+    candidate_limit = 1000  # keeps the response time low
+
+    reference_case = None
+    db = None
+    try:
+        db = get_db()
+
+        query_signature = request.query_signature or _build_query_signature(request)
+
+        # Build candidate query from filters (cheap DB-side filtering)
+        query = db.query(CaseRecord)
+        if request.case_type and request.case_type != "general":
+            query = query.filter(CaseRecord.case_type == request.case_type)
+        if request.jurisdiction:
+            query = query.filter(CaseRecord.jurisdiction == request.jurisdiction)
+        if request.court_name:
+            query = query.filter(CaseRecord.court_name == request.court_name)
+        if request.judge_name:
+            query = query.filter(CaseRecord.judge_name == request.judge_name)
+        if request.plaintiff_type:
+            query = query.filter(CaseRecord.plaintiff_type == request.plaintiff_type)
+        if request.defendant_type:
+            query = query.filter(CaseRecord.defendant_type == request.defendant_type)
+
+        # Restrict time window if requested
+        if request.year_from is not None:
+            query = query.filter(CaseRecord.created_at >= datetime(request.year_from, 1, 1))
+        if request.year_to is not None:
+            query = query.filter(CaseRecord.created_at <= datetime(request.year_to, 12, 31, 23, 59, 59))
+
+        # Keep result set small for <2s performance
+        candidates = query.order_by(CaseRecord.created_at.desc()).limit(candidate_limit).all()
+
+        # If we cannot get a real reference_case, we use the first candidate as proxy when possible.
+        # This still returns meaningful “similar cases” under the attribute-only scoring.
+        if candidates:
+            reference_case = candidates[0]
+
+        if not reference_case:
+            return CaseSearchResponse(
+                total_results=0,
+                results=[],
+                search_time_seconds=round(perf_counter() - start, 4),
+            )
+
+        # Score candidates and apply threshold
+        scored = []
+        for c in candidates:
+            if c.id == reference_case.id:
+                continue
+            raw = CaseSimilarityCalculator.case_similarity_score(reference_case, c)
+            # raw is 0..100. normalize to 0..1
+            score01 = raw / 100.0
+            # Optional: slight boost for recency to match ranking requirement.
+            # (Cheap: based on created_at within last ~365 days)
+            try:
+                created_at = c.created_at
+                if created_at and created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                recency_days = (datetime.now(timezone.utc) - created_at).days if created_at else 0
+                recency_boost = max(0.0, 0.05 - recency_days * 0.0002)  # up to +0.05
+            except Exception:
+                recency_boost = 0.0
+            feedback_boost = CaseSimilarityCalculator.get_feedback_adjustment(
+                db,
+                c,
+                user_id=current_user.user_id,
+                query_signature=query_signature,
+            )
+            score01 = min(1.0, score01 + recency_boost + feedback_boost)
+
+            if score01 > min_similarity:
+                scored.append((c, score01))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top = scored[: request.limit]
+
+        # Fetch appeal analytics for the returned set
+        result_ids = [c.id for c, _ in top]
+        outcome_rows = []
+        if result_ids:
+            outcome_rows = (
+                db.query(CaseOutcome)
+                .filter(CaseOutcome.case_id.in_(result_ids))
+                .all()
+            )
+
+        outcome_map = {row.case_id: row for row in outcome_rows}
+        appealed_cases = sum(1 for row in outcome_rows if row.appeal_filed)
+        appeal_successful_cases = sum(1 for row in outcome_rows if row.appeal_filed and row.appeal_success)
+        appeal_success_rate = (
+            round(appeal_successful_cases / appealed_cases, 4) if appealed_cases > 0 else None
+        )
+
+        results = []
+        for c, score in top:
+            verdict = c.outcome
+            # We don't have a stored case_number/title on CaseRecord for analytics in current schema.
+            # Use placeholders derived from available fields.
+            case_number = c.hashed_case_id
+            title = c.judge_name or "Precedent"
+            outcome = outcome_map.get(c.id)
+            case_appeal_success_rate = None
+            if outcome and outcome.appeal_filed:
+                case_appeal_success_rate = 1.0 if outcome.appeal_success else 0.0
+
+            results.append(
+                CaseResult(
+                    case_id=str(c.id),
+                    case_number=case_number,
+                    title=title,
+                    year=c.created_at.year if c.created_at else 0,
+                    jurisdiction=c.jurisdiction,
+                    case_type=c.case_type,
+                    summary=c.judgment_summary or "",
+                    verdict=verdict,
+                    relevance_score=round(float(score), 4),
+                    appeal_success_rate=case_appeal_success_rate,
+                    url=None,
+                )
+            )
+
+        total_results = len(scored)
+        return CaseSearchResponse(
+            total_results=total_results,
+            results=results,
+            search_time_seconds=round(perf_counter() - start, 4),
+            appeal_success_rate=appeal_success_rate,
+            appealed_cases=appealed_cases,
+            appeal_successful_cases=appeal_successful_cases,
+        )
+
+    finally:
+        if db is not None:
+            db.close()
+
+
+@router.post(
+    "/similarity-feedback",
+    response_model=SimilarityFeedbackResponse,
+    summary="Save similarity feedback"
+)
+async def submit_similarity_result_feedback(
+    request: SimilarityFeedbackRequest,
+    current_user: CurrentUser = Depends(get_current_user)
+) -> SimilarityFeedbackResponse:
+    """Persist user feedback for a similarity search result."""
+    db = None
+    try:
+        db = get_db()
+        query_signature = request.query_signature or ""
+        feedback = submit_similarity_feedback(
+            db,
+            user_id=current_user.user_id,
+            candidate_case_id=request.candidate_case_id,
+            query_signature=query_signature,
+            relevance=request.relevance,
+        )
+        return SimilarityFeedbackResponse(
+            success=True,
+            saved_at=feedback.created_at,
+            feedback_id=feedback.id,
+        )
+    finally:
+        if db is not None:
+            db.close()
+
+
+def _build_query_signature(request: CaseSearchRequest) -> str:
+    """Derive a stable signature for the current similarity search filters."""
+    parts = [
+        f"jurisdiction={request.jurisdiction}",
+        f"case_type={request.case_type}",
+        f"court_name={request.court_name or ''}",
+        f"judge_name={request.judge_name or ''}",
+        f"plaintiff_type={request.plaintiff_type or ''}",
+        f"defendant_type={request.defendant_type or ''}",
+        f"year_from={request.year_from or ''}",
+        f"year_to={request.year_to or ''}",
     ]
-    
-    return CaseSearchResponse(
-        total_results=len(mock_results),
-        results=mock_results[:request.limit],
-        search_time_seconds=0.234
-    )
+    return "|".join(parts)
+
 
 
 @router.get(

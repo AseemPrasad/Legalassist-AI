@@ -12,12 +12,6 @@ from pypdf import PdfWriter
 
 import core.app_utils as app_utils
 from core.app_utils import (
-    _clean_config_value,
-    _is_placeholder_config,
-    _is_usable_api_key,
-    _is_usable_base_url,
-    _select_openrouter_config,
-    _read_streamlit_openrouter_secrets,
     validate_pdf_metadata,
     output_language_mismatch_detected,
     _count_script_chars,
@@ -41,58 +35,6 @@ from core.app_utils import (
     get_default_model,
     DEFAULT_MODEL,
 )
-
-
-# ==================== CONFIG HELPERS ====================
-
-class TestConfigHelpers:
-    def test_clean_config_value_strips_quotes(self):
-        assert _clean_config_value('"my_key"') == "my_key"
-        assert _clean_config_value("'my_key'") == "my_key"
-
-    def test_clean_config_value_none(self):
-        assert _clean_config_value(None) == ""
-
-    def test_is_placeholder_config_true(self):
-        for val in ["", "dummy", "test_key", "test_url", "none", "null", "change_me"]:
-            assert _is_placeholder_config(val) is True
-
-    def test_is_placeholder_config_false(self):
-        assert _is_placeholder_config("sk-or-v1-realkey") is False
-
-    def test_is_usable_api_key_too_short(self):
-        assert _is_usable_api_key("abc") is False
-
-    def test_is_usable_api_key_valid(self):
-        assert _is_usable_api_key("sk-or-v1-validkey") is True
-
-    def test_is_usable_base_url_no_scheme(self):
-        assert _is_usable_base_url("openrouter.ai/api/v1") is False
-
-    def test_is_usable_base_url_valid(self):
-        assert _is_usable_base_url("https://openrouter.ai/api/v1") is True
-
-    def test_select_openrouter_config_raises_all_placeholders(self):
-        with pytest.raises(ValueError):
-            _select_openrouter_config([("dummy", "dummy"), ("", "")])
-
-    def test_select_openrouter_config_picks_first_valid(self):
-        key, url = _select_openrouter_config([
-            ("dummy", "dummy"),
-            ("sk-or-v1-realkey", "https://openrouter.ai/api/v1"),
-        ])
-        assert key == "sk-or-v1-realkey"
-        assert url == "https://openrouter.ai/api/v1"
-
-    def test_read_streamlit_secrets_returns_tuple(self):
-        result = _read_streamlit_openrouter_secrets()
-        assert isinstance(result, tuple)
-        assert len(result) == 2
-
-    def test_get_default_model_returns_string(self):
-        model = get_default_model()
-        assert isinstance(model, str)
-        assert len(model) > 0
 
 
 # ==================== VALIDATE PDF METADATA ====================

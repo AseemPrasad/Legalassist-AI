@@ -19,11 +19,11 @@ st.set_page_config(
 )
 
 @st.dialog("📥 Export Case Summary")
-def export_dialog(user_id, case_id):
+def export_dialog(user_id, case_id, case_number):
     from case_manager import generate_case_summary_text
     from pdf_exporter import generate_case_pdf
     
-    st.write("Your case summary is ready. Choose your preferred format:")
+    st.write(f"Your case summary for **{case_number}** is ready. Choose your preferred format:")
     
     with st.spinner("Preparing files..."):
         org_id = st.session_state.get("org_id")
@@ -36,7 +36,7 @@ def export_dialog(user_id, case_id):
             st.download_button(
                 label="📄 Download TXT",
                 data=txt_summary,
-                file_name=f"case_summary_{case_id}.txt",
+                file_name=f"case_summary_{case_number}.txt",
                 mime="text/plain",
                 use_container_width=True
             )
@@ -45,7 +45,7 @@ def export_dialog(user_id, case_id):
             st.download_button(
                 label="📑 Download PDF",
                 data=pdf_bytes,
-                file_name=f"case_summary_{case_id}.pdf",
+                file_name=f"case_summary_{case_number}.pdf",
                 mime="application/pdf",
                 use_container_width=True
             )
@@ -147,7 +147,7 @@ def render_case_card(case: dict):
             st.markdown("<br>", unsafe_allow_html=True)
 
             if st.button("📥 Export", key=f"export_{case_id}", use_container_width=True):
-                export_dialog(get_current_user_id(), case_id)
+                export_dialog(get_current_user_id(), case_id, case['case_number'])
 
 
 def render_empty_state():
@@ -257,7 +257,7 @@ def main():
     with col2:
         type_filter = st.selectbox(
             "Filter by Type",
-            ["All"] + list(set(c["case_type"].title() for c in cases)),
+            ["All"] + sorted(set(c["case_type"].title() for c in cases)),
             key="type_filter",
         )
 

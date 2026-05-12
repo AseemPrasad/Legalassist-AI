@@ -7,6 +7,8 @@ import streamlit as st
 from datetime import datetime, timezone
 import time
 
+from config import Config
+
 from auth import (
     init_auth_session,
     login_user,
@@ -42,7 +44,8 @@ def render_login_card():
             help="We'll send a 6-digit OTP to this email",
         )
 
-        st.caption("💡 Hint: Use **test@example.com** for a quick dummy account login")
+        if Config.is_development():
+            st.caption("💡 Hint: Use **test@example.com** for a quick dummy account login")
 
         if st.button("📧 Send OTP", use_container_width=True):
             if not email:
@@ -84,7 +87,7 @@ def render_otp_verification():
             help="Enter the 6-digit code from your email",
         )
 
-        if email.lower() == "test@example.com":
+        if email.lower() == "test@example.com" and Config.is_development():
             st.caption("💡 Hint: Dummy OTP is **123456**")
 
         col1, col2 = st.columns(2)

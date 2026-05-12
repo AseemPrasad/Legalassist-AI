@@ -8,7 +8,10 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from database import SessionLocal, get_db
+import requests
+from datetime import datetime
+
+from database import SessionLocal, get_db, CaseRecord, CaseOutcome
 from analytics_engine import (
     AnalyticsCalculator,
     AnalyticsAggregator,
@@ -17,6 +20,26 @@ from analytics_engine import (
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def build_query_signature(
+    jurisdiction: str,
+    case_type: str,
+    court_name: str,
+    judge_name: str,
+    year_from: int | None,
+    year_to: int | None,
+) -> str:
+    """Create a stable signature for a similarity search."""
+    parts = [
+        f"jurisdiction={jurisdiction}",
+        f"case_type={case_type}",
+        f"court_name={court_name}",
+        f"judge_name={judge_name}",
+        f"year_from={year_from or ''}",
+        f"year_to={year_to or ''}",
+    ]
+    return "|".join(parts)
 
 # Page config
 st.set_page_config(
@@ -295,6 +318,130 @@ try:
             st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Regional data will appear as more cases are processed.")
+
+    st.markdown("---")
+
+    # ==================== SIMILAR CASE SEARCH ====================
+    st.subheader("🔍 Find Similar Cases")
+
+    with st.expander("API settings", expanded=False):
+        api_base_url = st.text_input("API base URL", value=st.session_state.get("api_base_url", "http://localhost:8000"))
+        bearer_token = st.text_input("Bearer token", value=st.session_state.get("api_token", ""), type="password")
+        st.session_state.api_base_url = api_base_url
+        st.session_state.api_token = bearer_token
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        similarity_jurisdiction = st.selectbox("Jurisdiction", jurisdictions if jurisdictions else ["US"], key="similarity_jurisdiction")
+        similarity_case_type = st.selectbox(
+            "Case Type",
+            ["general", "civil", "criminal", "contract", "family"],
+            key="similarity_case_type",
+        )
+
+    with col2:
+        similarity_court = st.text_input("Court name", key="similarity_court")
+        similarity_judge = st.text_input("Judge name", key="similarity_judge")
+
+    with col3:
+        year_from = st.number_input("Year from", min_value=1900, max_value=2100, value=2020, step=1, key="similarity_year_from")
+        year_to = st.number_input("Year to", min_value=1900, max_value=2100, value=datetime.now().year, step=1, key="similarity_year_to")
+
+    relevance_threshold = st.slider(
+        "Minimum similarity threshold",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.7,
+        step=0.01,
+        help="The backend only returns cases with relevance_score strictly above this threshold.",
+    )
+
+    st.caption("Top 5 results are requested from POST /api/v1/cases/search with an optional court/judge/year filter set.")
+
+    if st.button("Find Similar Cases", type="primary"):
+        payload = {
+            "jurisdiction": similarity_jurisdiction,
+            "case_type": similarity_case_type,
+            "court_name": similarity_court or None,
+            "judge_name": similarity_judge or None,
+            "year_from": int(year_from),
+            "year_to": int(year_to),
+            "limit": 5,
+            "relevance_threshold": relevance_threshold,
+            "query_signature": build_query_signature(
+                similarity_jurisdiction,
+                similarity_case_type,
+                similarity_court,
+                similarity_judge,
+                int(year_from),
+                int(year_to),
+            ),
+        }
+        headers = {"Content-Type": "application/json"}
+        if bearer_token:
+            headers["Authorization"] = f"Bearer {bearer_token}"
+
+        try:
+            response = requests.post(
+                f"{api_base_url.rstrip('/')}/api/v1/cases/search",
+                json=payload,
+                headers=headers,
+                timeout=15,
+            )
+            response.raise_for_status()
+            st.session_state.similar_case_results = response.json()
+            st.session_state.similar_case_query_signature = payload["query_signature"]
+        except Exception as exc:
+            st.error(f"Similarity search failed: {exc}")
+
+    if "similar_case_results" in st.session_state:
+        results_payload = st.session_state.similar_case_results
+        similar_results = results_payload.get("results", [])
+
+        if similar_results:
+            st.metric(
+                "Returned appeal success rate",
+                f"{(results_payload.get('appeal_success_rate') or 0.0) * 100:.1f}%",
+                help="Aggregate appeal success rate across the returned result set.",
+            )
+            st.metric("Returned appealed cases", results_payload.get("appealed_cases", 0))
+
+            result_ids = [int(item["case_id"]) for item in similar_results if str(item.get("case_id", "")).isdigit()]
+            appeal_lookup = {}
+            if result_ids:
+                outcome_rows = db.query(CaseOutcome).filter(CaseOutcome.case_id.in_(result_ids)).all()
+                appeal_lookup = {
+                    row.case_id: (row.appeal_filed, row.appeal_success)
+                    for row in outcome_rows
+                }
+
+            table_rows = []
+            for item in similar_results:
+                case_id = int(item["case_id"])
+                appeal_filed, appeal_success = appeal_lookup.get(case_id, (None, None))
+                table_rows.append({
+                    "Case": item.get("case_number"),
+                    "Title": item.get("title"),
+                    "Verdict": item.get("verdict"),
+                    "Relevance": f"{item.get('relevance_score', 0.0) * 100:.1f}%",
+                    "Appeal filed": "Yes" if appeal_filed else ("No" if appeal_filed is not None else "Unknown"),
+                    "Appeal success": "Yes" if appeal_success else ("No" if appeal_success is not None else "Unknown"),
+                })
+
+            df_similar = pd.DataFrame(table_rows)
+            st.dataframe(df_similar, use_container_width=True)
+
+            for item in similar_results:
+                with st.expander(f"{item.get('title')} ({item.get('case_number')})"):
+                    st.write(f"**Verdict:** {item.get('verdict')}")
+                    st.write(f"**Relevance score:** {item.get('relevance_score', 0.0):.4f}")
+                    st.write(f"**Jurisdiction:** {item.get('jurisdiction')}")
+                    st.write(f"**Case type:** {item.get('case_type')}")
+                    if item.get("appeal_success_rate") is not None:
+                        st.write(f"**Appeal success:** {item['appeal_success_rate'] * 100:.0f}%")
+        else:
+            st.info("No similar cases met the current threshold.")
     
     st.markdown("---")
     
@@ -330,6 +477,31 @@ finally:
 
 # ==================== ABOUT ====================
 st.markdown("---")
+    # ==================== MODEL OPTIMIZATION ====================
+    st.subheader("🤖 Model Optimization & Feedback")
+
+    if st.button("Refresh model performance", key="refresh_models"):
+        try:
+            api_base = st.session_state.get("api_base_url", "http://localhost:8000").rstrip('/')
+            token = st.session_state.get("api_token", "")
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            resp = requests.get(f"{api_base}/api/v1/models/performance", headers=headers, timeout=10)
+            resp.raise_for_status()
+            st.session_state.model_performance = resp.json()
+        except Exception as e:
+            st.error(f"Could not fetch model performance: {e}")
+
+    if "model_performance" in st.session_state:
+        perf = st.session_state.model_performance
+        items = perf.get("items", [])
+        if items:
+            df = pd.DataFrame(items)
+            df = df[["model_name", "task", "case_type", "jurisdiction", "samples", "accuracy"]]
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No model feedback collected yet.")
+
+    st.markdown("---")
 st.markdown("""
 ### About This Dashboard
 

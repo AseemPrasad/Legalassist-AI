@@ -13,6 +13,9 @@ from database import (
     NotificationChannel,
     create_case_deadline,
     create_or_update_user_preference,
+    Case,
+    CaseStatus,
+    User,
 )
 from notification_service import NotificationService, SMSClient, EmailClient
 
@@ -31,16 +34,25 @@ class TestNotificationServiceExtended:
 
     def test_send_reminders_all_thresholds(self, test_db):
         """Test send_reminders function with multiple thresholds"""
-        service = NotificationService()
         now = datetime.now(timezone.utc)
         
         # Test for each threshold
         for days in [30, 10, 3, 1]:
+            user_id = days
+            user = User(id=user_id, email=f"user{days}@example.com")
+            test_db.add(user)
+            test_db.commit()
+
+            case_id_int = 101 + days
+            case = Case(user_id=user_id, case_number=f"CASE-{case_id_int}", case_type="civil", jurisdiction="Delhi", status=CaseStatus.ACTIVE, title="Case")
+            test_db.add(case)
+            test_db.commit()
+
             deadline = create_case_deadline(
-                test_db, "U1", 101, "Case", now + timedelta(days=days, hours=1), "appeal"
+                test_db, user_id, case.id, "Case", now + timedelta(days=days, hours=1), "appeal"
             )
             pref = create_or_update_user_preference(
-                test_db, "U1", "u@e.com", 
+                test_db, user_id, f"user{days}@example.com", 
                 phone_number="+919876543210",
                 notification_channel=NotificationChannel.BOTH
             )
@@ -52,7 +64,15 @@ class TestNotificationServiceExtended:
             pref.notify_1_day = True
             test_db.commit()
             
-            results = service.send_reminders(test_db, deadline, pref)
+            with patch("config.Config.TESTING", True), \
+                 patch("config.Config.DEBUG", True), \
+                 patch("config.Config.TWILIO_ACCOUNT_SID", ""), \
+                 patch("config.Config.TWILIO_AUTH_TOKEN", ""), \
+                 patch("config.Config.TWILIO_FROM_NUMBER", ""), \
+                 patch("config.Config.SENDGRID_API_KEY", ""), \
+                 patch("config.Config.SENDGRID_FROM_EMAIL", "noreply@example.com"):
+                service = NotificationService()
+                results = service.send_reminders(test_db, deadline, pref)
             assert len(results) == 2  # SMS and Email
             assert results[0].success == True
             assert results[1].success == True

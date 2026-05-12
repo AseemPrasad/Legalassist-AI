@@ -12,6 +12,9 @@ from database import (
     NotificationChannel,
     create_case_deadline,
     create_or_update_user_preference,
+    Case,
+    CaseStatus,
+    User,
 )
 from notification_service import NotificationResult
 from scheduler import (
@@ -43,17 +46,23 @@ class TestSchedulerComprehensive:
         
         # Create deadlines at threshold days
         for days in [30, 10, 3, 1]:
-            # Use +days +1 hour to ensure delta.days == days
-            # This works now because we increased the query window to 31 days
-            deadline_date = now + timedelta(days=days, hours=1)
-            # Use integer case_id
+            user_id = days
+            user = User(id=user_id, email=f"user{days}@example.com")
+            test_db.add(user)
+            test_db.commit()
+
             case_id_int = 100 + days
+            case = Case(user_id=user_id, case_number=f"CASE-{case_id_int}", case_type="civil", jurisdiction="Delhi", status=CaseStatus.ACTIVE, title=f"Title {days}")
+            test_db.add(case)
+            test_db.commit()
+
+            deadline_date = now + timedelta(days=days, hours=1)
             create_case_deadline(
-                test_db, f"user_{days}", case_id_int, f"Title {days}",
+                test_db, user_id, case.id, f"Title {days}",
                 deadline_date, "appeal"
             )
             create_or_update_user_preference(
-                test_db, f"user_{days}", f"user{days}@example.com",
+                test_db, user_id, f"user{days}@example.com",
                 phone_number=f"+91{days}00000000",
                 notification_channel=NotificationChannel.BOTH
             )
@@ -77,8 +86,17 @@ class TestSchedulerComprehensive:
     def test_check_and_send_reminders_no_preferences(self, test_db):
         """Test when user has no preferences"""
         now = datetime.now(timezone.utc)
+        
+        user = User(id=1, email="nopref@example.com")
+        test_db.add(user)
+        test_db.commit()
+
+        case = Case(user_id=1, case_number="CASE-999", case_type="civil", jurisdiction="Delhi", status=CaseStatus.ACTIVE)
+        test_db.add(case)
+        test_db.commit()
+
         create_case_deadline(
-            test_db, "no_pref_user", 999, "Title",
+            test_db, 1, case.id, "Title",
             now + timedelta(days=30, minutes=5), "appeal"
         )
         # No preference created
@@ -128,12 +146,20 @@ class TestSchedulerComprehensive:
         """Test sync version with target days filter"""
         now = datetime.now(timezone.utc)
         deadline_date = now + timedelta(days=30, hours=1)
+        user = User(id=1, email="user@example.com")
+        test_db.add(user)
+        test_db.commit()
+
+        case = Case(user_id=1, case_number="CASE-1", case_type="civil", jurisdiction="Delhi", status=CaseStatus.ACTIVE)
+        test_db.add(case)
+        test_db.commit()
+
         create_case_deadline(
-            test_db, "user1", 1, "Title",
+            test_db, 1, case.id, "Title",
             deadline_date, "appeal"
         )
         create_or_update_user_preference(
-            test_db, "user1", "user@example.com",
+            test_db, 1, "user@example.com",
             phone_number="+911234567890"
         )
         

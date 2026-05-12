@@ -94,16 +94,28 @@ class TestDatabaseModels:
         """Test that string case_id values are normalized to integers"""
         deadline_date = datetime.now(timezone.utc) + timedelta(days=15)
 
+        case = Case(
+            user_id=1,
+            case_number="CASE-2",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Appeal Filing",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
         deadline = create_case_deadline(
             db=test_db,
             user_id=1,
-            case_id="2",
+            case_id=str(case.id),
             case_title="Appeal Filing",
             deadline_date=deadline_date,
             deadline_type="appeal",
         )
 
-        assert deadline.case_id == 2
+        assert deadline.case_id == case.id
 
     def test_create_case_deadline_rejects_invalid_case_id(self, test_db):
         """Test that invalid case_id values raise a clear error"""
@@ -518,10 +530,8 @@ class TestNotificationService:
             test_db, 1, "user@example.com",
         )
 
-        with patch.dict(os.environ, {
-            "SENDGRID_API_KEY": "test_key",
-            "SENDGRID_FROM_EMAIL": "noreply@legalassist.ai",
-        }):
+        with patch("config.Config.SENDGRID_API_KEY", "test_key"), \
+             patch("config.Config.SENDGRID_FROM_EMAIL", "noreply@legalassist.ai"):
             service = NotificationService()
             result = service.send_email_reminder(test_db, deadline, pref, 10)
 
@@ -568,10 +578,8 @@ class TestNotificationService:
             test_db, user.id, "user@example.com",
         )
 
-        with patch.dict(os.environ, {
-            "SENDGRID_API_KEY": "test_key",
-            "SENDGRID_FROM_EMAIL": "noreply@legalassist.ai",
-        }):
+        with patch("config.Config.SENDGRID_API_KEY", "test_key"), \
+             patch("config.Config.SENDGRID_FROM_EMAIL", "noreply@legalassist.ai"):
             service = NotificationService()
             result = service.send_email_reminder(test_db, deadline, pref, 10)
 
@@ -660,9 +668,21 @@ class TestScheduler:
         """Test synchronous reminder check"""
         now = datetime.now(timezone.utc)
         
+        case = Case(
+            user_id=1,
+            case_number="CASE-1",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case 1",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
         # Create deadline at exactly 30 days
         create_case_deadline(
-            test_db, 1, 1, "Case 1",
+            test_db, 1, case.id, "Case 1",
             now + timedelta(days=30), "appeal",
         )
         
@@ -720,10 +740,22 @@ class TestIntegration:
 
     def test_complete_notification_flow(self, test_db):
         """Test complete flow: deadline -> preference -> notification"""
+        case = Case(
+            user_id=1,
+            case_number="CASE-1",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Appeal Filing",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
         # 1. Create deadline
         deadline_date = datetime.now(timezone.utc) + timedelta(days=30)
         deadline = create_case_deadline(
-            test_db, 1, 1, "Appeal Filing",
+            test_db, 1, case.id, "Appeal Filing",
             deadline_date, "appeal", "Need to submit appeal"
         )
 
@@ -736,7 +768,13 @@ class TestIntegration:
         )
 
         # 3. Mock notification sending
-        with patch.dict(os.environ, {"TESTING": "true"}, clear=True):
+        with patch("config.Config.TESTING", True), \
+             patch("config.Config.DEBUG", True), \
+             patch("config.Config.TWILIO_ACCOUNT_SID", ""), \
+             patch("config.Config.TWILIO_AUTH_TOKEN", ""), \
+             patch("config.Config.TWILIO_FROM_NUMBER", ""), \
+             patch("config.Config.SENDGRID_API_KEY", ""), \
+             patch("config.Config.SENDGRID_FROM_EMAIL", "noreply@legalassist.ai"):
             service = NotificationService()
             
             # Send SMS
@@ -775,8 +813,20 @@ class TestIntegration:
     def test_multiple_reminders_same_deadline(self, test_db):
         """Test that all reminder thresholds work for same deadline"""
         now = datetime.now(timezone.utc)
+        case = Case(
+            user_id=1,
+            case_number="CASE-1",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
         deadline = create_case_deadline(
-            test_db, 1, 1, "Case",
+            test_db, 1, case.id, "Case",
             now + timedelta(days=30), "appeal",
         )
         pref = create_or_update_user_preference(

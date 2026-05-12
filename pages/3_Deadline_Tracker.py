@@ -195,7 +195,7 @@ def render_list_view(deadlines: List[Dict], user_id: int):
     with col2:
         type_filter = st.selectbox(
             "Type",
-            ["All"] + list(set(d["deadline_type"].title() for d in deadlines)),
+            ["All"] + sorted(set(d["deadline_type"].title() for d in deadlines)),
             key="deadline_type_filter",
         )
 

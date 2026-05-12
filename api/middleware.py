@@ -13,21 +13,28 @@ logger = structlog.get_logger(__name__)
 
 class RateLimiter:
     """Token bucket rate limiter using Redis"""
-    
+
+    # Lua script: atomically increment the counter and set TTL on first write.
+    # Redis executes Lua scripts as a single atomic operation, so there is no
+    # window between INCR and EXPIRE where the key can be left without a TTL.
+    _INCR_EXPIRE_SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+
     def __init__(self, redis_url: str = "redis://localhost:6379/0"):
         self.redis = redis.from_url(redis_url, decode_responses=True)
         self.requests = 100  # requests
         self.window = 60  # seconds
-    
+        self._script = self.redis.register_script(self._INCR_EXPIRE_SCRIPT)
+
     def is_allowed(self, key: str) -> bool:
         """Check if request is allowed"""
         try:
-            current = int(self.redis.incr(key))
-            
-            if current == 1:
-                # First request in this window
-                self.redis.expire(key, self.window)
-            
+            current = int(self._script(keys=[key], args=[self.window]))
             return current <= self.requests
         except Exception as e:
             logger.error("Rate limiter error", error=str(e))

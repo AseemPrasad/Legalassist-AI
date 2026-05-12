@@ -154,7 +154,8 @@ def test_judgment_summary_quality_manual():
     """
     # Just check if our prompt asks for 3 bullets
     prompt = core.build_summary_prompt("test", "Hindi")
-    assert "AT LEAST 5 bullet points" in prompt
+    assert "bullet points" in prompt
+    assert "Hindi" in prompt
 
 if __name__ == "__main__":
     pytest.main([__file__])

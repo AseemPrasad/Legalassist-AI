@@ -169,7 +169,7 @@ class TestDatabaseExtended:
         assert get_case_by_id(test_db, case.id).status == CaseStatus.CLOSED
         
         # Document
-        doc = create_case_document(test_db, case.id, DocumentType.JUDGMENT, "Some content")
+        doc = create_case_document(test_db, case.id, DocumentType.JUDGMENT, user.id, "Some content")
         assert doc.document_type == DocumentType.JUDGMENT
         
         # Delete

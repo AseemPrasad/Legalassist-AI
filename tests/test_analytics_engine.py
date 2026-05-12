@@ -11,19 +11,19 @@ class TestAnalyticsCalculator:
         """Cases without outcome data should be ignored, not crash the calculation."""
         cases = [
             CaseRecord(
-                case_id="case-none",
+                hashed_case_id="case-none",
                 case_type="civil",
                 jurisdiction="Delhi",
                 outcome="plaintiff_won",
             ),
             CaseRecord(
-                case_id="case-success",
+                hashed_case_id="case-success",
                 case_type="civil",
                 jurisdiction="Delhi",
                 outcome="plaintiff_won",
             ),
             CaseRecord(
-                case_id="case-failure",
+                hashed_case_id="case-failure",
                 case_type="civil",
                 jurisdiction="Delhi",
                 outcome="defendant_won",

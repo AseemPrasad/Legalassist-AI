@@ -76,6 +76,9 @@ def create_app() -> FastAPI:
     app.include_router(analytics.router)
     app.include_router(deadlines.router)
     app.include_router(auth.router)
+    # Model feedback & optimization
+    from api.routes import models as models_router
+    app.include_router(models_router.router)
     
     # ========================================================================
     # Global Exception Handlers

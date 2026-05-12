@@ -381,7 +381,9 @@ class TestGetRemediesAdviceWithMocks:
         mock_openai_client.chat.completions.create.side_effect = Exception("API Error")
         
         result = get_remedies_advice("Test judgment", "English", mock_openai_client)
-        assert result is None
+        assert result is not None
+        assert result.get("_is_partial") is True
+        assert result.get("_error") is not None
     
     @patch("core.app_utils.get_client")
     def test_get_remedies_prompt_structure(self, mock_get_client, mock_openai_client):
@@ -420,10 +422,10 @@ class TestRemediesIntegration:
         prompt = build_remedies_prompt(judgment_text, language)
         
         # Should contain all required questions
-        assert "What happened" in prompt
-        assert "Can the loser appeal" in prompt
-        assert "Appeal timeline" in prompt
-        assert "Appeal court" in prompt
+        assert "what_happened" in prompt
+        assert "can_appeal" in prompt
+        assert "appeal_days" in prompt
+        assert "appeal_court" in prompt
         
         # Parse typical response
         response = REMEDIES_FIXTURES["criminal_guilty_appeal"]

@@ -105,8 +105,14 @@ class CaseSearchRequest(BaseModel):
     keywords: List[str] = Field(default_factory=list)
     jurisdiction: str = "US"
     case_type: str = "general"
+    court_name: Optional[str] = None
+    judge_name: Optional[str] = None
+    plaintiff_type: Optional[str] = None
+    defendant_type: Optional[str] = None
     year_from: Optional[int] = None
     year_to: Optional[int] = None
+    relevance_threshold: float = Field(0.7, ge=0, le=1)
+    query_signature: Optional[str] = None
     limit: int = Field(10, ge=1, le=100)
     offset: int = Field(0, ge=0)
 
@@ -122,6 +128,7 @@ class CaseResult(BaseModel):
     summary: str
     verdict: str
     relevance_score: float = Field(ge=0, le=1)
+    appeal_success_rate: Optional[float] = Field(None, ge=0, le=1)
     url: Optional[str] = None
 
 
@@ -130,6 +137,52 @@ class CaseSearchResponse(BaseModel):
     total_results: int
     results: List[CaseResult]
     search_time_seconds: float
+    appeal_success_rate: Optional[float] = Field(None, ge=0, le=1)
+    appealed_cases: int = 0
+    appeal_successful_cases: int = 0
+
+
+class SimilarityFeedbackRequest(BaseModel):
+    """Feedback payload for a similarity result"""
+    candidate_case_id: int = Field(..., ge=1)
+    query_signature: Optional[str] = None
+    relevance: bool
+
+
+class SimilarityFeedbackResponse(BaseModel):
+    """Similarity feedback persistence response"""
+    success: bool
+    saved_at: datetime
+    feedback_id: int
+
+
+class ModelFeedbackRequest(BaseModel):
+    model_name: str
+    task: str
+    case_id: Optional[int] = None
+    is_accurate: Optional[bool] = None
+    corrected_text: Optional[str] = None
+    feedback_notes: Optional[str] = None
+
+
+class ModelFeedbackResponse(BaseModel):
+    success: bool
+    feedback_id: int
+    saved_at: datetime
+
+
+class ModelPerformanceItem(BaseModel):
+    model_name: str
+    task: str
+    case_type: Optional[str] = None
+    jurisdiction: Optional[str] = None
+    samples: int
+    accurate_count: int
+    accuracy: str
+
+
+class ModelPerformanceResponse(BaseModel):
+    items: List[ModelPerformanceItem]
 
 
 # ============================================================================

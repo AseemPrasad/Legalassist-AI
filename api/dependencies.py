@@ -3,13 +3,18 @@ Dependency injection and common dependencies
 """
 from typing import Optional
 from fastapi import Depends, HTTPException, status
-from api.auth import get_current_user, CurrentUser
+from api.auth import get_current_user, get_current_user_optional, CurrentUser
 
 
 async def get_rate_limit_key(
-    current_user: Optional[CurrentUser] = Depends(get_current_user)
+    current_user: Optional[CurrentUser] = Depends(get_current_user_optional)
 ) -> str:
-    """Get rate limit key for current user/API key"""
+    """Get rate limit key for current user/API key.
+
+    Uses get_current_user_optional so that unauthenticated requests are not
+    rejected during dependency resolution — they fall back to an anonymous
+    identifier instead of bypassing rate-limit evaluation entirely.
+    """
     if current_user:
         return f"user:{current_user.user_id}"
     return "anonymous"

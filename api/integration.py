@@ -65,22 +65,43 @@ class FlaskAPIAdapter:
 
 # Integration with existing core.py
 def integrate_api_with_core():
-    """Integrate API with core functions"""
-    
+    """Integrate API with core functions.
+
+    Imports the real document-processing entry points from core.py and
+    registers a Celery task that wires them into the async task queue.
+
+    Raises RuntimeError on import failure so broken wiring is surfaced
+    immediately at startup rather than silently downgraded to a warning.
+    """
     logger.info("Integrating REST API with core application")
-    
-    # Import core functions
+
+    # Import the real core entry points.  Raise immediately if they are
+    # missing so broken wiring is visible at startup rather than silently
+    # degraded to a no-op fallback.
     try:
-        from core import analyze_document_core
-        
-        @celery_app.task(name="core_analyze_document")
-        def analyze_document_task_integrated(user_id, document_id, text, document_type):
-            """Use existing core.py analyze_document function"""
-            result = analyze_document_core(text, document_type)
-            return result
-    
-    except ImportError:
-        logger.warning("Could not import core.py - using mock implementation")
+        from core import extract_text_from_pdf, build_summary_prompt, parse_remedies_response, compress_text
+    except ImportError as exc:
+        raise RuntimeError(
+            "integrate_api_with_core: required functions could not be imported "
+            f"from core.py — {exc}"
+        ) from exc
+
+    @celery_app.task(name="core_analyze_document")
+    def analyze_document_task_integrated(user_id, document_id, text, document_type):
+        """Analyze a document using the core.py pipeline.
+
+        Compresses the input text, builds a summary prompt, and parses
+        the remedies response — mirroring the workflow used by the
+        Streamlit app.
+        """
+        safe_text = compress_text(text)
+        summary_prompt = build_summary_prompt(safe_text, language="English")
+        remedies = parse_remedies_response(text)
+        return {
+            "document_id": document_id,
+            "summary_prompt": summary_prompt,
+            "remedies": remedies,
+        }
 
 
 if __name__ == "__main__":

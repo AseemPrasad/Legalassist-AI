@@ -10,6 +10,7 @@ import streamlit as st
 import logging
 import sys
 import os
+from config import Config
 
 # Add parent directory to sys.path to resolve 'core' module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -162,7 +163,7 @@ def render_page():
                             {"role": "system", "content": f"You are an expert legal simplification engine. Output only in {language}."},
                             {"role": "user", "content": prompt},
                         ],
-                        max_tokens=280,
+                        max_tokens=Config.SUMMARY_MAX_TOKENS,
                         temperature=0.05,
                     )
 
@@ -182,7 +183,7 @@ def render_page():
                                 {"role": "system", "content": f"Strict multilingual rewriting engine. Output only in {language}."},
                                 {"role": "user", "content": retry_prompt},
                             ],
-                            max_tokens=260,
+                            max_tokens=Config.SUMMARY_MAX_TOKENS,
                             temperature=0.03,
                         )
                         if len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
