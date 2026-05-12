@@ -1,23 +1,26 @@
-**Legalassist AI**
+**Legalassist AI** ⚖️
 
 The challenge is the Information Barrier in the Judiciary that prevents citizens from understanding their own legal outcomes. 
 Specifically: Court judgments are inaccessible to the public due to complex legal jargon and language diversity.
  
 This barrier leads to: 
 1. Lack of trust in the judicial system. 
-2. Citizen dependency on expensive, slow intermediaries for basic case 
-updates.
+2. Citizen dependency on expensive, slow intermediaries for basic case updates.
 
- It must be solved by an automated, multilingual, plain-language 
-translation layer applied to final judgment documents.
+It must be solved by an automated, multilingual, plain-language translation layer applied to final judgment documents.
 
+---
 
-Legalassist AI
- An AI-powered, multilingual translation engine that converts complex, jargon-filled judicial judgments into three key points of clear, actionable information for the citizen.
- Addresses the Problem: It directly dismantles the Information Barrier (our defined problem) by instantly providing clarity and eliminating the reliance on expensive, slow intermediaries for basic understanding.
- This solution directly breaks the language and jargon barrier by providing instant clarity and removing dependence on expensive intermediaries for basic understanding.
+## 🚀 Recent Updates: Multi-Tenant B2B Platform
+LegalAssist AI has evolved into a fully functional **B2B Multi-Tenant Platform**, supporting Law Firms and Legal Teams. 
 
-  The entire process is designed to be completed in less than 60 seconds. The interface requires only one significant action from the user (upload/paste), and the system handles the entire complex process of legal interpretation and translation, demonstrating true simplification
+### 🏢 Enterprise & Team Collaboration
+- **Shared Workspaces**: Collaborate with your team on complex cases.
+- **Role-Based Access Control (RBAC)**: Manage permissions for Partners, Associates, and Paralegals.
+- **Organization Scoping**: Securely isolate data between different law firms.
+- **Audit Logging**: Full compliance tracking for all sensitive actions.
+
+---
 
 
 
@@ -206,18 +209,28 @@ python scripts/generate_sample_analytics_data.py clear
 
 #### 3. Start the App
 ```bash
-streamlit run pages/0_Home.py
+streamlit run app.py
 ```
 
-**Note:** The main application entry point is `pages/0_Home.py`. 
-- Multi-page structure with Streamlit's automatic routing
-- Pages located in `pages/` directory:
-  - `0_Home.py` - Judgment analysis (main feature)
-  - `1_Deadlines.py` - Appeal deadline management
-  - `2_History.py` - Notification history
-  - `3_Settings.py` - User preferences
-- Core utilities extracted to `core/app_utils.py`
-- Legacy files (`app.py`, `app_integrated.py`) have been deprecated and consolidated into this unified structure
+---
+
+## 🛠️ Key Modules & Features
+
+### 🏢 Team Management
+A comprehensive administration dashboard for Law Firms. Manage your organization, invite team members, and monitor compliance via audit logs.
+
+### 🔌 REST API & SDK
+Integrate LegalAssist AI into your existing workflows using our REST API. We provide a ready-to-use Python SDK located in the `sdk/` directory.
+
+### 📅 Deadline Tracker
+Never miss an appeal deadline. Our automated scheduler sends notifications via Email and SMS to the relevant team members.
+
+### 📊 Analytics Engine
+Analyze judge performance and case outcomes with our built-in analytics engine. Make data-driven decisions for your clients.
+
+---
+
+**Note:** The application structure has been updated to use a multi-page Streamlit layout.
 
 #### 4. Access the Pages
 
