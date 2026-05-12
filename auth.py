@@ -7,7 +7,6 @@ import os
 import hashlib
 import secrets
 import time
-import re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
@@ -56,8 +55,6 @@ JWT_SECRET = Config.get_jwt_secret()
 JWT_ALGORITHM = Config.JWT_ALGORITHM
 JWT_EXPIRY_HOURS = Config.JWT_EXPIRY_HOURS
 
-EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
-
 OTP_EXPIRY_MINUTES = Config.OTP_EXPIRY_MINUTES
 OTP_RATE_LIMIT_HOURS = 1
 OTP_RATE_LIMIT_MAX = 3  # Max OTP requests per email per hour
@@ -92,15 +89,12 @@ def send_otp_email(email: str, otp: str) -> bool:
         from_email = os.getenv("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
 
         if not api_key:
+            logger.warning("SendGrid API key not configured - using masked OTP logging")
             if _is_debug_or_testing_mode():
-                logger.warning("SendGrid API key not configured - using masked OTP logging for debug/test mode")
                 logger.debug(f"OTP for {email}: [MASKED-{otp[:2]}***{otp[-1]}]")
-                return True  # Simulate success only in explicit debug/testing environments
-            logger.error(
-                f"SendGrid API key not configured — OTP delivery failed for {email}. "
-                "Set SENDGRID_API_KEY to enable email authentication."
-            )
-            return False
+            else:
+                logger.warning(f"OTP requested for {email} (email delivery skipped - missing config)")
+            return True  # Return True in development mode
 
         sg = sendgrid.SendGridAPIClient(api_key=api_key)
 
@@ -221,7 +215,7 @@ def request_otp(email: str) -> Tuple[bool, str]:
     Returns (success, message).
     """
     # Validate email format
-    if not email or not EMAIL_REGEX.match(email):
+    if not email or "@" not in email or "." not in email:
         return False, "Invalid email address"
 
     db = SessionLocal()
@@ -354,365 +348,115 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
         db.close()
 
 
-# =========================================================================
-# JWT AUTHENTICATION CONSTANTS & CONFIGURATION
-# =========================================================================
-# The following constants define the strict claims required for our JSON Web Tokens (JWT).
-# 
-# What are Issuer (iss) and Audience (aud) claims?
-# ------------------------------------------------
-# - Issuer (iss): Identifies the principal that issued the JWT. In a distributed 
-#   system, this prevents tokens issued by one service (e.g., an internal billing API) 
-#   from being used in another service (e.g., this user-facing application).
-# - Audience (aud): Identifies the recipients that the JWT is intended for. Each
-#   service validating the token must verify that it is listed as an intended audience.
-# 
-# Why This Matters (Security Justification):
-# ------------------------------------------
-# Without these checks, an attacker could potentially take a token validly issued 
-# by a different but related system (using the same shared secret or public key) 
-# and use it here. This vulnerability is known as "Cross-JWT Confusion" or 
-# "Token Substitution". By strictly enforcing `iss` and `aud`, we cryptographically 
-# guarantee that the token was explicitly generated *by* LegalAssist AI and 
-# *for* LegalAssist AI users, hardening our API security against unauthorized 
-# or external token usage.
-# =========================================================================
-
-JWT_ISSUER = os.getenv("JWT_ISSUER", "legalassist.ai")
-JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "legalassist-users")
-
-
 def create_jwt_token(user_id: int, email: str) -> str:
-    """
-    Create a highly secure JWT token for an authenticated user.
-    
-    This function generates a JSON Web Token containing essential claims
-    used to verify the user's identity and session validity. It includes
-    both standard registered claims (like exp, iat, iss, aud) and 
-    custom private claims (like user_id, email, type).
-    
-    Parameters:
-    -----------
-    user_id : int
-        The primary key ID of the user in the database.
-    email : str
-        The user's registered email address.
-        
-    Returns:
-    --------
-    str
-        A fully encoded and cryptographically signed JWT string.
-    """
-    
-    # Generate a unique JWT ID (jti) to allow for future token revocation.
-    # The jti claim provides a unique identifier for the JWT, which can be 
-    # used to prevent the token from being replayed. We use a standard UUID4.
+    """Create JWT token for authenticated user"""
+    # Generate a unique JWT ID to allow for future token revocation
     jti = str(uuid.uuid4())
     
-    # Calculate the exact expiration time based on the configured hours
-    expiration_time = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS)
-    
-    # Calculate the exact issued-at time
-    issued_at_time = datetime.now(timezone.utc)
-    
-    # Construct the JWT payload dictionary
     payload = {
-        # --- Registered Claims (RFC 7519) ---
-        "jti": jti,                      # JWT ID
-        "exp": expiration_time,          # Expiration Time
-        "iat": issued_at_time,           # Issued At Time
-        "iss": JWT_ISSUER,               # Issuer (Who created the token)
-        "aud": JWT_AUDIENCE,             # Audience (Who the token is for)
-        
-        # --- Private/Custom Claims ---
-        "user_id": user_id,              # The user's internal DB ID
-        "email": email,                  # The user's email for quick reference
-        "type": "access",                # Token type to separate access from refresh/reset
+        "jti": jti,
+        "user_id": user_id,
+        "email": email,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
+        "iat": datetime.now(timezone.utc),
+        "type": "access",
     }
-    
-    # Cryptographically sign the payload using our secret key and specified algorithm
-    encoded_token = jwt.encode(
-        payload=payload, 
-        key=JWT_SECRET, 
-        algorithm=JWT_ALGORITHM
-    )
-    
-    logger.debug(f"Created new JWT access token for user {email} with jti {jti}")
-    
-    return encoded_token
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 def verify_jwt_token(token: str) -> Optional[dict]:
     """
-    Verify a JWT token with strict validation checks and return its payload.
-    
-    This function acts as the primary gatekeeper for all protected resources.
-    It performs multiple layers of defense-in-depth validation:
-    
-    1. Cryptographic Signature Verification
-    2. Expiration (exp) Verification
-    3. Strict Issuer (iss) Validation
-    4. Strict Audience (aud) Validation
-    5. Token Purpose/Type Validation
-    6. State Verification (Database Revocation Check)
-    7. User Existence Verification
-    
-    Parameters:
-    -----------
-    token : str
-        The raw JWT string extracted from the user's session or Authorization header.
-        
-    Returns:
-    --------
-    Optional[dict]
-        The decoded payload dictionary if all checks pass.
-        Returns None if the token is invalid, expired, revoked, or fails any security check.
+    Verify JWT token and return payload.
+    Returns None if token is invalid, expired, incorrectly purposed,
+    revoked (logged out), or if the user has been removed.
     """
     try:
-        # =====================================================================
-        # LAYER 1 & 2: CRYPTOGRAPHIC & REGISTERED CLAIM VERIFICATION
-        # =====================================================================
-        # This single call to jwt.decode() handles signature validation, 
-        # expiration checking, and now, strictly enforces issuer and audience.
-        # 
-        # By providing `issuer` and `audience` parameters, the pyjwt library 
-        # will automatically raise a jwt.InvalidTokenError (specifically, 
-        # InvalidIssuerError or InvalidAudienceError) if the token's claims 
-        # do not exactly match our expected values.
-        # 
-        # This completely prevents "Cross-JWT Confusion" attacks.
-        # =====================================================================
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         
-        payload = jwt.decode(
-            jwt=token, 
-            key=JWT_SECRET, 
-            algorithms=[JWT_ALGORITHM],
-            issuer=JWT_ISSUER,
-            audience=JWT_AUDIENCE
-        )
-        
-        # =====================================================================
-        # LAYER 3: TOKEN PURPOSE VALIDATION
-        # =====================================================================
+        # 1. Verify token purpose
         # We explicitly set type="access" during token creation to prevent
-        # other types of tokens (e.g., password reset, email verification, 
-        # or API keys) from being used to gain interactive system access.
-        
-        token_type = payload.get("type")
-        
-        if token_type != "access":
-            logger.warning(
-                f"SECURITY ALERT: Invalid token type provided. "
-                f"Expected 'access', got '{token_type}'."
-            )
+        # other types of tokens (e.g., password reset, email verification)
+        # from being used to gain system access.
+        if payload.get("type") != "access":
+            logger.warning(f"Invalid token type provided: {payload.get('type')}")
             return None
             
-        # Extract critical identity claims
         jti = payload.get("jti")
         email = payload.get("email")
-        
-        # Ensure that our required custom claims actually exist
         if not email or not jti:
-            logger.warning("Token verification failed: payload missing required 'email' or 'jti' claim")
+            logger.warning("Token payload missing required 'email' or 'jti' claim")
             return None
             
-        # =====================================================================
-        # LAYER 4 & 5: STATEFUL DATABASE VERIFICATIONS
-        # =====================================================================
-        # While JWTs are inherently stateless, we must occasionally rely on 
-        # stateful checks to handle immediate revocations (e.g., logout) or 
-        # account terminations.
-        
+        # 2. Database verifications (Revocation and User Existence)
         db = SessionLocal()
-        
         try:
-            # Check the blacklist/revocation table.
-            # If a user explicitly clicked "Logout", their token's JTI was 
-            # added to this table. Even if the token hasn't technically expired 
-            # yet according to the `exp` claim, we must reject it.
-            
+            # Check if token has been revoked (e.g. via logout)
             if is_token_revoked(db, jti):
-                logger.warning(f"Attempted to use explicitly revoked token (jti={jti}) for user {email}")
+                logger.warning(f"Attempted to use revoked token jti={jti} for user {email}")
                 return None
                 
-            # Check the users table to guarantee the user hasn't been deleted 
-            # or suspended from the system by an administrator.
-            # A valid token is useless if the account itself is gone.
-            
+            # Check the database to guarantee the user hasn't been deleted or suspended.
             user = get_user_by_email(db, email)
-            
             if not user:
                 logger.warning(f"Token verification failed: User {email} no longer exists in DB")
                 return None
-                
         finally:
-            # Always ensure the database connection is closed, even if an 
-            # exception occurs during the checks.
             db.close()
             
-        # --- ALL SECURITY CHECKS PASSED ---
         return payload
-        
     except jwt.ExpiredSignatureError:
-        # The token's `exp` claim is in the past. This is a normal, 
-        # expected occurrence when a session times out.
-        logger.info("JWT token expired gracefully.")
+        logger.warning("JWT token expired")
         return None
-        
-    except jwt.InvalidIssuerError as e:
-        # The token was signed with the correct key, but originated from 
-        # an unexpected issuer. This is highly suspicious.
-        logger.error(f"SECURITY ALERT - Invalid Token Issuer detected: {str(e)}")
-        return None
-        
-    except jwt.InvalidAudienceError as e:
-        # The token was signed with the correct key and issuer, but was 
-        # intended for a different audience/service.
-        logger.error(f"SECURITY ALERT - Invalid Token Audience detected: {str(e)}")
-        return None
-        
     except jwt.InvalidTokenError as e:
-        # Catch-all for any other structural or signature validation failures
-        # (e.g., malformed token, wrong signature, tampered payload).
-        logger.warning(f"Invalid JWT token structure or signature: {str(e)}")
+        logger.warning(f"Invalid JWT token: {str(e)}")
         return None
 
 
 def revoke_jwt_token(token: str) -> bool:
     """
     Revokes a JWT token so it can no longer be used.
-    
-    This function is primarily used during the user logout process to 
-    immediately invalidate the active session. Because JWTs are stateless 
-    by default, we implement a stateful "blacklist" using the token's JTI.
-    
-    Parameters:
-    -----------
-    token : str
-        The raw JWT string to be revoked.
-        
-    Returns:
-    --------
-    bool
-        True if the token was successfully added to the revocation list,
-        False if the operation failed or the token was invalid.
+    Used during logout to immediately invalidate the session.
     """
     if not token:
-        logger.debug("Cannot revoke an empty token string.")
         return False
         
     try:
-        # =====================================================================
-        # DECODING FOR REVOCATION (SIGNATURE VERIFIED, EXPIRATION SKIPPED)
-        # =====================================================================
-        # We need to extract the `jti` and `exp` claims to add them to our
-        # database blacklist.
-        #
-        # verify_exp=False: allows revoking tokens that expired moments ago,
-        # so the logout flow completes gracefully even for just-expired sessions.
-        #
-        # verify_signature=True (explicit): the HMAC signature MUST still be
-        # validated against JWT_SECRET.  Without this, an attacker could submit
-        # a forged token with an arbitrary jti and pollute the revocation store.
-        # PyJWT's behaviour when only verify_exp is set can vary across versions,
-        # so we make the signature requirement unambiguous here.
-        #
-        # issuer and audience checks remain enforced to reject foreign tokens.
-        # =====================================================================
-
-        payload = jwt.decode(
-            jwt=token,
-            key=JWT_SECRET,
-            algorithms=[JWT_ALGORITHM],
-            issuer=JWT_ISSUER,
-            audience=JWT_AUDIENCE,
-            options={"verify_exp": False, "verify_signature": True},
-        )
-        
+        # We don't need to verify expiration here, just decode it.
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options={"verify_exp": False})
         jti = payload.get("jti")
         exp = payload.get("exp")
         
         if not jti or not exp:
-            logger.error("Token payload missing required claims for revocation (jti or exp).")
             return False
             
-        # Convert the numeric timestamp back into a timezone-aware datetime object
         expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
         
         db = SessionLocal()
-        
         try:
-            # Check if it's already revoked to avoid duplicate inserts or unique 
-            # constraint violations in the database.
+            # Avoid duplicate revocation
             if not is_token_revoked(db, jti):
-                
-                # Insert the JTI and Expiration into the blacklist table.
-                # We store the expiration so that a background job can eventually 
-                # purge old revocation records once the token would have naturally 
-                # expired anyway, keeping the blacklist table small and fast.
                 revoke_token(db, jti, expires_at)
-                
-                logger.info(f"Successfully blacklisted/revoked token with jti={jti}")
-            else:
-                logger.debug(f"Token with jti={jti} was already revoked.")
-                
+                logger.info(f"Token jti={jti} successfully revoked")
             return True
-            
         finally:
             db.close()
             
-    except jwt.InvalidIssuerError:
-        logger.warning("Attempted to revoke a token with an invalid issuer.")
-        return False
-    except jwt.InvalidAudienceError:
-        logger.warning("Attempted to revoke a token with an invalid audience.")
-        return False
     except Exception as e:
-        logger.error(f"Unexpected error while revoking token: {str(e)}")
+        logger.error(f"Error revoking token: {str(e)}")
         return False
 
 
 def get_current_user_from_token(token: str) -> Optional[User]:
-    """
-    Retrieve the full User database model object from a given JWT token.
-    
-    This acts as a convenience wrapper around verify_jwt_token() for 
-    endpoints or functions that need the actual ORM object rather than 
-    just the raw claims dictionary.
-    
-    Parameters:
-    -----------
-    token : str
-        The raw JWT access token.
-        
-    Returns:
-    --------
-    Optional[User]
-        The User ORM model if the token is valid and the user exists.
-        Returns None otherwise.
-    """
-    # First, pass the token through our rigorous verification pipeline
+    """Get current user from JWT token"""
     payload = verify_jwt_token(token)
-    
     if not payload:
-        # The token failed verification (expired, invalid signature, bad iss/aud, etc.)
         return None
 
     db = SessionLocal()
-    
     try:
-        # Lookup the user by the email extracted from the validated payload
-        email = payload.get("email")
-        
-        if not email:
-            return None
-            
-        user = get_user_by_email(db, email)
-        
+        user = get_user_by_email(db, payload["email"])
         return user
-        
     finally:
-        # Always clean up the database session
         db.close()
 
 

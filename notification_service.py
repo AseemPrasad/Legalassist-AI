@@ -13,6 +13,12 @@ from enum import Enum
 import html
 from config import Config
 
+# Celery integration for asynchronous task execution
+# We import the celery_app instance defined in the project's central 
+# Celery configuration module. This allows us to use the @celery_app.task 
+# decorator to offload long-running operations.
+from celery_app import celery_app
+
 
 from sqlalchemy.orm import Session
 
@@ -152,6 +158,105 @@ class EmailClient:
             error_msg = f"Failed to send email: {str(e)}"
             logger.error(error_msg)
             return False, None, error_msg
+
+
+# ============================================================================
+# ASYNCHRONOUS BACKGROUND TASKS
+# ============================================================================
+
+@celery_app.task(
+    bind=True, 
+    name="send_email_task", 
+    max_retries=3, 
+    default_retry_delay=60,
+    queue="notifications"
+)
+def send_email_task(
+    self, 
+    to_email: str, 
+    subject: str, 
+    html_content: str,
+    deadline_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    days_left: Optional[int] = None
+) -> dict:
+    """
+    Celery background task for sending emails via SendGrid.
+    
+    This task offloads the synchronous network call to SendGrid to a background 
+    worker. It also handles logging the result back to the database to ensure 
+    that we maintain an accurate audit trail of all notifications sent.
+    
+    Args:
+        self: The task instance (for retries).
+        to_email (str): Recipient email address.
+        subject (str): Email subject line.
+        html_content (str): The rendered HTML body of the email.
+        deadline_id (int, optional): ID of the deadline for logging.
+        user_id (int, optional): ID of the user for logging.
+        days_left (int, optional): The reminder threshold (e.g., 30, 10, 3, 1).
+        
+    Returns:
+        dict: A summary of the operation results.
+    """
+    from database import db_session, log_notification, NotificationStatus, NotificationChannel
+    
+    logger.info(
+        "Starting background email delivery", 
+        recipient=to_email, 
+        subject=subject,
+        task_id=self.request.id
+    )
+    
+    # Initialize the EmailClient. We do this inside the task to ensure 
+    # that any environment-specific configuration is picked up correctly 
+    # by the worker process.
+    client = EmailClient()
+    
+    # Execute the actual network request to SendGrid
+    success, message_id, error = client.send_email(to_email, subject, html_content)
+    
+    # Determine the status for database logging
+    status = NotificationStatus.SENT if success else NotificationStatus.FAILED
+    
+    # If logging metadata was provided, persist the result to the database
+    if deadline_id is not None and user_id is not None and days_left is not None:
+        try:
+            # We use the db_session context manager to ensure the connection 
+            # is properly closed and the transaction is committed.
+            with db_session() as db:
+                log_notification(
+                    db=db,
+                    deadline_id=deadline_id,
+                    user_id=user_id,
+                    channel=NotificationChannel.EMAIL,
+                    recipient=to_email,
+                    days_before=days_left,
+                    status=status,
+                    message_id=message_id,
+                    error_message=error,
+                    message_preview=html_content,
+                )
+                logger.info("Background notification logged successfully", deadline_id=deadline_id)
+        except Exception as e:
+            logger.error("Failed to log background notification", error=str(e), deadline_id=deadline_id)
+    
+    # Handle retries if the email failed and we haven't exceeded the limit.
+    # We only retry for potentially transient errors.
+    if not success and self.request.retries < self.max_retries:
+        logger.warning(
+            "Email delivery failed, scheduling retry", 
+            error=error, 
+            retry_count=self.request.retries + 1
+        )
+        raise self.retry(exc=Exception(error))
+    
+    return {
+        "success": success,
+        "message_id": message_id,
+        "error": error,
+        "status": status.value if hasattr(status, 'value') else str(status)
+    }
 
 
 class NotificationService:
@@ -368,31 +473,46 @@ class NotificationService:
 
         if subject is None or html_content is None:
             subject, html_content = self.build_email_message(deadline, days_left)
-        success, message_id, error = self.email_client.send_email(
-            user_preference.email, subject, html_content
+
+        # ====================================================================
+        # ASYNCHRONOUS DELIVERY OFFLOAD
+        # ====================================================================
+        # Instead of calling self.email_client.send_email() directly, which 
+        # would block the current thread for several seconds while waiting 
+        # for the SendGrid API response, we dispatch a Celery task.
+        #
+        # This allows the request (or the periodic check) to complete 
+        # immediately, providing a much smoother and "snappier" experience 
+        # for the end-user or the system scheduler.
+        # ====================================================================
+        
+        logger.info(
+            "Offloading email delivery to background task", 
+            user_id=deadline.user_id,
+            deadline_id=deadline.id,
+            days_left=days_left
         )
-
-        status = NotificationStatus.SENT if success else NotificationStatus.FAILED
-
-        log_notification(
-            db=db,
+        
+        # We use .delay() to send the task to the Redis broker. 
+        # The background worker will pick it up and execute it.
+        task_result = send_email_task.delay(
+            to_email=user_preference.email,
+            subject=subject,
+            html_content=html_content,
             deadline_id=deadline.id,
             user_id=deadline.user_id,
-            channel=NotificationChannel.EMAIL,
-            recipient=user_preference.email,
-            days_before=days_left,
-            status=status,
-            message_id=message_id,
-            error_message=error,
-            message_preview=html_content,
+            days_left=days_left
         )
-
+        
+        # We return a successful NotificationResult immediately, noting 
+        # that the message ID is the Celery Task ID until the actual 
+        # email is processed.
         return NotificationResult(
-            success=success,
+            success=True,
             channel=NotificationChannel.EMAIL,
             recipient=user_preference.email,
-            message_id=message_id,
-            error=error,
+            message_id=f"task_{task_result.id}",
+            error=None,
         )
 
     def send_reminders(

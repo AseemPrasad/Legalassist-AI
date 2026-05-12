@@ -34,13 +34,24 @@ from config import Config
 DetectorFactory.seed = 0
 _LOCALIZED_UI_TEXT_CACHE = {}
 
-def get_default_model():
+# =============================================================================
+# LLM SERVICE INITIALIZATION
+# =============================================================================
+
+def get_default_model() -> str:
+    """
+    Returns the default AI model identifier from the configuration.
+    
+    Returns:
+        str: The model string (e.g., 'meta-llama/llama-3.1-8b-instruct').
+    """
     return Config.DEFAULT_MODEL
+
 
 DEFAULT_MODEL = Config.DEFAULT_MODEL
 
 
-def _initialize_openai_client():
+def _initialize_openai_client() -> OpenAI:
     """
     Internal function to initialize the OpenAI client using Config settings.
     """
@@ -828,17 +839,55 @@ def get_remedies_advice(judgment_text, language, client=None):
     return remedies
 
 
-def safe_llm_call(client, model, messages, max_tokens, temperature, timeout=60, retries=3):
+# =============================================================================
+# AI MODEL API COMMUNICATION
+# =============================================================================
+
+def safe_llm_call(
+    client: OpenAI,
+    model: str,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+    timeout: Optional[float] = None,
+    retries: Optional[int] = None
+) -> Tuple[Optional[str], Optional[str]]:
     """
-    Safely call the LLM API with retries and user-friendly error handling.
-    Returns (response_text, error_message).
+    Safely execute a call to the LLM API with built-in retry logic and robust error handling.
+    
+    This function wraps the OpenAI client call to handle common network issues,
+    rate limits, and API errors gracefully, providing user-friendly error messages.
+
+    Args:
+        client: The initialized OpenAI-compatible client.
+        model: The model identifier to use for the request.
+        messages: A list of message dictionaries (role/content).
+        max_tokens: The maximum number of tokens to generate.
+        temperature: The sampling temperature for the request.
+        timeout: Optional override for the network timeout (defaults to Config.AI_REQUEST_TIMEOUT).
+        retries: Optional override for the number of retry attempts (defaults to Config.AI_MAX_RETRIES).
+
+    Returns:
+        Tuple[Optional[str], Optional[str]]: A tuple containing (response_text, error_message).
+            If successful, error_message is None. If failed, response_text is None.
     """
     import time
     import openai
-    
+    from typing import Tuple
+
+    # Resolve configuration defaults if not provided explicitly
+    if timeout is None:
+        timeout = Config.AI_REQUEST_TIMEOUT
+        
+    if retries is None:
+        retries = Config.AI_MAX_RETRIES
+
     last_error = None
+    
+    # Attempt the API call multiple times based on the retry configuration
     for attempt in range(retries):
         try:
+            # Execute the completion request
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -846,38 +895,60 @@ def safe_llm_call(client, model, messages, max_tokens, temperature, timeout=60, 
                 temperature=temperature,
                 timeout=timeout,
             )
+            
+            # Successfully received a response
             return response.choices[0].message.content.strip(), None
+
         except openai.AuthenticationError:
-            return None, "Authentication failed. Please check your API key."
+            # Terminal error: API key is invalid
+            return None, "Authentication failed. Please check your API key in the configuration."
+
         except openai.RateLimitError:
+            # Recoverable error: Wait and try again if attempts remain
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)  # Exponential backoff
+                wait_time = Config.AI_RETRY_BACKOFF_BASE ** attempt
+                logging.warning(f"Rate limit hit. Retrying in {wait_time}s... (Attempt {attempt + 1}/{retries})")
+                time.sleep(wait_time)
                 continue
             return None, "Rate limit exceeded. Please try again in a few minutes."
+
         except openai.APITimeoutError:
+            # Recoverable error: Network or server was too slow
             if attempt < retries - 1:
+                logging.warning(f"Request timed out. Retrying... (Attempt {attempt + 1}/{retries})")
                 continue
-            return None, "The request timed out. The server might be busy."
+            return None, "The request timed out. The AI server might be busy or your connection is slow."
+
         except openai.APIConnectionError:
+            # Recoverable error: Transient network issues
             if attempt < retries - 1:
                 time.sleep(1)
+                logging.warning(f"Connection error. Retrying... (Attempt {attempt + 1}/{retries})")
                 continue
-            return None, "Could not connect to the AI server. Check your internet connection."
+            return None, "Could not connect to the AI server. Please check your internet connection."
+
         except openai.APIStatusError as e:
+            # Handle specific HTTP status codes from the API
             if e.status_code == 402:
-                return None, "Out of credits. Please top up your OpenRouter account."
+                # Specific case for OpenRouter out of credits
+                return None, "AI Service Error: Out of credits. Please top up your provider account."
+            
             if attempt < retries - 1:
                 time.sleep(1)
                 continue
-            return None, f"AI Service Error ({e.status_code}): {str(e)}"
+            return None, f"AI Service Error (HTTP {e.status_code}): {str(e)}"
+
         except Exception as e:
-            logging.error(f"LLM API Error (Attempt {attempt+1}): {str(e)}", exc_info=True)
+            # Catch-all for unexpected exceptions
+            logging.error(f"Unexpected LLM API Error (Attempt {attempt + 1}): {str(e)}", exc_info=True)
             last_error = str(e)
+            
             if attempt < retries - 1:
                 time.sleep(0.5)
                 continue
     
-    return None, f"An unexpected error occurred: {last_error}"
+    # If all retry attempts failed, return the last error encountered
+    return None, f"An unexpected error occurred after {retries} attempts: {last_error}"
 
 
 def build_draft_prompt(remedies, language):
@@ -1188,7 +1259,7 @@ JSON:
             ],
             max_tokens=2200,
             temperature=0.0,
-            timeout=45.0,
+            timeout=Config.AI_REQUEST_TIMEOUT,
         )
         translated = _parse_json_object(response.choices[0].message.content)
     except Exception as exc:

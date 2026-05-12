@@ -357,21 +357,111 @@ def render_analytics_preview_section():
             st.info("The analytics module is currently being updated. Please try again later.")
 
 
+# =============================================================================
+# COMPREHENSIVE SESSION MANAGEMENT & LOGOUT HANDLER
+# =============================================================================
+
+def perform_comprehensive_logout():
+    """
+    Executes a high-integrity logout process by aggressively clearing all 
+    application state and session data.
+    
+    SECURITY RATIONALE:
+    ------------------
+    In a Streamlit environment, simple variable assignment (setting keys to None)
+    is often insufficient for guaranteed data isolation, especially in scenarios
+    where multiple users might share the same physical machine or browser session.
+    
+    Stale data persistence can lead to "session bleeding" where fragments of 
+    a previous user's state (like cached IDs, document metadata, or UI toggles)
+    unexpectedly appear in a subsequent user's experience.
+    
+    IMPLEMENTATION STRATEGY:
+    -----------------------
+    1. DATABASE REVOCATION: First, we call the standard logout_user() to 
+       synchronously revoke the JWT token in the database. This ensures that 
+       even if the client somehow retains the token, it is cryptographically 
+       invalidated server-side.
+    
+    2. STATE WIPE: We then iterate through EVERY key currently present in 
+       st.session_state and explicitly delete it. This is more robust than 
+       st.session_state.clear() in some edge cases involving widget-linked 
+       keys, and it ensures that NO information remains in memory.
+    
+    3. EXECUTION ABORT: Finally, we trigger st.rerun() to kill the current 
+       execution thread and start a fresh, pristine render cycle.
+    """
+    
+    logging.info("Initiating comprehensive logout and session wipe...")
+    
+    try:
+        # Step 1: Backend Revocation
+        # This revokes the JWT and clears the standard auth keys in session_state.
+        logout_user()
+        
+        # Step 2: Aggressive Session Wipe
+        # We iterate through all keys to ensure nothing is missed, including
+        # application-specific keys like 'raw_text', 'summary', 'remedies', etc.
+        # This prevents stale analysis data from being visible to the next user.
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+            
+        logging.info("Session state keys cleared successfully.")
+        
+    except Exception as e:
+        logging.error(f"Critical error during logout session wipe: {str(e)}")
+        # We still want to attempt a rerun even if a partial failure occurs
+        # to force the UI back to a safe, unauthenticated state.
+    
+    # Step 3: Forced UI Refresh
+    # This abandons the current script run and restarts from the top of app.py.
+    st.rerun()
+
+
+def render_sidebar_navigation():
+    """
+    Renders the premium sidebar navigation and user profile section.
+    
+    This component handles the visual representation of the user's auth status
+     and provides the primary entry point for the logout workflow.
+    """
+    st.sidebar.markdown("# ⚖️ LegalEase AI")
+    st.sidebar.markdown("---")
+    
+    if require_auth():
+        user_email = get_current_user_email()
+        
+        # Premium User Profile UI
+        st.sidebar.markdown(f"""
+        <div style="background-color: rgba(255, 255, 255, 0.05); padding: 15px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.1); margin-bottom: 20px;">
+            <p style="margin: 0; font-size: 0.8rem; opacity: 0.7;">SIGNED IN AS</p>
+            <p style="margin: 0; font-weight: bold; overflow: hidden; text-overflow: ellipsis;">{user_email}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Secondary navigation links could go here...
+        
+        st.sidebar.markdown("### Account Management")
+        if st.sidebar.button("🔓 Logout", use_container_width=True, help="Securely sign out and clear all local data"):
+            perform_comprehensive_logout()
+    else:
+        st.sidebar.info("🔒 Secure Mode: Not logged in. Please sign in to access case history and tracking features.")
+        
+        if st.sidebar.button("🚀 Go to Login", use_container_width=True, type="primary"):
+            st.switch_page("pages/0_Login.py")
+            
+    st.sidebar.markdown("---")
+    st.sidebar.caption("v2.4.0 | LegalAssist AI Enterprise")
+
+
 # ==================== Main UI Component ====================
 def main():
+    # Initialize the auth state at the very beginning of the run
     init_auth_session()
     
-    st.sidebar.markdown("# ⚖️ LegalEase AI")
-    if require_auth():
-        st.sidebar.success(f"Logged in as {get_current_user_email()}")
-        if st.sidebar.button("Logout"):
-            logout_user()
-            st.rerun()
-    else:
-        st.sidebar.info("Not logged in. Log in to track cases and deadlines.")
-        if st.sidebar.button("Go to Login"):
-            st.switch_page("pages/0_Login.py")
-
+    # Render the sidebar navigation and auth controls
+    render_sidebar_navigation()
+    
     st.title("⚡ LegalEase AI")
     client = get_client()
     current_language = st.session_state.get("judgment_language", "English")

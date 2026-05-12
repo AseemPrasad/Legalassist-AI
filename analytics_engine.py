@@ -8,8 +8,203 @@ import hmac
 import os
 from collections import Counter
 import logging
+import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+class PandasAnalyticsProcessor:
+    """
+    Advanced analytics engine utilizing Pandas for complex data transformations.
+    
+    This class provides high-performance data processing for legal case records,
+    bridging the gap between SQLAlchemy ORM objects and analytical DataFrames.
+    
+    The implementation is specifically designed to be defensive against the
+    infamous 'SettingWithCopyWarning' by ensuring that all filtered subsets
+    are explicitly detached from the parent DataFrame before modification.
+    """
+
+    @staticmethod
+    def convert_cases_to_dataframe(cases: List[CaseRecord]) -> pd.DataFrame:
+        """
+        Transform a list of SQLAlchemy CaseRecord objects into a Pandas DataFrame.
+        
+        Extracts both primary record data and nested outcome information into
+        a flat structure suitable for vectorised operations.
+        
+        Args:
+            cases: List of CaseRecord database objects.
+            
+        Returns:
+            A populated pd.DataFrame with normalized columns.
+        """
+        if not cases:
+            return pd.DataFrame()
+
+        data_list = []
+        for case in cases:
+            # Extract base attributes
+            row = {
+                "id": case.id,
+                "case_type": str(case.case_type).lower() if case.case_type else "unknown",
+                "jurisdiction": str(case.jurisdiction) if case.jurisdiction else "Unknown",
+                "court_name": str(case.court_name) if case.court_name else "N/A",
+                "judge_name": str(case.judge_name) if case.judge_name else "N/A",
+                "outcome": str(case.outcome).lower() if case.outcome else "pending",
+                "created_at": case.created_at,
+            }
+            
+            # Safely extract nested outcome data
+            outcome_data = getattr(case, "outcome_data", None)
+            if outcome_data:
+                row.update({
+                    "appeal_filed": bool(getattr(outcome_data, "appeal_filed", False)),
+                    "appeal_success": bool(getattr(outcome_data, "appeal_success", False)),
+                    "appeal_cost": getattr(outcome_data, "appeal_cost", None),
+                    "time_to_verdict": getattr(outcome_data, "time_to_appeal_verdict", None),
+                })
+            else:
+                row.update({
+                    "appeal_filed": False,
+                    "appeal_success": False,
+                    "appeal_cost": None,
+                    "time_to_verdict": None,
+                })
+            
+            data_list.append(row)
+
+        return pd.DataFrame(data_list)
+
+    @staticmethod
+    def get_jurisdiction_performance_report(
+        df: pd.DataFrame, 
+        jurisdiction_name: str
+    ) -> pd.DataFrame:
+        """
+        Generate a detailed performance report for a specific jurisdiction.
+        
+        CRITICAL FIX: This method explicitly uses .copy() when creating the 
+        subset DataFrame. This prevents 'SettingWithCopyWarning' when adding 
+        calculated success metrics and ensures that modifications to the 
+        jurisdiction-specific data do not unintentionally affect the global 
+        dataset or trigger Pandas' defensive warnings.
+        
+        Args:
+            df: The master cases DataFrame.
+            jurisdiction_name: The name of the jurisdiction to analyze.
+            
+        Returns:
+            A processed DataFrame with calculated success metrics.
+        """
+        if df.empty or 'jurisdiction' not in df.columns:
+            return pd.DataFrame()
+
+        # ---------------------------------------------------------------------
+        # STEP 1: Create a filtered subset of the data.
+        # We EXPLICITLY call .copy() here. This is the core fix for the
+        # SettingWithCopyWarning. By doing this, we create a new memory object
+        # that is independent of the original 'df'.
+        # ---------------------------------------------------------------------
+        jur_df = df[df['jurisdiction'] == jurisdiction_name].copy()
+
+        if jur_df.empty:
+            return jur_df
+
+        # ---------------------------------------------------------------------
+        # STEP 2: Apply data transformations.
+        # Since 'jur_df' is a clean copy, these assignments are safe and 
+        # predictable. We are no longer operating on a 'view' of the original data.
+        # ---------------------------------------------------------------------
+        
+        # Calculate boolean flags for success
+        jur_df['is_plaintiff_win'] = jur_df['outcome'].str.contains('plaintiff_won', na=False)
+        jur_df['is_defendant_win'] = jur_df['outcome'].str.contains('defendant_won', na=False)
+        jur_df['is_settlement'] = jur_df['outcome'].str.contains('settlement', na=False)
+        
+        # Calculate win rates using cumulative sums for trend analysis
+        # (Assuming the DF is sorted by date)
+        jur_df = jur_df.sort_values('created_at')
+        
+        jur_df['cumulative_cases'] = range(1, len(jur_df) + 1)
+        jur_df['cumulative_wins'] = jur_df['is_plaintiff_win'].cumsum()
+        jur_df['running_win_rate'] = (jur_df['cumulative_wins'] / jur_df['cumulative_cases']) * 100
+
+        # Calculate appeal indicators
+        jur_df['appeal_status'] = jur_df.apply(
+            lambda x: "Appealed" if x['appeal_filed'] else "Final", 
+            axis=1
+        )
+        
+        # Cleanup and return
+        return jur_df
+
+    @staticmethod
+    def analyze_judge_patterns(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Group data by judge to identify success patterns and appeal rates.
+        
+        Uses aggregation to provide high-level metrics for the analytics dashboard.
+        
+        Args:
+            df: The master cases DataFrame.
+            
+        Returns:
+            A DataFrame indexed by judge with aggregated metrics.
+        """
+        if df.empty:
+            return pd.DataFrame()
+
+        # Grouping and aggregation
+        judge_stats = df.groupby('judge_name').agg({
+            'id': 'count',
+            'appeal_filed': 'sum',
+            'appeal_success': 'sum',
+        }).rename(columns={'id': 'total_cases', 'appeal_filed': 'appeals_filed'})
+
+        # Calculate percentages
+        judge_stats['appeal_rate'] = (judge_stats['appeals_filed'] / judge_stats['total_cases']) * 100
+        judge_stats['appeal_success_rate'] = (
+            judge_stats['appeal_success'] / judge_stats['appeals_filed']
+        ).fillna(0) * 100
+
+        # Create a copy for the final ranking to be safe
+        ranked_stats = judge_stats.sort_values('appeal_success_rate', ascending=False).copy()
+        
+        return ranked_stats
+
+    @staticmethod
+    def identify_case_correlations(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Perform correlation analysis between case types and outcomes.
+        
+        This helps identify if certain jurisdictions are 'pro-plaintiff' for
+        specific types of legal disputes.
+        
+        Args:
+            df: The master cases DataFrame.
+            
+        Returns:
+            A pivot table showing win rates by jurisdiction and case type.
+        """
+        if df.empty:
+            return pd.DataFrame()
+
+        # Create a temporary copy to avoid modifying the original during processing
+        temp_df = df.copy()
+        temp_df['is_win'] = temp_df['outcome'].str.contains('plaintiff_won', na=False).astype(int)
+
+        # Create pivot table
+        pivot = pd.pivot_table(
+            temp_df,
+            values='is_win',
+            index='jurisdiction',
+            columns='case_type',
+            aggfunc='mean'
+        ) * 100
+
+        return pivot.fillna(0)
 
 
 class CaseSimilarityCalculator:
