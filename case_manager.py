@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session # type: ignore
 
 from database import (
     SessionLocal,
@@ -34,6 +34,9 @@ from database import (
     update_case_status,
     create_attachment,
     get_attachments_for_case,
+    get_organization_cases,
+    log_audit_action,
+    get_user_role_in_org,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +50,7 @@ def create_new_case(
     case_number: str,
     case_type: str,
     jurisdiction: str,
+    organization_id: Optional[int] = None,
     title: Optional[str] = None,
 ) -> Optional[Case]:
     """
@@ -75,6 +79,7 @@ def create_new_case(
         case = create_case(
             db=db,
             user_id=user_id,
+            organization_id=organization_id,
             case_number=case_number,
             case_type=case_type,
             jurisdiction=jurisdiction,
@@ -108,6 +113,7 @@ def get_or_create_case_for_document(
     new_case_type: Optional[str] = None,
     new_jurisdiction: Optional[str] = None,
     new_title: Optional[str] = None,
+    organization_id: Optional[int] = None,
 ) -> Optional[Case]:
     """
     Get existing case or create new one for document upload.
@@ -120,15 +126,19 @@ def get_or_create_case_for_document(
     try:
         if existing_case_id:
             case = get_case_by_id(db, existing_case_id)
-            if case and case.user_id == user_id:
-                db.expunge(case)
-                return case
+            if case:
+                # Allow access if it's user's case OR user is in the same organization
+                has_access = (case.user_id == user_id) or (organization_id and case.organization_id == organization_id)
+                if has_access:
+                    db.expunge(case)
+                    return case
 
         # Create new case — create_new_case manages its own session internally,
         # so the object it returns is already detached. No expunge needed here.
         if new_case_number:
             case = create_new_case(
                 user_id=user_id,
+                organization_id=organization_id,
                 case_number=new_case_number,
                 case_type=new_case_type or "general",
                 jurisdiction=new_jurisdiction or "Unknown",
@@ -142,14 +152,19 @@ def get_or_create_case_for_document(
         db.close()
 
 
-def get_user_cases_summary(user_id: int, include_closed: bool = True) -> List[Dict[str, Any]]:
+def get_user_cases_summary(user_id: int, organization_id: Optional[int] = None, include_closed: bool = True) -> List[Dict[str, Any]]:
     """
     Get summary of all cases for a user.
     Returns list of case summaries with latest document info.
     """
     db = SessionLocal()
     try:
-        cases = get_user_cases(db, user_id, include_closed=include_closed)
+        if organization_id:
+            # Multi-tenant mode: show all cases for the organization
+            cases = get_organization_cases(db, organization_id, include_closed=include_closed)
+        else:
+            # Single-user mode: show only user's cases
+            cases = get_user_cases(db, user_id, include_closed=include_closed)
         summaries = []
 
         for case in cases:
@@ -195,7 +210,7 @@ def get_user_cases_summary(user_id: int, include_closed: bool = True) -> List[Di
         db.close()
 
 
-def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
+def get_case_detail(user_id: int, case_id: int, organization_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """
     Get detailed information about a specific case.
     """
@@ -203,7 +218,13 @@ def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
     try:
         case = get_case_by_id(db, case_id)
 
-        if not case or case.user_id != user_id:
+        if not case:
+            return None
+            
+        # Permission Check: Must own case OR belong to the case's organization
+        has_permission = (case.user_id == user_id) or (organization_id and case.organization_id == organization_id)
+        if not has_permission:
+            logger.warning(f"User {user_id} denied access to case {case_id}")
             return None
 
         # Get all documents
@@ -301,6 +322,7 @@ def upload_case_document(
     summary: Optional[str] = None,
     remedies: Optional[Dict] = None,
     file_path: Optional[str] = None,
+    organization_id: Optional[int] = None,
 ) -> Optional[CaseDocument]:
     """
     Upload a document to an existing case.
@@ -309,9 +331,14 @@ def upload_case_document(
     db = SessionLocal()
     try:
         # Verify case ownership
+        # Verify case ownership or org access
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
-            logger.error(f"Case {case_id} not found or not owned by user {user_id}")
+        if not case:
+            return None
+            
+        has_permission = (case.user_id == user_id) or (organization_id and case.organization_id == organization_id)
+        if not has_permission:
+            logger.error(f"Case {case_id} not accessible for user {user_id} in org {organization_id}")
             return None
 
         # Create document
@@ -338,6 +365,18 @@ def upload_case_document(
         # Auto-create deadline from remedies if available
         if remedies:
             _auto_create_deadlines_from_remedies(db, user_id, case_id, case.case_number, remedies, doc.id)
+
+        # Log the action for audit if organization context is present
+        if organization_id or case.organization_id:
+            log_audit_action(
+                db,
+                organization_id=organization_id or case.organization_id,
+                user_id=user_id,
+                action="upload_document",
+                resource_type="document",
+                resource_id=doc.id,
+                details={"case_id": case_id, "document_type": document_type.value}
+            )
 
         db.refresh(doc)
         logger.info(f"Uploaded document to case {case_id}: {document_type.value}")
@@ -832,27 +871,31 @@ def add_manual_deadline(
 # ==================== Case Actions ====================
 
 
-def mark_case_appealed(user_id: int, case_id: int) -> bool:
+def mark_case_appealed(user_id: int, case_id: int, organization_id: Optional[int] = None) -> bool:
     """Mark a case as appealed"""
-    return _update_case_status(user_id, case_id, CaseStatus.APPEALED)
+    return _update_case_status(user_id, case_id, CaseStatus.APPEALED, organization_id)
 
 
-def mark_case_closed(user_id: int, case_id: int) -> bool:
+def mark_case_closed(user_id: int, case_id: int, organization_id: Optional[int] = None) -> bool:
     """Mark a case as closed"""
-    return _update_case_status(user_id, case_id, CaseStatus.CLOSED)
+    return _update_case_status(user_id, case_id, CaseStatus.CLOSED, organization_id)
 
 
-def mark_case_active(user_id: int, case_id: int) -> bool:
+def mark_case_active(user_id: int, case_id: int, organization_id: Optional[int] = None) -> bool:
     """Mark a case as active"""
-    return _update_case_status(user_id, case_id, CaseStatus.ACTIVE)
+    return _update_case_status(user_id, case_id, CaseStatus.ACTIVE, organization_id)
 
 
-def _update_case_status(user_id: int, case_id: int, status: CaseStatus) -> bool:
+def _update_case_status(user_id: int, case_id: int, status: CaseStatus, organization_id: Optional[int] = None) -> bool:
     """Update case status with timeline event"""
     db = SessionLocal()
     try:
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
+        if not case:
+            return False
+            
+        has_permission = (case.user_id == user_id) or (organization_id and case.organization_id == organization_id)
+        if not has_permission:
             return False
 
         update_case_status(db, case_id, status)
@@ -879,14 +922,18 @@ def _update_case_status(user_id: int, case_id: int, status: CaseStatus) -> bool:
 # ==================== Export & Sharing ====================
 
 
-def generate_case_summary_text(user_id: int, case_id: int) -> Optional[str]:
+def generate_case_summary_text(user_id: int, case_id: int, organization_id: Optional[int] = None) -> Optional[str]:
     """
     Generate a text summary of a case for export.
     """
     db = SessionLocal()
     try:
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
+        if not case:
+            return None
+            
+        has_permission = (case.user_id == user_id) or (organization_id and case.organization_id == organization_id)
+        if not has_permission:
             return None
 
         documents = get_case_documents(db, case_id)

@@ -172,9 +172,11 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
         if st.button("📤 Upload Document", use_container_width=True):
             if document_text:
                 with st.spinner("Processing document..."):
+                    org_id = st.session_state.get("org_id")
                     success = upload_case_document(
                         user_id=user_id,
                         case_id=case_id,
+                        organization_id=org_id,
                         document_type=DocumentType[doc_type.upper()],
                         document_content=document_text,
                     )
@@ -439,19 +441,22 @@ def render_case_actions(case: Dict, user_id: int):
     with col1:
         if current_status != "appealed":
             if st.button("📤 Mark as Appealed", use_container_width=True, key="mark_appealed"):
-                mark_case_appealed(user_id, case["id"])
+                org_id = st.session_state.get("org_id")
+                mark_case_appealed(user_id, case["id"], organization_id=org_id)
                 st.rerun()
 
     with col2:
         if current_status != "closed":
             if st.button("⚫ Mark as Closed", use_container_width=True, key="mark_closed"):
-                mark_case_closed(user_id, case["id"])
+                org_id = st.session_state.get("org_id")
+                mark_case_closed(user_id, case["id"], organization_id=org_id)
                 st.rerun()
 
     with col3:
         if current_status != "active":
             if st.button("🟢 Mark as Active", use_container_width=True, key="mark_active"):
-                mark_case_active(user_id, case["id"])
+                org_id = st.session_state.get("org_id")
+                mark_case_active(user_id, case["id"], organization_id=org_id)
                 st.rerun()
 
 
@@ -476,7 +481,8 @@ def main():
         return
 
     # Get case details
-    case_data = get_case_detail(user_id, case_id)
+    org_id = st.session_state.get("org_id")
+    case_data = get_case_detail(user_id, case_id, organization_id=org_id)
 
     if not case_data:
         st.error("Case not found or access denied")

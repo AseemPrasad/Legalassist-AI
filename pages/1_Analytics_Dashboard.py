@@ -73,6 +73,26 @@ st.markdown("---")
 db = SessionLocal()
 
 try:
+    # ==================== MY TEAM'S PERFORMANCE ====================
+    org_id = st.session_state.get("org_id")
+    if org_id:
+        st.subheader(f"🏢 My Team's Performance ({st.session_state.get('org_name')})")
+        from database import get_organization_stats
+        org_stats = get_organization_stats(db, org_id)
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("Total Team Cases", org_stats["total_cases"])
+        with col2:
+            st.metric("Active", org_stats["active_cases"])
+        with col3:
+            st.metric("Appealed", org_stats["appealed_cases"])
+        with col4:
+            st.metric("Closed", org_stats["closed_cases"])
+        with col5:
+            st.metric("Org Deadlines", org_stats["upcoming_deadlines"])
+            
+        st.markdown("---")
     # ==================== SUMMARY METRICS ====================
     st.subheader("📈 Overall Statistics")
     

@@ -6,7 +6,7 @@ Uses SQLAlchemy ORM with SQLite for persistence.
 import datetime as dt
 import logging
 from typing import Optional, List
-from sqlalchemy import (
+from sqlalchemy import ( # type: ignore
     create_engine,
     Column,
     Integer,
@@ -21,7 +21,7 @@ from sqlalchemy import (
     Index,
 )
 from sqlalchemy.engine import make_url
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session # type: ignore
 import enum
 from contextlib import contextmanager
 from config import Config
@@ -521,6 +521,12 @@ class User(Base):
         back_populates="user", 
         cascade="all, delete-orphan"
     )
+    
+    memberships = relationship(
+        "OrganizationMember", 
+        back_populates="user", 
+        cascade="all, delete-orphan"
+    )
 
     # -------------------------------------------------------------------------
     # Helper Methods & Properties
@@ -602,6 +608,67 @@ class User(Base):
     # -------------------------------------------------------------------------
 
 
+class Organization(Base):
+    """Model for organizations/law firms (multi-tenancy)"""
+    __tablename__ = "organizations"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    branding_settings = Column(JSON, nullable=True)  # logo_url, colors, etc.
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    # Relationships
+    members = relationship("OrganizationMember", back_populates="organization", cascade="all, delete-orphan")
+    cases = relationship("Case", back_populates="organization", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<Organization(name={self.name})>"
+
+
+class UserRole(str, enum.Enum):
+    """Roles within an organization"""
+    ADMIN = "admin"        # Full access, billing, team management
+    LAWYER = "lawyer"      # View/create cases, manage deadlines
+    PARALEGAL = "paralegal" # Data entry, upload documents
+
+
+class OrganizationMember(Base):
+    """Mapping between users and organizations with roles"""
+    __tablename__ = "organization_members"
+    __table_args__ = (UniqueConstraint("user_id", "organization_id", name="uq_user_organization"),)
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(SQLEnum(UserRole), default=UserRole.LAWYER, nullable=False)
+    joined_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    # Relationships
+    user = relationship("User", back_populates="memberships")
+    organization = relationship("Organization", back_populates="members")
+
+    def __repr__(self):
+        return f"<OrganizationMember(user_id={self.user_id}, org_id={self.organization_id}, role={self.role})>"
+
+
+class AuditLog(Base):
+    """Model for tracking user actions for compliance"""
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    action = Column(String(255), nullable=False)  # login, create_case, upload_document, etc.
+    resource_type = Column(String(255), nullable=True)  # case, document, user, etc.
+    resource_id = Column(Integer, nullable=True)
+    details = Column(JSON, nullable=True)  # IP address, browser, specific changes
+    timestamp = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    def __repr__(self):
+        return f"<AuditLog(user_id={self.user_id}, action={self.action}, timestamp={self.timestamp})>"
+
+
 class OTPVerification(Base):
     """Model for storing email OTP codes for authentication"""
     __tablename__ = "otp_verifications"
@@ -671,6 +738,7 @@ class Case(Base):
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
     case_number = Column(String(255), nullable=False)  # User-facing identifier
     case_type = Column(String(255), nullable=False, index=True)  # civil, criminal, family, etc.
     jurisdiction = Column(String(255), nullable=False, index=True)
@@ -681,6 +749,7 @@ class Case(Base):
 
     # Relationships
     user = relationship("User", back_populates="cases")
+    organization = relationship("Organization", back_populates="cases")
     documents = relationship("CaseDocument", back_populates="case", cascade="all, delete-orphan", order_by="CaseDocument.uploaded_at")
     deadlines = relationship("CaseDeadline", back_populates="case", cascade="all, delete-orphan")
     timeline_events = relationship("CaseTimeline", back_populates="case", cascade="all, delete-orphan")
@@ -1360,12 +1429,14 @@ def create_case(
     case_number: str,
     case_type: str,
     jurisdiction: str,
+    organization_id: Optional[int] = None,
     title: Optional[str] = None,
     status: CaseStatus = CaseStatus.ACTIVE,
 ) -> Case:
     """Create a new case"""
     case = Case(
         user_id=user_id,
+        organization_id=organization_id,
         case_number=case_number,
         case_type=case_type,
         jurisdiction=jurisdiction,
@@ -1375,6 +1446,19 @@ def create_case(
     db.add(case)
     db.commit()
     db.refresh(case)
+    
+    # Log the action if an organization is provided
+    if organization_id:
+        log_audit_action(
+            db, 
+            organization_id=organization_id, 
+            user_id=user_id, 
+            action="create_case", 
+            resource_type="case", 
+            resource_id=case.id,
+            details={"case_number": case_number}
+        )
+        
     return case
 
 
@@ -1620,6 +1704,120 @@ def get_user_stats(db: Session, user_id: int) -> dict:
     now = dt.datetime.now(dt.timezone.utc)
     upcoming_deadlines = db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
+        CaseDeadline.is_completed == False,
+        CaseDeadline.deadline_date > now,
+    ).count()
+
+    return {
+        "total_cases": len(cases),
+        "active_cases": active_count,
+        "appealed_cases": appealed_count,
+        "closed_cases": closed_count,
+        "upcoming_deadlines": upcoming_deadlines,
+    }
+
+
+# ==================== Organization & RBAC Helper Functions ====================
+
+
+def create_organization(db: Session, name: str, branding_settings: Optional[dict] = None) -> Organization:
+    """Create a new organization (law firm)"""
+    org = Organization(name=name, branding_settings=branding_settings)
+    db.add(org)
+    db.commit()
+    db.refresh(org)
+    return org
+
+
+def add_member_to_organization(
+    db: Session, 
+    user_id: int, 
+    organization_id: int, 
+    role: UserRole = UserRole.LAWYER
+) -> OrganizationMember:
+    """Add a user to an organization with a specific role"""
+    member = OrganizationMember(
+        user_id=user_id,
+        organization_id=organization_id,
+        role=role
+    )
+    db.add(member)
+    db.commit()
+    db.refresh(member)
+    return member
+
+
+def get_user_organizations(db: Session, user_id: int) -> List[Organization]:
+    """Get all organizations a user belongs to"""
+    memberships = db.query(OrganizationMember).filter(OrganizationMember.user_id == user_id).all()
+    return [m.organization for m in memberships]
+
+
+def get_organization_members(db: Session, organization_id: int) -> List[OrganizationMember]:
+    """Get all members of an organization"""
+    return db.query(OrganizationMember).filter(OrganizationMember.organization_id == organization_id).all()
+
+
+def get_user_role_in_org(db: Session, user_id: int, organization_id: int) -> Optional[UserRole]:
+    """Get a user's role in a specific organization"""
+    member = db.query(OrganizationMember).filter(
+        OrganizationMember.user_id == user_id,
+        OrganizationMember.organization_id == organization_id
+    ).first()
+    return member.role if member else None
+
+
+def log_audit_action(
+    db: Session,
+    organization_id: int,
+    action: str,
+    user_id: Optional[int] = None,
+    resource_type: Optional[str] = None,
+    resource_id: Optional[int] = None,
+    details: Optional[dict] = None,
+) -> AuditLog:
+    """Log an action for audit/compliance"""
+    log = AuditLog(
+        user_id=user_id,
+        organization_id=organization_id,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        details=details
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+    return log
+
+
+def get_organization_audit_logs(db: Session, organization_id: int, limit: int = 100) -> List[AuditLog]:
+    """Get audit logs for an organization"""
+    return db.query(AuditLog).filter(
+        AuditLog.organization_id == organization_id
+    ).order_by(AuditLog.timestamp.desc()).limit(limit).all()
+
+
+def get_organization_cases(db: Session, organization_id: int, include_closed: bool = True) -> List[Case]:
+    """Get all cases for an organization"""
+    query = db.query(Case).filter(Case.organization_id == organization_id)
+    if not include_closed:
+        query = query.filter(Case.status != CaseStatus.CLOSED)
+    return query.order_by(Case.created_at.desc()).all()
+
+
+def get_organization_stats(db: Session, organization_id: int) -> dict:
+    """Get statistics for an organization's cases"""
+    cases = get_organization_cases(db, organization_id)
+
+    active_count = len([c for c in cases if c.status == CaseStatus.ACTIVE])
+    appealed_count = len([c for c in cases if c.status == CaseStatus.APPEALED])
+    closed_count = len([c for c in cases if c.status == CaseStatus.CLOSED])
+
+    # Get upcoming deadlines for the whole org
+    now = dt.datetime.now(dt.timezone.utc)
+    upcoming_deadlines = db.query(CaseDeadline).join(Case).filter(
+        Case.organization_id == organization_id,
         CaseDeadline.is_completed == False,
         CaseDeadline.deadline_date > now,
     ).count()

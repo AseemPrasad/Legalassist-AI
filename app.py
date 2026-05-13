@@ -231,9 +231,11 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
             
             if st.button("Save to Selected Case", use_container_width=True):
                 with st.spinner("Saving..."):
+                    org_id = st.session_state.get("org_id")
                     doc = upload_case_document(
                         user_id=user_id,
                         case_id=selected_case_id,
+                        organization_id=org_id,
                         document_type=DocumentType.JUDGMENT,
                         document_content=raw_text,
                         summary=summary,
@@ -259,8 +261,10 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
             
             if st.button("Create Case & Save Document", use_container_width=True):
                 if new_case_number and new_jurisdiction:
+                    org_id = st.session_state.get("org_id")
                     new_case = create_new_case(
                         user_id=user_id,
+                        organization_id=org_id,
                         case_number=new_case_number,
                         case_type=new_case_type,
                         jurisdiction=new_jurisdiction,
@@ -683,7 +687,8 @@ def main():
                             st.switch_page("pages/0_Login.py")
                     else:
                         user_id = get_current_user_id()
-                        cases = get_user_cases_summary(user_id, include_closed=False)
+                        org_id = st.session_state.get("org_id")
+                        cases = get_user_cases_summary(user_id, organization_id=org_id, include_closed=False)
                         
                         col1, col2 = st.columns(2)
                         with col1:
@@ -694,9 +699,11 @@ def main():
                                 
                                 if st.button("Save to Selected Case"):
                                     with st.spinner("Saving..."):
+                                        org_id = st.session_state.get("org_id")
                                         doc = upload_case_document(
                                             user_id=user_id,
                                             case_id=selected_case_id,
+                                            organization_id=org_id,
                                             document_type=DocumentType.JUDGMENT,
                                             document_content=raw_text,
                                             summary=summary,
@@ -720,8 +727,10 @@ def main():
                                 new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court").strip()
                                 if st.button("Create & Save"):
                                     if new_case_number and new_jurisdiction:
+                                        org_id = st.session_state.get("org_id")
                                         new_case = create_new_case(
                                             user_id=user_id,
+                                            organization_id=org_id,
                                             case_number=new_case_number,
                                             case_type=new_case_type,
                                             jurisdiction=new_jurisdiction,
@@ -731,6 +740,7 @@ def main():
                                             doc = upload_case_document(
                                                 user_id=user_id,
                                                 case_id=new_case.id,
+                                                organization_id=org_id,
                                                 document_type=DocumentType.JUDGMENT,
                                                 document_content=raw_text,
                                                 summary=summary,

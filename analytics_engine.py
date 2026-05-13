@@ -434,6 +434,26 @@ class AnalyticsCalculator:
             "case_type_stats": type_stats,
         }
 
+    @staticmethod
+    def calculate_appeal_success_rate(cases: List[CaseRecord]) -> float:
+        """Calculate appeal success rate for a list of cases"""
+        if not cases:
+            return 0.0
+        
+        total_appeals = 0
+        successful_appeals = 0
+        
+        for case in cases:
+            if case.outcome_data and case.outcome_data.appeal_filed:
+                total_appeals += 1
+                if case.outcome_data.appeal_success:
+                    successful_appeals += 1
+                    
+        if total_appeals == 0:
+            return 0.0
+            
+        return (successful_appeals / total_appeals) * 100
+
 
     @staticmethod
     def calculate_appeal_success_rate(cases: list) -> float:

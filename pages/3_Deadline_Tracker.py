@@ -23,20 +23,25 @@ st.set_page_config(
 
 
 
-def get_all_user_deadlines(user_id: int) -> List[Dict[str, Any]]:
-    """Get all deadlines for a user across all cases"""
+def get_all_user_deadlines(user_id: int, organization_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Get all deadlines for a user or their organization across all cases"""
     db = SessionLocal()
     try:
-        deadlines = db.query(CaseDeadline).filter(
-            CaseDeadline.user_id == user_id
-        ).order_by(CaseDeadline.deadline_date).all()
+        # Optimized query using join to avoid N+1 problem
+        query = db.query(CaseDeadline, Case).join(Case, CaseDeadline.case_id == Case.id)
+        
+        if organization_id:
+            # Multi-tenant: show all deadlines for the organization
+            query = query.filter(Case.organization_id == organization_id)
+        else:
+            # Single-user: show only user's deadlines
+            query = query.filter(CaseDeadline.user_id == user_id)
+            
+        results = query.order_by(CaseDeadline.deadline_date).all()
 
-        result = []
-        for d in deadlines:
-            # Get case info
-            case = db.query(Case).filter(Case.id == d.case_id).first()
-
-            result.append({
+        final_result = []
+        for d, case in results:
+            final_result.append({
                 "id": d.id,
                 "case_id": d.case_id,
                 "case_number": case.case_number if case else "Unknown",
@@ -48,7 +53,7 @@ def get_all_user_deadlines(user_id: int) -> List[Dict[str, Any]]:
                 "days_until": d.days_until_deadline(),
             })
 
-        return result
+        return final_result
 
     finally:
         db.close()
@@ -330,7 +335,8 @@ def main():
     st.markdown("---")
 
     # Get all deadlines
-    deadlines = get_all_user_deadlines(user_id)
+    org_id = st.session_state.get("org_id")
+    deadlines = get_all_user_deadlines(user_id, organization_id=org_id)
 
     if not deadlines:
         st.info("📭 No deadlines yet. Deadlines are created when you upload documents with remedies advice.")

@@ -26,7 +26,8 @@ def export_dialog(user_id, case_id, case_number):
     st.write(f"Your case summary for **{case_number}** is ready. Choose your preferred format:")
     
     with st.spinner("Preparing files..."):
-        txt_summary = generate_case_summary_text(user_id, case_id)
+        org_id = st.session_state.get("org_id")
+        txt_summary = generate_case_summary_text(user_id, case_id, organization_id=org_id)
         pdf_bytes = generate_case_pdf(user_id, case_id)
         
     col1, col2 = st.columns(2)
@@ -199,8 +200,10 @@ def render_create_case_modal():
                 normalized_case_type = (case_type or "").strip().casefold()
                 normalized_jurisdiction = (jurisdiction or "").strip().casefold()
 
+                org_id = st.session_state.get("org_id")
                 case = get_or_create_case_for_document(
                     user_id=user_id,
+                    organization_id=org_id,
                     new_case_number=normalized_case_number,
                     new_case_type=normalized_case_type,
                     new_jurisdiction=normalized_jurisdiction,
@@ -234,7 +237,8 @@ def main():
     st.markdown("---")
 
     # Stats bar
-    cases = get_user_cases_summary(user_id, include_closed=True)
+    org_id = st.session_state.get("org_id")
+    cases = get_user_cases_summary(user_id, organization_id=org_id, include_closed=True)
 
     if cases:
         render_stats_bar(cases)
