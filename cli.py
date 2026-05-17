@@ -288,7 +288,7 @@ def _chat_completion(
             # We don't retry on other errors (like auth or invalid params) 
             # to avoid infinite loops on fatal configuration issues.
             LOGGER.debug("chat_completion_fatal_error", error=str(e), error_type=type(e).__name__)
-            raise e
+            raise
     
     if last_err:
         raise last_err
