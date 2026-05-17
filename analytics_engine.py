@@ -19,6 +19,18 @@ from sqlalchemy.orm import Query
 logger = logging.getLogger(__name__)
 
 
+def _summary_overlap(s1: Optional[str], s2: Optional[str]) -> float:
+    """Calculate overlap/similarity ratio between two summaries"""
+    import difflib
+    if not s1 or not s2:
+        return 0.0
+    s1_clean = str(s1).strip().lower()
+    s2_clean = str(s2).strip().lower()
+    if not s1_clean or not s2_clean:
+        return 0.0
+    return difflib.SequenceMatcher(None, s1_clean, s2_clean).ratio()
+
+
 class MemoryOptimizationMixin:
     """
     Mixin providing utilities for memory management during intensive data operations.

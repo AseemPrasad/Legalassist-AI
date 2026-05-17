@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
-from api.dependencies import get_db, get_current_user
+from database import get_db
+from api.auth import get_current_user
 from database import User
 
 # Import case search engines

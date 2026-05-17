@@ -106,6 +106,8 @@ __all__ = [
     "record_otp_failed_attempt",
     "reset_otp_failed_attempts",
     "cleanup_expired_otps",
+    "record_otp_failed_attempt",
+    "reset_otp_failed_attempts",
     "create_case",
     "get_user_cases",
     "get_case_by_id",
@@ -126,6 +128,8 @@ __all__ = [
     "create_timeline_event",
     "create_attachment",
     "get_attachments_for_case",
+    "submit_similarity_feedback",
+    "get_similarity_feedback",
 ]
 
 
@@ -156,8 +160,65 @@ def update_user_last_login(db: Session, user_id: int) -> Optional[User]:
     return user
 
 
-def create_otp_verification(db: Session, email: str, otp_hash: str, expires_at: dt.datetime) -> OTPVerification:
-    """Create a new OTP verification record"""
+_OTP_RATE_LIMIT_SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+_otp_rate_limit_script = None
+
+
+def _otp_rate_limit_key(email: str) -> str:
+    import hashlib
+    normalized_email = str(email).strip().lower()
+    digest = hashlib.sha256(normalized_email.encode("utf-8")).hexdigest()
+    return f"otp:rate:{digest}"
+
+
+def _get_otp_rate_limit_script():
+    global _otp_rate_limit_script
+    if _otp_rate_limit_script is None:
+        import os
+        try:
+            import redis
+        except ImportError:
+            redis = None
+        if redis is None:
+            raise RuntimeError("Redis is required for OTP rate limiting but is not installed.")
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        client = redis.from_url(redis_url, decode_responses=True)
+        _otp_rate_limit_script = client.register_script(_OTP_RATE_LIMIT_SCRIPT)
+    return _otp_rate_limit_script
+
+
+def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> int:
+    normalized_email = str(email).strip().lower()
+    if not normalized_email:
+        raise ValueError("Email is required for OTP rate limiting")
+
+    script = _get_otp_rate_limit_script()
+    current = int(script(keys=[_otp_rate_limit_key(normalized_email)], args=[3600]))
+
+    if current > max_requests_per_hour:
+        raise ValueError("Too many OTP requests. Please try again later.")
+
+    return current
+
+
+def create_otp_verification(
+    db: Session,
+    email: str,
+    otp_hash: str,
+    expires_at: dt.datetime,
+    max_requests_per_hour: int = 5,
+    requester_ip: Optional[str] = None,
+) -> OTPVerification:
+    """Create a new OTP verification record with rate limiting"""
+    _reserve_otp_rate_limit_slot(email, max_requests_per_hour)
+    if requester_ip:
+        _reserve_otp_rate_limit_slot(requester_ip, max_requests_per_hour)
     otp = OTPVerification(email=email, otp_hash=otp_hash, expires_at=expires_at)
     db.add(otp)
     db.commit()
@@ -454,11 +515,6 @@ def get_notification_template_for_user(db: Session, user_id: int) -> Optional[No
     return db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
 
 
-def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> bool:
-    """Internal helper for OTP rate limiting - mockable for tests"""
-    # In the real app, this would use Redis or similar
-    return True
-
 
 def get_user_stats(db: Session, user_id: int) -> dict:
     """Calculate high-level stats for a user dashboard"""
@@ -576,6 +632,16 @@ def create_timeline_event(
         description=description,
         event_date=event_date or dt.datetime.now(dt.timezone.utc),
         event_metadata=metadata,
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return event
+
+
+def create_case_document(
+    db: Session,
+    case_id: int,
     document_type: DocumentType,
     user_id: int,
     document_content: Optional[str] = None,
@@ -608,10 +674,8 @@ def create_timeline_event(
         summary=summary,
         remedies=remedies,
     )
-    db.add(event)
+    db.add(doc)
     db.commit()
-    db.refresh(event)
-    return event
     db.refresh(doc)
     return doc
 
@@ -678,3 +742,96 @@ def create_attachment(
 def get_attachments_for_case(db: Session, case_id: int) -> List[Attachment]:
     """Get all attachments for a case"""
     return db.query(Attachment).filter(Attachment.case_id == case_id).all()
+
+
+def is_token_revoked(db: Session, jti: str) -> bool:
+    """Check if token JTI is in the revocation blacklist"""
+    return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+
+
+def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
+    """Add a token JTI to the revocation blacklist"""
+    token = RevokedToken(jti=jti, expires_at=expires_at)
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    return token
+
+
+def cleanup_expired_revoked_tokens(db: Session) -> int:
+    """Remove expired tokens from the blacklist"""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = db.query(RevokedToken).filter(RevokedToken.expires_at < now).delete(synchronize_session=False)
+    db.commit()
+    return deleted
+
+
+def submit_similarity_feedback(
+    db: Session,
+    user_id: str,
+    candidate_case_id: int,
+    query_signature: str,
+    relevance: bool,
+) -> SimilarityFeedback:
+    """Persist feedback for a similarity search result"""
+    feedback = SimilarityFeedback(
+        user_id=str(user_id),
+        candidate_case_id=candidate_case_id,
+        query_signature=query_signature,
+        relevance=relevance,
+    )
+    db.add(feedback)
+    db.commit()
+    db.refresh(feedback)
+    return feedback
+
+
+def get_similarity_feedback(
+    db: Session,
+    user_id: Optional[str] = None,
+    query_signature: Optional[str] = None,
+    candidate_case_id: Optional[int] = None,
+    limit: int = 100,
+) -> List[SimilarityFeedback]:
+    """Get similarity feedback rows filtered by user, query, or candidate case"""
+    query = db.query(SimilarityFeedback)
+
+    if user_id is not None:
+        query = query.filter(SimilarityFeedback.user_id == str(user_id))
+    if query_signature is not None:
+        query = query.filter(SimilarityFeedback.query_signature == query_signature)
+    if candidate_case_id is not None:
+        query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
+
+    return query.order_by(SimilarityFeedback.created_at.desc()).limit(limit).all()
+
+
+def record_otp_failed_attempt(
+    db: Session,
+    otp_id: int,
+    lockout_duration_minutes: int = 15,
+    max_failed_attempts: int = 5,
+) -> OTPVerification:
+    """Record a failed OTP verification attempt and lock if max reached"""
+    otp_record = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+    if otp_record:
+        otp_record.failed_attempts += 1
+        if otp_record.failed_attempts >= max_failed_attempts:
+            otp_record.locked_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
+        db.commit()
+        db.refresh(otp_record)
+    return otp_record
+
+
+def reset_otp_failed_attempts(db: Session, otp_id: int) -> OTPVerification:
+    """Reset OTP failed attempts counter and unlock"""
+    otp_record = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+    if otp_record:
+        otp_record.failed_attempts = 0
+        otp_record.locked_until = None
+        db.commit()
+        db.refresh(otp_record)
+    return otp_record
+
+
+

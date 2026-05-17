@@ -7,6 +7,7 @@ GET /api/v1/cases/{id}/timeline - Get case timeline
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, status, Depends
+from sqlalchemy.orm import Session
 from api.models import (
     CaseSearchRequest, CaseSearchResponse, CaseResult,
     CaseTimeline, CaseEvent, SimilarityFeedbackRequest,
@@ -21,6 +22,7 @@ from database import (
     CaseOutcome,
     get_db,
     submit_similarity_feedback,
+    Case,
 )
 from analytics_engine import CaseSimilarityCalculator
 
@@ -332,18 +334,60 @@ async def get_case_timeline(
 )
 async def get_case_details(
     case_id: str,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> dict:
     """Get complete case details"""
     
+    logger.info(
+        "Retrieving case details",
+        case_id=case_id,
+        user_id=current_user.user_id
+    )
+    
+    try:
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid user ID format"
+        )
+        
+    try:
+        case_id_int = int(case_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid case ID format"
+        )
+        
+    case = db.query(Case).filter(Case.id == case_id_int).first()
+    
+    if not case:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Case not found"
+        )
+        
+    if case.user_id != user_id_int:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: You do not own this case"
+        )
+        
+    latest_doc = None
+    if case.documents:
+        sorted_docs = sorted(case.documents, key=lambda d: d.uploaded_at, reverse=True)
+        latest_doc = sorted_docs[0]
+        
     return {
-        "case_id": case_id,
-        "case_number": "2023-CV-00001",
-        "title": "Example Case",
-        "parties": ["Smith", "Jones"],
-        "jurisdiction": "US",
-        "status": "closed",
-        "summary": "Case summary here"
+        "case_id": str(case.id),
+        "case_number": case.case_number,
+        "title": case.title or case.case_number,
+        "parties": ["Smith", "Jones"],  # Placeholder
+        "jurisdiction": case.jurisdiction,
+        "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
+        "summary": latest_doc.summary if latest_doc else ""
     }
 
 
@@ -354,13 +398,57 @@ async def get_case_details(
 async def list_cases(
     limit: int = 10,
     offset: int = 0,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> dict:
     """Get list of cases for current user"""
     
+    logger.info(
+        "Listing user cases",
+        user_id=current_user.user_id,
+        limit=limit,
+        offset=offset
+    )
+    
+    try:
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid user ID format"
+        )
+    
+    total = db.query(Case).filter(Case.user_id == user_id_int).count()
+    
+    cases = (
+        db.query(Case)
+        .filter(Case.user_id == user_id_int)
+        .order_by(Case.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    
+    cases_list = []
+    for c in cases:
+        latest_doc = None
+        if c.documents:
+            sorted_docs = sorted(c.documents, key=lambda d: d.uploaded_at, reverse=True)
+            latest_doc = sorted_docs[0]
+            
+        cases_list.append({
+            "case_id": str(c.id),
+            "case_number": c.case_number,
+            "title": c.title or c.case_number,
+            "parties": ["Smith", "Jones"],  # Placeholder
+            "jurisdiction": c.jurisdiction,
+            "status": c.status.value if hasattr(c.status, 'value') else str(c.status),
+            "summary": latest_doc.summary if latest_doc else ""
+        })
+        
     return {
-        "total": 0,
+        "total": total,
         "limit": limit,
         "offset": offset,
-        "cases": []
+        "cases": cases_list
     }
