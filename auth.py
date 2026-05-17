@@ -201,7 +201,14 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
 
         # Store OTP
         try:
-            create_otp_verification(db, email, otp_hash, expires_at, requester_ip=requester_ip)
+            create_otp_verification(
+                db,
+                email,
+                otp_hash,
+                expires_at,
+                max_requests_per_hour=OTP_REQUEST_RATE_LIMIT_MAX,
+                requester_ip=requester_ip,
+            )
         except ValueError as exc:
             return False, str(exc)
 
