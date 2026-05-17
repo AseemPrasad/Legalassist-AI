@@ -74,13 +74,13 @@ async def create_api_key(
     expires_at = None
 
     if request.expires_in_days:
-        expires_at = datetime.utcnow() + timedelta(days=request.expires_in_days)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=request.expires_in_days)
     
     return APIKeyResponse(
         id="key_123",
         name=request.name,
         key=key,  # Only shown now
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         expires_at=expires_at
     )
 
@@ -102,7 +102,7 @@ async def list_api_keys(
             {
                 "id": "key_123",
                 "name": "Production API Key",
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "expires_at": None,
                 "last_used": None
             }

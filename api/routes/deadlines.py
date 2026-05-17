@@ -38,7 +38,7 @@ async def get_upcoming_deadlines(
     )
     
     # Mock deadline data
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     deadlines = [
         DeadlineResponse(
             deadline_id="dl_001",
@@ -97,7 +97,7 @@ async def get_upcoming_deadlines(
         medium_count=medium,
         low_count=low,
         deadlines=deadlines,
-        generated_at=datetime.utcnow()
+        generated_at=datetime.now(timezone.utc)
     )
 
 
@@ -118,7 +118,7 @@ async def get_deadline_details(
         user_id=current_user.user_id
     )
     
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return DeadlineResponse(
         deadline_id=deadline_id,
         user_id=current_user.user_id,
@@ -157,7 +157,7 @@ async def create_deadline(
         title=title
     )
     
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     days_until = (due_date - now).days
     
     return DeadlineResponse(
@@ -197,7 +197,7 @@ async def update_deadline(
     )
     
     # In production, fetch and update from database
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return DeadlineResponse(
         deadline_id=deadline_id,
         user_id=current_user.user_id,

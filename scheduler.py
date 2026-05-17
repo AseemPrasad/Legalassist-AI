@@ -173,13 +173,8 @@ def check_and_send_reminders():
     # ---------------------------------------------------------
     # PERFORMANCE FIX: Move localized import out of the loop!
     # ---------------------------------------------------------
-    # By placing this import at the top of the function, we avoid
-    # the overhead of module resolution during every iteration of
-    # the upcoming_deadlines loop. This significantly speeds up
-    # the job when processing thousands of deadlines.
-    from database import has_notification_been_sent
-    # ---------------------------------------------------------
-
+# ---------------------------------------------------------
+    
     logger.info("=" * 60)
     logger.info("Starting deadline reminder check job")
     logger.info(f"Check time: {datetime.now(timezone.utc)} UTC")

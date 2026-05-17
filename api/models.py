@@ -82,7 +82,7 @@ class DocumentAnalysisSummary(BaseModel):
     remedies: List[RemediaryItem]
     deadlines: List[DeadlineItem]
     obligations: List[str]
-    confidence_score: float = Field(ge=0, le=1)
+    confidence_score: float = Field(ge=0.0, le=1.0, description="Model confidence for extraction quality (0.0-1.0)")
     analysis_time_seconds: float
 
 
@@ -340,7 +340,7 @@ class ErrorResponse(BaseModel):
     error_code: str
     message: str
     details: Optional[Dict[str, Any]] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ValidationError(ErrorResponse):

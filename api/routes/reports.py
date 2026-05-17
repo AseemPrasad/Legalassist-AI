@@ -69,7 +69,7 @@ async def generate_report(
         status="pending",
         report_type=request.report_type,
         format=request.format,
-        created_at=datetime.utcnow()
+        created_at=datetime.now(timezone.utc)
     )
 
 
@@ -96,8 +96,8 @@ async def get_report_status(
         report_type="comprehensive",
         format="pdf",
         download_url=f"/api/v1/reports/{report_id}/download" if status_info["status"] == "completed" else None,
-        created_at=datetime.utcnow(),
-        completed_at=datetime.utcnow() if status_info["status"] == "completed" else None
+        created_at=datetime.now(timezone.utc),
+        completed_at=datetime.now(timezone.utc) if status_info["status"] == "completed" else None
     )
 
 
