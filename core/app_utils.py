@@ -92,6 +92,40 @@ def _extract_pages_pypdf(reader: PdfReader) -> str:
     return text.strip()
 
 
+def _validate_encoding_quality(text: str) -> tuple[bool, float]:
+    """
+    Validate extracted text for encoding quality issues.
+    Returns (is_valid, quality_score) where quality_score is 0.0-1.0.
+    Detects: mojibake, replacement chars, malformed unicode sequences.
+    """
+    if not text:
+        return False, 0.0
+    
+    # Check for replacement characters (U+FFFD) indicating encoding failures
+    replacement_char_count = text.count('\ufffd')
+    replacement_ratio = replacement_char_count / len(text)
+    
+    # Check for common mojibake patterns (question marks, boxes, garbled sequences)
+    garbled_patterns = ['???', '', '\x00', '\x1a']
+    garbled_count = sum(text.count(p) for p in garbled_patterns)
+    garbled_ratio = garbled_count / len(text)
+    
+    # Check for excessive non-ASCII control characters
+    control_chars = sum(1 for c in text if ord(c) < 32 and c not in '\n\t\r')
+    control_ratio = control_chars / len(text)
+    
+    # Calculate quality score (1.0 = perfect, 0.0 = corrupted)
+    quality_score = max(0.0, 1.0 - (replacement_ratio * 10) - (garbled_ratio * 5) - (control_ratio * 3))
+    
+    # Also check if text appears mostly non-printable
+    printable_ratio = sum(1 for c in text if c.isprintable() or c in '\n\t\r') / len(text)
+    if printable_ratio < 0.5:
+        quality_score = min(quality_score, 0.3)
+    
+    is_valid = quality_score >= 0.7 and replacement_ratio < 0.05
+    return is_valid, round(quality_score, 2)
+
+
 def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
     lines: Dict[tuple, Dict[str, Any]] = {}
     for i, token in enumerate(data.get("text", [])):
@@ -168,7 +202,10 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
                     pages.append(page_text)
             text = "\n".join(pages).strip()
             if text:
-                return text
+                # Validate encoding quality
+                is_valid, quality = _validate_encoding_quality(text)
+                if is_valid:
+                    return text
     except Exception:
         pass
 
@@ -178,7 +215,10 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
         reader = PdfReader(uploaded_pdf)
         text = _extract_pages_pypdf(reader)
         if text:
-            return text
+            # Validate encoding quality before returning
+            is_valid, quality = _validate_encoding_quality(text)
+            if is_valid:
+                return text
     except Exception:
         pass
 

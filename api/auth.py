@@ -141,7 +141,7 @@ class APIKey:
     
     def is_valid(self) -> bool:
         """Check if API key is valid"""
-        if self.expires_at and datetime.utcnow() > self.expires_at:
+        if self.expires_at and datetime.now(timezone.utc) > self.expires_at:
             return False
         return True
 
@@ -170,7 +170,7 @@ def create_api_key_record(name: str, expires_in_days: Optional[int] = None) -> t
     key = generate_api_key()
     salt = secrets.token_hex(16)
     key_hash = hash_api_key(key, salt)
-    created_at = datetime.utcnow()
+    created_at = datetime.now(timezone.utc)
     expires_at = None
 
     if expires_in_days:

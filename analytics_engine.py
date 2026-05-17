@@ -19,6 +19,18 @@ from sqlalchemy.orm import Query
 logger = logging.getLogger(__name__)
 
 
+def _summary_overlap(s1: Optional[str], s2: Optional[str]) -> float:
+    """Calculate overlap/similarity ratio between two summaries"""
+    import difflib
+    if not s1 or not s2:
+        return 0.0
+    s1_clean = str(s1).strip().lower()
+    s2_clean = str(s2).strip().lower()
+    if not s1_clean or not s2_clean:
+        return 0.0
+    return difflib.SequenceMatcher(None, s1_clean, s2_clean).ratio()
+
+
 class MemoryOptimizationMixin:
     """
     Mixin providing utilities for memory management during intensive data operations.
@@ -595,8 +607,10 @@ class CaseSimilarityCalculator:
             (CaseRecord.case_type == reference_case.case_type) | (CaseRecord.jurisdiction == reference_case.jurisdiction)
         )
         
-        # Limit the search space to the most recent/relevant 1000 cases to prevent OOM
-        all_cases = query.limit(1000).all()
+        # Limit the search space to prevent OOM. Configurable via SIMILARITY_QUERY_LIMIT env var.
+        # Default 1000 for memory efficiency, increase for larger jurisdictions.
+        max_cases = int(os.getenv("SIMILARITY_QUERY_LIMIT", "1000"))
+        all_cases = query.limit(max_cases).all()
         
         similarities = []
         for case in all_cases:
@@ -774,9 +788,14 @@ class AnalyticsCalculator:
         Cases without outcome_data or with appeal_filed=False are safely ignored.
         Returns a percentage (0.0–100.0), or 0.0 if no qualifying cases.
         """
+        if not cases:
+            return 0.0
+        
         appeals_filed = 0
         appeals_won = 0
         for case in cases:
+            if case is None:
+                continue
             outcome_data = getattr(case, "outcome_data", None)
             if outcome_data is None:
                 continue

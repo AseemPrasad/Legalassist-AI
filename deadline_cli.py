@@ -458,10 +458,16 @@ def test_sms(user_id: int, msg: str):
         
         console.print(f"📱 Dispatching test SMS to [cyan]{pref.phone_number}[/cyan]...")
         
-        # We need a dummy deadline for the service method
+        # Create a minimal test case if none exists for FK constraint
+        test_case = ctx.db.query(Case).filter(Case.user_id == user_id).first()
+        if not test_case:
+            test_case = Case(user_id=user_id, case_number="TEST_CLI", case_type="test", jurisdiction="Test")
+            ctx.db.add(test_case)
+            ctx.db.commit()
+        
         dummy_deadline = CaseDeadline(
             user_id=user_id,
-            case_id=0,
+            case_id=test_case.id,
             case_title="CLI Test Case",
             deadline_date=datetime.now(timezone.utc),
             deadline_type="test"
@@ -490,9 +496,16 @@ def test_email(user_id: int):
         
         console.print(f"📧 Dispatching test email to [cyan]{pref.email}[/cyan]...")
         
+        # Create a minimal test case if none exists for FK constraint
+        test_case = ctx.db.query(Case).filter(Case.user_id == user_id).first()
+        if not test_case:
+            test_case = Case(user_id=user_id, case_number="TEST_CLI", case_type="test", jurisdiction="Test")
+            ctx.db.add(test_case)
+            ctx.db.commit()
+        
         dummy_deadline = CaseDeadline(
             user_id=user_id,
-            case_id=0,
+            case_id=test_case.id,
             case_title="CLI Test Case",
             deadline_date=datetime.now(timezone.utc),
             deadline_type="test"

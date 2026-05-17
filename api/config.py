@@ -78,13 +78,23 @@ class APISettings(BaseSettings):
     DATABASE_POOL_SIZE: int = 20
     DATABASE_MAX_OVERFLOW: int = 10
     
-    # Redis
-    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    # Redis - require explicit configuration
+    _redis_env = os.getenv("REDIS_URL")
+    if not _redis_env:
+        raise ValueError("REDIS_URL environment variable is required. No localhost fallback.")
+    REDIS_URL: str = _redis_env
     REDIS_CACHE_TTL: int = 3600  # 1 hour
     
-    # Celery
-    CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1")
-    CELERY_RESULT_BACKEND: str = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/2")
+    # Celery - require explicit configuration
+    _celery_broker = os.getenv("CELERY_BROKER_URL")
+    if not _celery_broker:
+        raise ValueError("CELERY_BROKER_URL environment variable is required.")
+    CELERY_BROKER_URL: str = _celery_broker
+    
+    _celery_backend = os.getenv("CELERY_RESULT_BACKEND")
+    if not _celery_backend:
+        raise ValueError("CELERY_RESULT_BACKEND environment variable is required.")
+    CELERY_RESULT_BACKEND: str = _celery_backend
     CELERY_TASK_TIMEOUT: int = 3600  # 1 hour
     CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes
     
