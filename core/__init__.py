@@ -24,6 +24,17 @@ from .app_utils import (
     LEGAL_HELP_RESOURCES,
     validate_pdf_metadata,
 )
+from .a11y import (
+    a11y_button_label,
+    a11y_status_message,
+    a11y_progress_indicator,
+    a11y_form_field,
+    a11y_alert,
+    a11y_expandable_section,
+    a11y_data_table,
+    a11y_skip_link,
+)
+from .i18n import I18n, i18n, init_i18n, _
 
 __all__ = [
     'extract_text_from_pdf',
@@ -48,5 +59,19 @@ __all__ = [
     'localize_yes_no',
     'RETRO_STYLING',
     'LEGAL_HELP_RESOURCES',
+    'validate_pdf_metadata',
+    'a11y_button_label',
+    'a11y_status_message',
+    'a11y_progress_indicator',
+    'a11y_form_field',
+    'a11y_alert',
+    'a11y_expandable_section',
+    'a11y_data_table',
+    'a11y_skip_link',
+    'I18n',
+    'i18n',
+    'init_i18n',
+    '_',
+]
     'validate_pdf_metadata',
 ]
