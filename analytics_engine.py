@@ -607,8 +607,10 @@ class CaseSimilarityCalculator:
             (CaseRecord.case_type == reference_case.case_type) | (CaseRecord.jurisdiction == reference_case.jurisdiction)
         )
         
-        # Limit the search space to the most recent/relevant 1000 cases to prevent OOM
-        all_cases = query.limit(1000).all()
+        # Limit the search space to prevent OOM. Configurable via SIMILARITY_QUERY_LIMIT env var.
+        # Default 1000 for memory efficiency, increase for larger jurisdictions.
+        max_cases = int(os.getenv("SIMILARITY_QUERY_LIMIT", "1000"))
+        all_cases = query.limit(max_cases).all()
         
         similarities = []
         for case in all_cases:
