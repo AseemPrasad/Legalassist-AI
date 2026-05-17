@@ -4,7 +4,7 @@ This module provides:
 - strict identifier resolution from verified JWTs or IPs,
 - atomic Redis Lua sliding-window enforcement,
 - per-path limit presets for sensitive endpoints,
-- fail-open behavior with structured logging for alerting.
+- fail-closed behavior on Redis/Lua errors for protected API routes.
 """
 
 from __future__ import annotations
@@ -139,15 +139,14 @@ class DistributedRateLimiter:
 
             return allowed
         except Exception as exc:
-            fail_open = not any(p in endpoint for p in ["/api/v1/analyze", "/api/v1/auth"])
             logger.error(
                 "rate_limiter_error",
                 error=str(exc),
                 identifier=identifier,
                 endpoint=endpoint,
-                fail_open=fail_open,
+                fail_open=False,
             )
-            return fail_open
+            return False
 
     async def get_remaining_ttl(self, identifier: str, endpoint: str, window_seconds: int) -> int:
         try:

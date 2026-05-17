@@ -9,6 +9,7 @@ from fastapi import status
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
+from api import limiter as limiter_module
 from api.limiter import get_rate_limit_policy, resolve_rate_limit_identifier
 from api.middleware import rate_limit_middleware, request_size_limit_middleware
 from api.validation import ValidationConfig
@@ -75,6 +76,23 @@ async def test_rate_limit_middleware_marks_endpoint_overrides(monkeypatch):
     assert response.status_code == status.HTTP_200_OK
     assert response.headers["X-RateLimit-Scope"] == "endpoint"
     assert response.headers["X-RateLimit-Limit"] == "30"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_middleware_fails_closed_when_redis_errors(monkeypatch):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr("api.limiter.DistributedRateLimiter.get_redis", boom)
+
+    allowed = await limiter_module.limiter.check_rate_limit(
+        identifier="ip:203.0.113.10",
+        endpoint="POST /api/v1/reports/generate",
+        limit=5,
+        window_seconds=60,
+    )
+
+    assert allowed is False
 
 
 @pytest.mark.asyncio

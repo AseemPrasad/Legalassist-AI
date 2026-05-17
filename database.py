@@ -105,6 +105,9 @@ __all__ = [
     "get_pending_otp",
     "mark_otp_as_used",
     "cleanup_expired_otps",
+    "revoke_token",
+    "is_token_revoked",
+    "cleanup_expired_revoked_tokens",
     "create_case",
     "get_user_cases",
     "get_case_by_id",
@@ -281,6 +284,28 @@ def cleanup_expired_otps(db: Session) -> int:
     """Delete expired OTP records"""
     now = dt.datetime.now(dt.timezone.utc)
     deleted = db.query(OTPVerification).filter(OTPVerification.expires_at < now).delete()
+    db.commit()
+    return deleted
+
+
+def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
+    """Persist a JWT revocation record."""
+    token = RevokedToken(jti=jti, expires_at=expires_at)
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    return token
+
+
+def is_token_revoked(db: Session, jti: str) -> bool:
+    """Check whether a JWT has already been revoked."""
+    return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+
+
+def cleanup_expired_revoked_tokens(db: Session) -> int:
+    """Delete expired JWT revocation records."""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = db.query(RevokedToken).filter(RevokedToken.expires_at < now).delete()
     db.commit()
     return deleted
 
