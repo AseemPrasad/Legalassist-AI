@@ -3,11 +3,10 @@
 Phase 1 scope (approved):
 - Real PDF generation wired to the existing branded generator in `pdf_exporter.py`.
 
-Notes:
-- For now, the service writes generated files to local disk and returns the
-  absolute path. Celery returns `report_id` and metadata so API can stream
-  the file.
-- DOCX/XLSX/batch/signatures will be added in later phases.
+Storage:
+- Supports both local filesystem and S3-compatible storage for distributed deployments.
+- Set REPORT_STORAGE_TYPE=s3 for cloud deployments, or local (default) for single-node.
+- S3 configuration via AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET env vars.
 """
 
 from __future__ import annotations
@@ -30,6 +29,7 @@ class GeneratedReport:
     file_name: str
     mime_type: str
     file_size_bytes: int
+    storage_type: str = "local"  # "local" or "s3"
 
 
 def _safe_filename(name: str) -> str:
@@ -40,11 +40,65 @@ def _safe_filename(name: str) -> str:
     return name[:180] if len(name) > 180 else name
 
 
+class S3Storage:
+    """S3-compatible storage for distributed report access."""
+    
+    def __init__(self):
+        self.bucket = os.getenv("S3_BUCKET", "legalassist-reports")
+        self.region = os.getenv("AWS_REGION", "us-east-1")
+        self._client = None
+    
+    @property
+    def client(self):
+        if self._client is None:
+            try:
+                import boto3
+                self._client = boto3.client(
+                    "s3",
+                    region_name=self.region,
+                    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                )
+            except ImportError:
+                raise RuntimeError("boto3 required for S3 storage. Install: pip install boto3")
+        return self._client
+    
+    def upload(self, key: str, data: bytes) -> str:
+        self.client.put_object(Bucket=self.bucket, Key=key, Body=data)
+        return f"s3://{self.bucket}/{key}"
+    
+    def download(self, key: str) -> bytes:
+        response = self.client.get_object(Bucket=self.bucket, Key=key)
+        return response["Body"].read()
+    
+    def exists(self, key: str) -> bool:
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=key)
+            return True
+        except:
+            return False
+
+
+_storage_type = os.getenv("REPORT_STORAGE_TYPE", "local").lower()
+_s3_storage = S3Storage() if _storage_type == "s3" else None
+
+
 def _get_reports_base_dir() -> Path:
-    # Keep it in project workspace so it works in local dev without object storage.
+    if _storage_type == "s3":
+        return Path(f"s3://{_s3_storage.bucket}")
+    # Keep it in project workspace so it works in local dev
     base = Path(os.getenv("REPORTS_OUTPUT_DIR", "./.report_outputs")).resolve()
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def _store_report(file_path: Path, data: bytes, storage_type: str) -> str:
+    """Store report data using appropriate storage backend."""
+    if storage_type == "s3":
+        key = str(file_path).lstrip("/")
+        return _s3_storage.upload(key, data)
+    file_path.write_bytes(data)
+    return str(file_path)
 
 
 def _get_format_meta(format: str) -> tuple[str, str]:
@@ -89,7 +143,8 @@ def generate_report(
     if not pdf_bytes:
         raise RuntimeError("PDF generation returned empty content")
 
-    file_path.write_bytes(pdf_bytes)
+    file_path = out_dir / file_name
+    _store_report(file_path, pdf_bytes, _storage_type)
 
     return GeneratedReport(
         report_id=str(report_id),
@@ -98,5 +153,6 @@ def generate_report(
         file_name=file_name,
         mime_type=mime_type,
         file_size_bytes=len(pdf_bytes),
+        storage_type=_storage_type,
     )
 
