@@ -243,7 +243,7 @@ app = create_app()
 # ============================================================================
 
 if settings.ENABLE_WEBSOCKET:
-    from fastapi import WebSocket, Query
+    from fastapi import WebSocket, WebSocketDisconnect, Query
     from celery_app import TaskStatus
     from api.auth import AuthError, TokenExpiredError, InvalidTokenError
     
@@ -275,30 +275,60 @@ if settings.ENABLE_WEBSOCKET:
             return
         
         await websocket.accept()
-        
-        try:
+
+        async def stream_progress_updates():
             while True:
                 status_info = TaskStatus.get_task_status(job_id)
-                
-                await websocket.send_json({
-                    "job_id": job_id,
-                    "status": status_info["status"],
-                    "progress": status_info["info"].get("progress", 0),
-                    "timestamp": status_info["timestamp"]
-                })
-                
-                # Update every 2 seconds
-                await asyncio.sleep(2)
-                
-                # Stop if completed
-                if status_info["status"] in ["completed", "failed", "cancelled"]:
+
+                try:
                     await websocket.send_json({
                         "job_id": job_id,
                         "status": status_info["status"],
-                        "message": "Job completed"
+                        "progress": status_info["info"].get("progress", 0),
+                        "timestamp": status_info["timestamp"]
                     })
-                    break
+                except WebSocketDisconnect:
+                    return
+
+                if status_info["status"] in ["completed", "failed", "cancelled"]:
+                    try:
+                        await websocket.send_json({
+                            "job_id": job_id,
+                            "status": status_info["status"],
+                            "message": "Job completed"
+                        })
+                    except WebSocketDisconnect:
+                        return
+                    return
+
+                # Update every 2 seconds
+                await asyncio.sleep(2)
+
+        async def watch_for_disconnect():
+            try:
+                async for _ in websocket.iter_text():
+                    pass
+            except WebSocketDisconnect:
+                return
         
+        try:
+            progress_task = asyncio.create_task(stream_progress_updates())
+            disconnect_task = asyncio.create_task(watch_for_disconnect())
+
+            done, pending = await asyncio.wait(
+                {progress_task, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            for task in pending:
+                task.cancel()
+
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            for task in done:
+                task.result()
+
         except Exception as e:
             logger.error("WebSocket error", job_id=job_id, error=str(e))
             await websocket.close(code=1011)
