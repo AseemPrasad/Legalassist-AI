@@ -56,7 +56,8 @@ class APISettings(BaseSettings):
     
     # Authentication
     AUTH_ENABLED: bool = True
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET", os.getenv("JWT_SECRET_KEY", ""))
+    JWT_SECRET_KEY_PREVIOUS: str = os.getenv("JWT_SECRET_PREVIOUS", os.getenv("JWT_SECRET_KEY_PREVIOUS", ""))
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
     JWT_ISSUER: str = os.getenv("JWT_ISSUER", "legalassist.ai")
@@ -68,7 +69,7 @@ class APISettings(BaseSettings):
     def validate_jwt_secret(cls, v: str) -> str:
         if not v or v == "your-secret-key-change-in-production":
             raise ValueError(
-                "JWT_SECRET_KEY must be set to a secure value. "
+                "JWT_SECRET (or JWT_SECRET_KEY) must be set to a secure value. "
                 "Do not use default or placeholder values in production."
             )
         return v
@@ -131,6 +132,18 @@ class APISettings(BaseSettings):
     ENABLE_ANALYTICS: bool = os.getenv("ENABLE_ANALYTICS", "true").lower() == "true"
     
     def __init__(self, **data):
+        # Enforce canonical env var precedence BEFORE Pydantic validates fields.
+        # JWT_SECRET takes priority over the legacy JWT_SECRET_KEY alias.
+        # Init kwargs have the highest priority in Pydantic v2 BaseSettings, so
+        # injecting here ensures the field_validator sees the canonical value.
+        if not data.get("JWT_SECRET_KEY"):
+            canonical = os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY", "")
+            if canonical:
+                data["JWT_SECRET_KEY"] = canonical
+        if not data.get("JWT_SECRET_KEY_PREVIOUS"):
+            canonical_prev = os.getenv("JWT_SECRET_PREVIOUS") or os.getenv("JWT_SECRET_KEY_PREVIOUS", "")
+            if canonical_prev:
+                data["JWT_SECRET_KEY_PREVIOUS"] = canonical_prev
         super().__init__(**data)
         # Parse ALLOWED_HOSTS from environment
         hosts_env = os.getenv("APP_ALLOWED_HOSTS", "")
