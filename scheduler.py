@@ -82,9 +82,11 @@ from db import (
     init_db,
     SessionLocal,
     get_upcoming_deadlines,
+    get_prefs_by_user_ids,
     UserPreference,
 )
 from notifications.reminder_engine import (
+    plan_eligible_reminders,
     should_process_threshold,
     is_notify_enabled,
     is_reminder_time_for_user,
@@ -539,26 +541,24 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
     try:
         logger.info(f"Running synchronous reminder check (target_days={target_days})")
         upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
+        prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
+        prefs_by_user = {pref.user_id: pref for pref in prefs}
+        candidates = plan_eligible_reminders(
+            upcoming_deadlines,
+            prefs_by_user,
+            reminder_time_checker=is_reminder_time_for_user,
+        )
         
         sent_count = 0
-        for deadline in upcoming_deadlines:
-            days_left = deadline.days_until_deadline()
-            
+        for candidate in candidates:
+            deadline = candidate.deadline
+            days_left = candidate.days_left
+
             if target_days and days_left != target_days:
-                continue
-            
-            if days_left not in [30, 10, 3, 1]:
-                continue
-
-            user_preference = db.query(UserPreference).filter(
-                UserPreference.user_id == deadline.user_id
-            ).first()
-
-            if not user_preference:
                 continue
 
             # Send reminders
-            results = notification_service.send_reminders(db, deadline, user_preference, days_left)
+            results = notification_service.send_reminders(db, deadline, candidate.user_preference, days_left)
             sent_count += len([r for r in results if r.success])
 
         logger.info(f"Synchronous check complete. Reminders sent: {sent_count}")

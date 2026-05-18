@@ -1,12 +1,12 @@
 """Reminder decision logic extracted for easy testing.
 
-Pure helper functions and an orchestration builder that converts upcoming
-deadlines into actionable reminder jobs (deadline, user_pref, days_left).
+Pure helper functions and an orchestration planner that converts upcoming
+deadlines plus prefetched user preferences into actionable reminder candidates.
 """
-from typing import Iterable, Tuple
+from dataclasses import dataclass
+from typing import Callable, Dict, Iterable, List
 import datetime as dt
 import pytz
-from sqlalchemy.orm import Session
 
 from db.models.cases import CaseDeadline
 from db.models.notifications import UserPreference
@@ -49,25 +49,54 @@ def is_reminder_time_for_user(user_timezone: str, reminder_hour: int = 8) -> boo
         return user_now.hour == reminder_hour
 
 
-def build_reminder_jobs(upcoming_deadlines: Iterable[CaseDeadline], db: Session) -> Iterable[Tuple[CaseDeadline, UserPreference, int]]:
-    """Yield (deadline, user_pref, days_left) for deadlines that should be processed.
+@dataclass(frozen=True)
+class ReminderCandidate:
+    deadline: CaseDeadline
+    days_left: int
+    timezone: str
+    notify_30_days: bool
+    notify_10_days: bool
+    notify_3_days: bool
+    notify_1_day: bool
+    notification_channel: object
+    user_preference: UserPreference
 
-    This function centralizes threshold checks, preference lookup and timezone
-    eligibility so the scheduler can simply iterate and dispatch jobs.
-    """
-    for deadline in upcoming_deadlines:
+
+def plan_eligible_reminders(
+    deadlines: Iterable[CaseDeadline],
+    prefs_by_user_id: Dict[int, UserPreference],
+    reminder_time_checker: Callable[[str], bool] = is_reminder_time_for_user,
+) -> List[ReminderCandidate]:
+    """Plan reminder candidates from in-memory deadlines and preferences."""
+    candidates: List[ReminderCandidate] = []
+
+    for deadline in deadlines:
         days_left = deadline.days_until_deadline()
         if not should_process_threshold(days_left):
             continue
 
-        user_pref = db.query(UserPreference).filter(UserPreference.user_id == deadline.user_id).first()
+        user_pref = prefs_by_user_id.get(deadline.user_id)
         if not user_pref:
             continue
 
         if not is_notify_enabled(days_left, user_pref):
             continue
 
-        if not is_reminder_time_for_user(user_pref.timezone):
+        if not reminder_time_checker(user_pref.timezone):
             continue
 
-        yield (deadline, user_pref, days_left)
+        candidates.append(
+            ReminderCandidate(
+                deadline=deadline,
+                days_left=days_left,
+                timezone=user_pref.timezone or "UTC",
+                notify_30_days=bool(user_pref.notify_30_days),
+                notify_10_days=bool(user_pref.notify_10_days),
+                notify_3_days=bool(user_pref.notify_3_days),
+                notify_1_day=bool(user_pref.notify_1_day),
+                notification_channel=user_pref.notification_channel,
+                user_preference=user_pref,
+            )
+        )
+
+    return candidates

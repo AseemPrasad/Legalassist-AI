@@ -15,6 +15,7 @@ from .models import (
 from .crud.notifications import (
     create_case_deadline,
     get_upcoming_deadlines,
+    get_prefs_by_user_ids,
     has_notification_been_sent,
     log_notification,
     get_notification_history,
@@ -40,6 +41,7 @@ __all__ = [
     "Case",
     "create_case_deadline",
     "get_upcoming_deadlines",
+    "get_prefs_by_user_ids",
     "has_notification_been_sent",
     "log_notification",
     "get_notification_history",

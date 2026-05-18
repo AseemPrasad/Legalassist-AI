@@ -136,6 +136,7 @@ __all__ = [
     "Report",
     "create_case_deadline",
     "get_upcoming_deadlines",
+    "get_prefs_by_user_ids",
     "get_user_deadlines",
     "has_notification_been_sent",
     "log_notification",
