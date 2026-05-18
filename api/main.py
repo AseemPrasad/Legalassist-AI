@@ -23,6 +23,7 @@ from api.middleware import (
     logging_middleware,
     request_size_limit_middleware
 )
+from api.csrf import CSRFProtectionMiddleware
 from api.limiter import cleanup_limiter
 from observability.integration import initialize_observability_for_environment
 from observability.instrumentation import get_metrics
@@ -60,6 +61,11 @@ middleware = [
     Middleware(
         TrustedHostMiddleware,
         allowed_hosts=settings.ALLOWED_HOSTS
+    ),
+    Middleware(
+        CSRFProtectionMiddleware,
+        allowed_hosts=set(settings.ALLOWED_HOSTS),
+        exempt_paths={"/health", "/ready", "/metrics", "/docs", "/openapi.json"}
     ),
 ]
 
