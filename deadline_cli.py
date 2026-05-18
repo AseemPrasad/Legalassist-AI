@@ -17,8 +17,9 @@ import os
 import sys
 import json
 import logging
+import signal
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Any, Callable
+from typing import Optional, List, Any, Callable, TypeVar, Generator
 from functools import wraps
 
 import click
@@ -93,19 +94,92 @@ def handle_errors(func: Callable) -> Callable:
 
 
 class CLIContext:
-    """Context manager for database sessions and standard CLI resources."""
+    """Context manager for database sessions with transactional rollback on interrupt."""
     def __init__(self):
         self.db = SessionLocal()
-    
+        self._interrupted = False
+
     def __enter__(self):
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is KeyboardInterrupt:
+            self._interrupted = True
+            self.db.rollback()
+            console.print("\n[yellow]⚠ Batch operation interrupted. Changes rolled back.[/yellow]")
+            logger.warning("cli_interrupted", msg="Transaction rolled back due to interrupt")
+            return True
         self.db.close()
         if exc_type:
-            # If an exception occurred, we want to ensure it propagates 
-            # to our handle_errors decorator.
             return False
+
+
+T = TypeVar('T')
+
+
+def batch_update_with_transaction(
+    items: List[T],
+    process_fn: Callable[[T, Any], None],
+    batch_size: int = 50,
+    db_session: Optional[Any] = None,
+) -> Generator[T, None, None]:
+    """
+    Process items in batches with automatic transaction management.
+    Handles KeyboardInterrupt gracefully by rolling back incomplete batches.
+
+    Args:
+        items: List of items to process
+        process_fn: Function to call for each item (receives item and db session)
+        batch_size: Number of items per transaction commit
+        db_session: Optional existing database session
+
+    Yields:
+        Items as they are successfully processed
+    """
+    if db_session is None:
+        db_session = SessionLocal()
+        should_close = True
+    else:
+        should_close = False
+
+    try:
+        for idx, item in enumerate(items):
+            try:
+                process_fn(item, db_session)
+                db_session.commit()
+                yield item
+
+                if (idx + 1) % batch_size == 0:
+                    logger.debug("batch_commit", processed=idx + 1, batch_size=batch_size)
+
+            except KeyboardInterrupt:
+                db_session.rollback()
+                logger.warning(
+                    "batch_interrupted",
+                    processed=idx,
+                    remaining=len(items) - idx - 1,
+                    msg="Rolled back partial changes. Re-run to continue."
+                )
+                raise
+
+            except Exception as e:
+                db_session.rollback()
+                logger.error("batch_item_failed", item_idx=idx, error=str(e))
+                raise
+
+    finally:
+        if should_close:
+            db_session.close()
+
+
+def signal_handler(signum, frame):
+    """Handle SIGINT/SIGTERM gracefully."""
+    console.print("\n[yellow]⚠ Received interrupt signal. Finishing current batch...[/yellow]")
+    sys.exit(130)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 
 # ==============================================================================
