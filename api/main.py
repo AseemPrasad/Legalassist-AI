@@ -263,15 +263,26 @@ if settings.ENABLE_WEBSOCKET:
         """
         WebSocket endpoint for real-time job progress
         
-        Requires authentication via token query parameter.
+        Requires authentication via token query parameter or Sec-WebSocket-Protocol header.
         """
-        if not token:
+        auth_token = token
+        requested_protocols = []
+        
+        if "sec-websocket-protocol" in websocket.headers:
+            header_val = websocket.headers["sec-websocket-protocol"]
+            requested_protocols = [p.strip() for p in header_val.split(",")]
+            if "access_token" in requested_protocols:
+                idx = requested_protocols.index("access_token")
+                if idx + 1 < len(requested_protocols):
+                    auth_token = requested_protocols[idx + 1]
+
+        if not auth_token:
             await websocket.close(code=4001, reason="Authentication required")
             return
         
         try:
             from api.auth import verify_token
-            payload = verify_token(token)
+            payload = verify_token(auth_token)
             user_id = payload.get("sub")
             
             if not user_id:
@@ -281,7 +292,8 @@ if settings.ENABLE_WEBSOCKET:
             await websocket.close(code=4001, reason="Invalid or expired token")
             return
         
-        await websocket.accept()
+        subprotocol = "access_token" if "access_token" in requested_protocols else None
+        await websocket.accept(subprotocol=subprotocol)
 
         async def stream_progress_updates():
             while True:

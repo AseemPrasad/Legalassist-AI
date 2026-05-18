@@ -131,7 +131,7 @@ class Config:
     JWT_ISSUER = _get_val("JWT_ISSUER", "legalassist.ai")
     JWT_AUDIENCE = _get_val("JWT_AUDIENCE", "legalassist-users")
     JWT_EXPIRY_HOURS = _get_int_env("JWT_EXPIRY_HOURS", 7 * 24)
-    JWT_SECRET_PREVIOUS = _get_val("JWT_SECRET_PREVIOUS", _get_val("JWT_SECRET_OLD", ""))
+    JWT_SECRET_PREVIOUS = _get_val("JWT_SECRET_PREVIOUS", _get_val("JWT_SECRET_KEY_PREVIOUS", _get_val("JWT_SECRET_OLD", "")))
     OTP_EXPIRY_MINUTES = _get_int_env("OTP_EXPIRY_MINUTES", 10)
     OTP_MAX_ATTEMPTS = _get_int_env("OTP_MAX_ATTEMPTS", 3)
     OTP_REQUEST_RATE_LIMIT_MAX = _get_int_env("OTP_REQUEST_RATE_LIMIT_MAX", 5)
@@ -163,7 +163,7 @@ class Config:
     @classmethod
     def get_current_jwt_secret(cls) -> str:
         """Return the active JWT signing secret without falling back to placeholders."""
-        return str(_get_val("JWT_SECRET", _get_val("JWT_SECRET_CURRENT", ""))).strip()
+        return str(_get_val("JWT_SECRET", _get_val("JWT_SECRET_KEY", _get_val("JWT_SECRET_CURRENT", "")))).strip()
 
     @classmethod
     def get_jwt_secrets(cls) -> list[str]:
