@@ -17,6 +17,7 @@ from database import (
     DocumentType,
     CaseDocument,
     NotificationLog,
+    RevokedToken,
     init_db,
     create_case_record,
     update_case_outcome,
@@ -31,6 +32,9 @@ from database import (
     get_pending_otp,
     mark_otp_as_used,
     cleanup_expired_otps,
+    revoke_token,
+    cleanup_expired_revoked_tokens,
+    is_token_revoked,
     create_case,
     get_user_cases,
     get_case_by_id,
@@ -47,7 +51,7 @@ from database import (
 
 @pytest.fixture(autouse=True)
 def disable_otp_rate_limiter(monkeypatch):
-    monkeypatch.setattr("database._reserve_otp_rate_limit_slot", lambda email, max_requests_per_hour: 1)
+    monkeypatch.setattr("db.otp_service._reserve_otp_rate_limit_slot", lambda *args, **kwargs: True)
 
 @pytest.fixture(scope="function")
 def test_db():

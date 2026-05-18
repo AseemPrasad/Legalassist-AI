@@ -34,6 +34,9 @@ from database import (
     revoke_token,
     is_token_revoked,
     cleanup_expired_revoked_tokens,
+    OTPVerification,
+    _get_otp_rate_limit_script,
+    _otp_rate_limit_key,
     User,
 )
 

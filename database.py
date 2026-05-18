@@ -1,13 +1,12 @@
 """Compatibility shim for the original monolithic `database.py`.
 
-The project has moved models and CRUD helpers into the `db/` package, but many
-existing imports still point at `database`. This module re-exports the pieces
-needed by the current codebase and keeps the authentication/OTP security path
-working while the refactor continues.
+The project now keeps business logic in `db/` modules and `db.crud.*` helpers.
+This file remains as a stable public API surface for legacy imports.
 """
 
 from __future__ import annotations
 
+from db.attachments_service import create_attachment, get_attachments_for_case
 import datetime as dt
 import hashlib
 import threading
@@ -22,45 +21,82 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from db.base import Base
-from db.session import engine, SessionLocal, init_db, db_session, get_db, _to_utc_datetime, _datetime_for_db
-from db.models import (
-    User,
-    OTPVerification,
-    NotificationStatus,
-    NotificationChannel,
-    NotificationLog,
-    NotificationTemplate,
-    UserPreference,
-    CaseDeadline,
-    Case,
-    CaseDocument,
-    Attachment,
-    CaseTimeline,
-    CaseStatus,
-    DocumentType,
-    UserFeedback,
-    CaseRecord,
-    CaseOutcome,
-    CaseAnalytics,
-    ModelFeedback,
-    ModelPerformance,
-    ModelRoutingRule,
-    SimilarityFeedback,
-    RevokedToken,
-    CaseEmbedding,
-    CaseIssue,
-    CaseArgument,
-    KnowledgeGraphEdge,
-    PrecedentMatch,
-    Report,
+from db.case_service import (
+    create_case,
+    create_case_document,
+    create_case_record,
+    create_timeline_event,
+    delete_case,
+    get_case_by_id,
+    get_case_by_number,
+    get_case_document_by_id,
+    get_case_documents,
+    get_case_record,
+    get_case_timeline,
+    get_cases_by_criteria,
+    get_user_cases,
+    get_user_stats,
+    submit_model_feedback,
+    update_case_document,
+    update_case_outcome,
+    update_case_status,
 )
+from db.crud.feedback import get_user_feedback, submit_user_feedback
 from db.crud.notifications import (
     create_case_deadline,
+    get_notification_history,
+    get_notification_template_for_user,
     get_upcoming_deadlines,
     has_notification_been_sent,
     log_notification,
-    get_notification_history,
 )
+from db.models import (
+    Attachment,
+    Case,
+    CaseAnalytics,
+    CaseArgument,
+    CaseDeadline,
+    CaseDocument,
+    CaseEmbedding,
+    CaseIssue,
+    CaseOutcome,
+    CaseRecord,
+    CaseStatus,
+    CaseTimeline,
+    DocumentType,
+    KnowledgeGraphEdge,
+    ModelFeedback,
+    ModelPerformance,
+    ModelRoutingRule,
+    NotificationChannel,
+    NotificationLog,
+    NotificationStatus,
+    NotificationTemplate,
+    OTPVerification,
+    PrecedentMatch,
+    Report,
+)
+from db.notifications_service import create_or_update_user_preference, get_user_deadlines
+from db.otp_service import (
+    _get_otp_rate_limit_script,
+    _otp_rate_limit_key,
+    _reserve_otp_rate_limit_slot,
+    cleanup_expired_otps,
+    cleanup_expired_revoked_tokens,
+    create_otp_verification,
+    create_user,
+    get_pending_otp,
+    "record_otp_failed_attempt",
+    get_user_by_email,
+    is_token_revoked,
+    mark_otp_as_used,
+    record_otp_failed_attempt,
+    "reset_otp_failed_attempts",
+    revoke_token,
+    reset_otp_failed_attempts,
+    update_user_last_login,
+)
+from db.session import db_session, engine, get_db, init_db, SessionLocal, _datetime_for_db, _to_utc_datetime
 
 __all__ = [
     "Base",
@@ -106,6 +142,7 @@ __all__ = [
     "has_notification_been_sent",
     "log_notification",
     "get_notification_history",
+    "get_notification_template_for_user",
     "create_or_update_user_preference",
     "create_user",
     "get_user_by_email",
@@ -128,15 +165,17 @@ __all__ = [
     "get_case_by_number",
     "update_case_status",
     "delete_case",
+    "get_user_stats",
     "create_case_document",
     "get_case_documents",
     "get_case_document_by_id",
+    "update_case_document",
     "create_case_record",
     "get_case_record",
     "get_cases_by_criteria",
     "update_case_outcome",
-    "submit_user_feedback",
     "get_user_feedback",
+    "submit_user_feedback",
     "submit_model_feedback",
     "get_case_timeline",
     "create_timeline_event",

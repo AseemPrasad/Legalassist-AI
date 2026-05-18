@@ -31,7 +31,7 @@ def test_create_otp_verification_uses_atomic_counter(monkeypatch, test_db):
         assert args == [3600]
         return state["count"]
 
-    monkeypatch.setattr(database, "_get_otp_rate_limit_script", lambda: fake_script)
+    monkeypatch.setattr("db.otp_service._get_otp_rate_limit_script", lambda: fake_script)
 
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
 

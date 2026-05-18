@@ -146,7 +146,7 @@ def test_create_otp_verification_rate_limits_email_and_ip(monkeypatch, test_db):
         state["calls"].append(keys[0])
         return len(state["calls"])
 
-    monkeypatch.setattr(database, "_get_otp_rate_limit_script", lambda: fake_script)
+    monkeypatch.setattr("db.otp_service._get_otp_rate_limit_script", lambda: fake_script)
 
     expires = datetime.now(timezone.utc) + timedelta(minutes=10)
     database.create_otp_verification(
