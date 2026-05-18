@@ -119,6 +119,28 @@ jobs:
           args: --severity-threshold=high
         continue-on-error: true
 
+      - name: Set up Python for Bandit
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          
+      - name: Install Bandit
+        run: pip install bandit
+
+      - name: Run Bandit security scan
+        run: |
+          bandit -r api/ core/ auth.py celery_app.py -f json -o bandit-report.json || true
+          bandit -r api/ core/ auth.py celery_app.py -lll
+
+      - name: Upload Bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report-deploy
+          path: bandit-report.json
+          retention-days: 14
+
   # ==================== Build Docker Image ====================
   build:
     needs: test

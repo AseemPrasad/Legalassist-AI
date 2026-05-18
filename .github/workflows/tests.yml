@@ -94,7 +94,16 @@ jobs:
     
     - name: Run Bandit security scan
       run: |
-        bandit -r core/ database.py notification_service.py scheduler.py -f json -o bandit-report.json || true
+        bandit -r api/ core/ auth.py celery_app.py -f json -o bandit-report.json || true
+        bandit -r api/ core/ auth.py celery_app.py -lll
+        
+    - name: Upload Bandit report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: bandit-report-tests
+        path: bandit-report.json
+        retention-days: 14
     
     - name: Check dependencies with Safety
       run: |

@@ -66,6 +66,7 @@ We take the security of our legal assistance platform seriously. If you discover
 - Production deployments must use HTTPS at the ingress or load balancer; application URLs must begin with `https://`.
 - `DEBUG` and `TESTING` must remain disabled in production.
 - CI should run `scripts/check_secrets_policy.py` before deployment to catch committed secrets or unsafe defaults.
+- CI pipelines fail on HIGH severity Bandit findings. MEDIUM severity findings must be reviewed and ignored using `# nosec` only if justified.
 
 ---
 *Thank you for helping keep Legalassist-AI secure!* 🙏
