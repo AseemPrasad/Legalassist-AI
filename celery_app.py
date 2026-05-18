@@ -418,30 +418,50 @@ def generate_report_task(
     self,
     user_id: str,
     case_id: str,
+    report_id: str,
     report_type: str = "comprehensive",
     format: str = "pdf"
 ) -> Dict[str, Any]:
     """
     Asynchronous task to generate a formal report for a legal case.
     
+    This task now:
+    - Accepts report_id (created by API before task enqueue)
+    - Updates Report DB record on start/completion/failure
+    - Stores file_path in DB (no more glob pattern fragility)
+    
     Args:
         user_id (str): The ID of the user requesting the report.
         case_id (str): The ID of the case for which the report is generated.
+        report_id (str): Unique report UUID created by API.
         report_type (str): The type of report (e.g., 'summary', 'comprehensive').
         format (str): The output format ('pdf', 'html', etc.).
         
     Returns:
         Dict[str, Any]: Metadata about the generated report file.
     """
+    # Import DB utilities locally to avoid circular dependencies
+    from db.session import get_db
+    from db.crud import update_report_status
+    
     # Idempotency: avoid regenerating same report repeatedly
     idemp = IdempotencyManager()
     idempotency_key = f"report:{user_id}:{case_id}:{report_type}:{format}"
     if not idemp.acquire(idempotency_key, ttl=600):
         existing = idemp.get_result(idempotency_key)
-        logger.info("generate_report_duplicate_skipped", key=idempotency_key, task_id=self.request.id)
-        return existing or {"status": "duplicate", "task_id": self.request.id}
+        logger.info("generate_report_duplicate_skipped", key=idempotency_key, task_id=self.request.id, report_id=report_id)
+        return existing or {"status": "duplicate", "task_id": self.request.id, "report_id": report_id}
 
     try:
+        # Mark task as started in DB
+        db = next(get_db())
+        update_report_status(
+            db,
+            report_id,
+            status="processing",
+            started_at=datetime.utcnow()
+        )
+        
         # Step 1: Data Aggregation
         self.update_state(
             state="PROGRESS", 
@@ -452,7 +472,8 @@ def generate_report_task(
             "Starting report generation",
             task_id=self.request.id,
             user_id=user_id,
-            case_id=case_id
+            case_id=case_id,
+            report_id=report_id
         )
         
         # Step 2: Content Formatting
@@ -476,8 +497,6 @@ def generate_report_task(
         # Import the report service locally to avoid circular dependencies
         from report_service import generate_report
 
-        report_id = str(uuid.uuid4())
-        
         # Execute the actual report generation logic
         generated = generate_report(
             user_id=user_id,
@@ -490,11 +509,23 @@ def generate_report_task(
             report_id=report_id,
         )
 
+        # Update Report record with completion details
+        file_path_str = str(generated.file_path)
+        db = next(get_db())
+        update_report_status(
+            db,
+            report_id,
+            status="completed",
+            file_path=file_path_str,
+            file_size_bytes=generated.file_size_bytes,
+            completed_at=datetime.utcnow()
+        )
+
         # Prepare the result metadata for the frontend
         result = {
             "report_id": report_id,
             "format": generated.format,
-            "file_path": str(generated.file_path),
+            "file_path": file_path_str,
             "file_name": generated.file_name,
             "mime_type": generated.mime_type,
             "file_size_bytes": generated.file_size_bytes,
@@ -512,10 +543,24 @@ def generate_report_task(
         return result
     
     except Exception as e:
+        # Mark report as failed in DB
+        try:
+            db = next(get_db())
+            update_report_status(
+                db,
+                report_id,
+                status="failed",
+                error_message=str(e),
+                completed_at=datetime.utcnow()
+            )
+        except Exception as db_err:
+            logger.error("Failed to update report status on error", report_id=report_id, db_error=str(db_err))
+        
         logger.error(
             "Report generation failed",
             task_id=self.request.id,
             case_id=case_id,
+            report_id=report_id,
             error=str(e)
         )
         raise

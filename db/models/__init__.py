@@ -2,6 +2,7 @@ from .notifications import NotificationStatus, NotificationChannel, Notification
 from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseStatus, DocumentType
 from .auth import User, OTPVerification
 from .feedback import UserFeedback
+from .reports import Report, ReportStatus, ReportType, ReportFormat
 from .analytics import (
     CaseRecord,
     CaseOutcome,
@@ -34,6 +35,10 @@ __all__ = [
     "User",
     "OTPVerification",
     "UserFeedback",
+    "Report",
+    "ReportStatus",
+    "ReportType",
+    "ReportFormat",
     "CaseRecord",
     "CaseOutcome",
     "CaseAnalytics",
