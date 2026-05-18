@@ -73,5 +73,3 @@ __all__ = [
     'init_i18n',
     '_',
 ]
-    'validate_pdf_metadata',
-]

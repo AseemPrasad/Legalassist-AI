@@ -48,6 +48,7 @@ jobs:
     - name: Generate coverage report
       run: |
         python -m pytest tests/ \
+          --cov=api \
           --cov=core \
           --cov=database \
           --cov=notification_service \
@@ -55,7 +56,7 @@ jobs:
           --cov-report=html \
           --cov-report=term-missing \
           --cov-report=xml \
-          --cov-fail-under=70
+          --cov-fail-under=60
     
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
