@@ -747,7 +747,8 @@ def cleanup_old_data() -> int:
 def init_auth_session():
     """Initialize authentication state in Streamlit session"""
     import streamlit as st
-
+    
+    # Initialize auth state keys
     if "user_token" not in st.session_state:
         st.session_state.user_token = None
     if "user_email" not in st.session_state:
@@ -756,6 +757,65 @@ def init_auth_session():
         st.session_state.user_id = None
     if "is_authenticated" not in st.session_state:
         st.session_state.is_authenticated = False
+    if "session_created_at" not in st.session_state:
+        st.session_state.session_created_at = None
+
+
+def validate_auth_state() -> bool:
+    """
+    Validate authentication state with multi-tab resilience.
+    Returns True if valid, False if session needs reset.
+    """
+    import streamlit as st
+    from datetime import datetime, timezone
+    
+    if not st.session_state.get("is_authenticated"):
+        return False
+    
+    token = st.session_state.get("user_token")
+    if not token:
+        return False
+    
+    # Verify token is still valid
+    try:
+        payload = verify_jwt_token(token)
+        if not payload:
+            # Token invalid/expired - clear state
+            clear_auth_session()
+            return False
+        
+        # Check for forced logout flag (set by logout in any tab)
+        if st.session_state.get("force_logout"):
+            clear_auth_session()
+            st.session_state.force_logout = False
+            return False
+        
+        return True
+    except Exception:
+        clear_auth_session()
+        return False
+
+
+def clear_auth_session():
+    """Clear all authentication state"""
+    import streamlit as st
+    
+    st.session_state.user_token = None
+    st.session_state.user_email = None
+    st.session_state.user_id = None
+    st.session_state.is_authenticated = False
+    st.session_state.session_created_at = None
+
+
+def force_logout_all_tabs():
+    """Force logout across all tabs by setting flag"""
+    import streamlit as st
+    
+    st.session_state.force_logout = True
+    st.session_state.user_token = None
+    st.session_state.user_email = None
+    st.session_state.user_id = None
+    st.session_state.is_authenticated = False
 
 
 def login_user(email: str) -> bool:
@@ -850,7 +910,10 @@ def logout_user():
             # We continue with session clearing even if revocation fails
             # to prioritize local data privacy.
     
-    # Step 2: Aggressive Session State Wipe.
+    # Step 2: Set force logout flag for multi-tab synchronization
+    force_logout_all_tabs()
+    
+    # Step 3: Aggressive Session State Wipe.
     # Instead of just setting individual keys to None, we iterate through
     # every key currently registered in the Streamlit session and delete it.
     # This ensures that ANY data stored by the app (including custom keys
@@ -883,13 +946,14 @@ def require_auth() -> bool:
     import streamlit as st
 
     init_auth_session()
-
-    if st.session_state.is_authenticated and st.session_state.user_token:
-        # Verify token is still valid
-        payload = verify_jwt_token(st.session_state.user_token)
-        if payload:
-            return True
-        else:
+    
+    # Use validation with multi-tab support
+    if validate_auth_state():
+        return True
+    
+    # Token invalid/expired - clear state
+    clear_auth_session()
+    return False
             # =========================================================================
             # CRITICAL SECURITY AND STATE MANAGEMENT FIX
             # =========================================================================
