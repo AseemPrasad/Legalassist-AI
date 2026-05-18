@@ -13,7 +13,7 @@ import hashlib
 
 from api.config import get_settings
 from database import SessionLocal, is_token_revoked
-from db.models import APIKey
+from db.models import APIKey, User
 
 
 class AuthError(Exception):
@@ -224,18 +224,27 @@ async def get_current_user(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token"
             )
-        
+
         user_id = payload.get("sub")
-        email = payload.get("email")
-        role = payload.get("role", "user")
-        
+        token_email = payload.get("email")
+
         if not user_id:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token payload"
             )
-        
-        return CurrentUser(user_id, email, role)
+
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.id == int(user_id)).first()
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="User not found"
+                )
+            return CurrentUser(user.id, user.email, "admin" if user.is_verified else "user")
+        finally:
+            db.close()
     
     # Try API Key from header — look up in database only.
     # Never treat API keys as JWTs; they are opaque secrets validated by hash.
