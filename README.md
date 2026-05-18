@@ -51,6 +51,8 @@ LegalEase AI now supports command-line processing for legal aid teams handling m
 
 ```bash
 pip install -r requirements.txt
+# Optional: Install Twilio and SendGrid for notifications and OTP delivery
+pip install -r requirements-notifications.txt
 ```
 
 3. Set API environment variables:

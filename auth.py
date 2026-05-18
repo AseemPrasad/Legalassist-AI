@@ -17,8 +17,13 @@ from config import Config
 
 import uuid
 import jwt
-import sendgrid
-from sendgrid.helpers.mail import Mail
+
+try:
+    import sendgrid
+    from sendgrid.helpers.mail import Mail
+except ImportError:
+    sendgrid = None
+    Mail = None
 
 from database import (
     SessionLocal,
@@ -133,14 +138,14 @@ def send_otp_email(email: str, otp: str) -> bool:
         api_key = os.getenv("SENDGRID_API_KEY")
         from_email = os.getenv("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
 
-        if not api_key:
+        if not api_key or sendgrid is None:
             if _is_debug_or_testing_mode():
-                logger.warning("SendGrid API key not configured - using masked OTP logging for debug/test mode")
+                logger.warning("SendGrid API key not configured or sendgrid package not installed - using masked OTP logging for debug/test mode")
                 logger.debug(f"OTP for {email}: [MASKED-{otp[:2]}***{otp[-1]}]")
                 return True  # Simulate success only in explicit debug/testing environments
             logger.error(
-                f"SendGrid API key not configured — OTP delivery failed for {email}. "
-                "Set SENDGRID_API_KEY to enable email authentication."
+                f"SendGrid API key not configured or sendgrid package not installed — OTP delivery failed for {email}. "
+                "Set SENDGRID_API_KEY and install requirements-notifications.txt to enable email authentication."
             )
             return False
 
