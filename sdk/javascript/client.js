@@ -240,7 +240,8 @@ class LegalassistClient {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws/progress/${jobId}`;
 
-    const ws = new WebSocket(wsUrl);
+    const protocols = this.token ? ["access_token", this.token] : [];
+    const ws = new WebSocket(wsUrl, protocols);
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
