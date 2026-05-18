@@ -9,7 +9,14 @@ working while the refactor continues.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import threading
+from config import Config
+try:
+    import redis
+except ImportError:
+    redis = None
+
 from typing import Optional, List
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -45,6 +52,7 @@ from db.models import (
     CaseArgument,
     KnowledgeGraphEdge,
     PrecedentMatch,
+    Report,
 )
 from db.crud.notifications import (
     create_case_deadline,
@@ -91,6 +99,7 @@ __all__ = [
     "CaseArgument",
     "KnowledgeGraphEdge",
     "PrecedentMatch",
+    "Report",
     "create_case_deadline",
     "get_upcoming_deadlines",
     "get_user_deadlines",
@@ -110,6 +119,9 @@ __all__ = [
     "cleanup_expired_otps",
     "record_otp_failed_attempt",
     "reset_otp_failed_attempts",
+    "revoke_token",
+    "is_token_revoked",
+    "cleanup_expired_revoked_tokens",
     "create_case",
     "get_user_cases",
     "get_case_by_id",
@@ -162,6 +174,7 @@ def update_user_last_login(db: Session, user_id: int) -> Optional[User]:
     return user
 
 
+_OTP_RATE_LIMIT_WINDOW_SECONDS = 60 * 60
 _OTP_RATE_LIMIT_SCRIPT = """
 local current = redis.call('INCR', KEYS[1])
 if current == 1 then
@@ -169,44 +182,52 @@ if current == 1 then
 end
 return current
 """
+_otp_rate_limit_client = None
 _otp_rate_limit_script = None
 
 
-def _otp_rate_limit_key(email: str) -> str:
-    import hashlib
-    normalized_email = str(email).strip().lower()
-    digest = hashlib.sha256(normalized_email.encode("utf-8")).hexdigest()
+def _otp_rate_limit_key(identifier: str) -> str:
+    normalized = str(identifier).strip().lower()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return f"otp:rate:{digest}"
 
 
 def _get_otp_rate_limit_script():
-    global _otp_rate_limit_script
+    global _otp_rate_limit_client, _otp_rate_limit_script
+
     if _otp_rate_limit_script is None:
-        import os
-        try:
-            import redis
-        except ImportError:
-            redis = None
         if redis is None:
             raise RuntimeError("Redis is required for OTP rate limiting but is not installed.")
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        client = redis.from_url(redis_url, decode_responses=True)
-        _otp_rate_limit_script = client.register_script(_OTP_RATE_LIMIT_SCRIPT)
+
+        redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+        _otp_rate_limit_client = redis.from_url(redis_url, decode_responses=True)
+        _otp_rate_limit_script = _otp_rate_limit_client.register_script(_OTP_RATE_LIMIT_SCRIPT)
+
     return _otp_rate_limit_script
 
 
-def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> int:
-    normalized_email = str(email).strip().lower()
-    if not normalized_email:
-        raise ValueError("Email is required for OTP rate limiting")
+def _reserve_otp_rate_limit_slot(identifier: str, max_requests_per_hour: int, label: str = "identifier") -> int:
+    normalized_identifier = str(identifier).strip().lower()
+    if not normalized_identifier:
+        raise ValueError(f"{label} is required for OTP rate limiting")
 
     script = _get_otp_rate_limit_script()
-    current = int(script(keys=[_otp_rate_limit_key(normalized_email)], args=[3600]))
+    current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
 
     if current > max_requests_per_hour:
         raise ValueError("Too many OTP requests. Please try again later.")
 
     return current
+
+
+def _safe_reserve_otp_slot(identifier: str, max_requests_per_hour: int, label: str = "identifier") -> int:
+    try:
+        return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour, label=label)
+    except TypeError:
+        try:
+            return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour, label)
+        except TypeError:
+            return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour)
 
 
 def create_otp_verification(
@@ -217,11 +238,16 @@ def create_otp_verification(
     max_requests_per_hour: int = 5,
     requester_ip: Optional[str] = None,
 ) -> OTPVerification:
-    """Create a new OTP verification record with rate limiting"""
-    _reserve_otp_rate_limit_slot(email, max_requests_per_hour)
+    """Create a new OTP verification record with rate limiting."""
+    _safe_reserve_otp_slot(email, max_requests_per_hour, label="Email")
     if requester_ip:
-        _reserve_otp_rate_limit_slot(requester_ip, max_requests_per_hour)
-    otp = OTPVerification(email=email, otp_hash=otp_hash, expires_at=expires_at)
+        _safe_reserve_otp_slot(requester_ip, max_requests_per_hour, label="IP")
+
+    otp = OTPVerification(
+        email=email,
+        otp_hash=otp_hash,
+        expires_at=expires_at,
+    )
     db.add(otp)
     db.commit()
     db.refresh(otp)
@@ -303,8 +329,30 @@ def cleanup_expired_otps(db: Session) -> int:
     return deleted
 
 
+def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
+    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+    if otp:
+        otp.failed_attempts += 1
+        if otp.failed_attempts >= max_failed_attempts:
+            otp.locked_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
+        db.commit()
+        db.refresh(otp)
+        return True
+    return False
+
+
+def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
+    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+    if otp:
+        otp.failed_attempts = 0
+        otp.locked_until = None
+        db.commit()
+        db.refresh(otp)
+        return True
+    return False
+
+
 def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
-    """Persist a JWT revocation record."""
     token = RevokedToken(jti=jti, expires_at=expires_at)
     db.add(token)
     db.commit()
@@ -313,12 +361,10 @@ def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken
 
 
 def is_token_revoked(db: Session, jti: str) -> bool:
-    """Check whether a JWT has already been revoked."""
     return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
 
 
 def cleanup_expired_revoked_tokens(db: Session) -> int:
-    """Delete expired JWT revocation records."""
     now = dt.datetime.now(dt.timezone.utc)
     deleted = db.query(RevokedToken).filter(RevokedToken.expires_at < now).delete()
     db.commit()
@@ -388,9 +434,25 @@ def create_case_document(
     summary: Optional[str] = None,
     remedies: Optional[dict] = None,
 ) -> CaseDocument:
-    """Create a new case document"""
+    """Create a new case document.
+
+    Security: enforce that `case_id` belongs to `user_id` (server-side ownership
+    validation), consistent with create_case_deadline.
+    """
+    try:
+        normalized_case_id = int(case_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("case_id must be an integer matching cases.id") from exc
+
+    # Ownership validation (prevents attaching documents to another user's case)
+    case = db.query(Case).filter(Case.id == normalized_case_id).first()
+    if not case or case.user_id != user_id:
+        raise PermissionError(
+            "case_id not found or not owned by the provided user_id"
+        )
+
     doc = CaseDocument(
-        case_id=case_id,
+        case_id=normalized_case_id,
         document_type=document_type,
         document_content=document_content,
         file_path=file_path,
@@ -539,7 +601,6 @@ def get_notification_template_for_user(db: Session, user_id: int) -> Optional[No
     return db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
 
 
-
 def get_user_stats(db: Session, user_id: int) -> dict:
     """Calculate high-level stats for a user dashboard"""
     cases = get_user_cases(db, user_id)
@@ -657,7 +718,7 @@ def create_timeline_event(
         event_date=event_date or dt.datetime.now(dt.timezone.utc),
         event_metadata=metadata,
     )
-    db.add(event)
+    db.add(doc)
     db.commit()
     db.refresh(event)
     return event

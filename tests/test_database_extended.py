@@ -38,6 +38,7 @@ from database import (
     update_case_status,
     delete_case,
     create_case_document,
+    create_timeline_event,
     create_case_deadline,
     get_user_deadlines,
     get_upcoming_deadlines,
@@ -237,6 +238,25 @@ class TestDatabaseExtended:
         success = delete_case(test_db, case.id)
         assert success == True
         assert get_case_by_id(test_db, case.id) is None
+
+    def test_create_timeline_event(self, test_db):
+        """Timeline events should be created without leaking document helper state."""
+        user = create_user(test_db, "timeline@example.com")
+        case = create_case(test_db, user.id, "CASE-TL-001", "civil", "Delhi")
+
+        event = create_timeline_event(
+            test_db,
+            case.id,
+            "status_changed",
+            "Case moved to hearing stage",
+            metadata={"previous_status": "filed", "new_status": "hearing"},
+        )
+
+        assert event.case_id == case.id
+        assert event.event_type == "status_changed"
+        assert event.description == "Case moved to hearing stage"
+        assert event.event_metadata == {"previous_status": "filed", "new_status": "hearing"}
+        assert event.id is not None
 
     def test_init_db(self):
         """Test database initialization (schema creation)"""

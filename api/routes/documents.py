@@ -4,6 +4,7 @@ POST /api/v1/analyze/document - Analyze document asynchronously
 GET /api/v1/analyze/{job_id} - Check analysis job status
 """
 import uuid
+from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
 from fastapi import Request
 from api.models import DocumentAnalysisRequest, DocumentAnalysisSummary, AnalysisJobResponse

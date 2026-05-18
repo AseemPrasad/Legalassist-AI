@@ -514,7 +514,8 @@ def generate_report_task(
     user_id: str,
     case_id: str,
     report_type: str = "comprehensive",
-    format: str = "pdf"
+    format: str = "pdf",
+    report_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Asynchronous task to generate a formal report for a legal case.
@@ -524,16 +525,37 @@ def generate_report_task(
         case_id (str): The ID of the case for which the report is generated.
         report_type (str): The type of report (e.g., 'summary', 'comprehensive').
         format (str): The output format ('pdf', 'html', etc.).
+        report_id (str, optional): Pre-generated report ID.
         
     Returns:
         Dict[str, Any]: Metadata about the generated report file.
     """
+    report_id = report_id or str(uuid.uuid4())
+
+    from db.session import db_session
+    from db.models.reports import Report
+
+    # Update status to processing in DB
+    with db_session() as db:
+        db_report = db.query(Report).filter(Report.report_id == report_id).first()
+        if db_report:
+            db_report.status = "processing"
+            db_report.job_id = self.request.id
+            db.commit()
+
     # Idempotency: avoid regenerating same report repeatedly
     idemp = IdempotencyManager()
     idempotency_key = f"report:{user_id}:{case_id}:{report_type}:{format}"
     if not idemp.acquire(idempotency_key, ttl=600):
         existing = idemp.get_result(idempotency_key)
         logger.info("generate_report_duplicate_skipped", key=idempotency_key, task_id=self.request.id)
+        if existing:
+            with db_session() as db:
+                db_report = db.query(Report).filter(Report.report_id == report_id).first()
+                if db_report:
+                    db_report.status = "completed"
+                    db_report.completed_at = datetime.utcnow()
+                    db.commit()
         return existing or {"status": "duplicate", "task_id": self.request.id}
 
     try:
@@ -571,8 +593,6 @@ def generate_report_task(
         # Import the report service locally to avoid circular dependencies
         from report_service import generate_report
 
-        report_id = str(uuid.uuid4())
-        
         # Execute the actual report generation logic
         generated = generate_report(
             user_id=user_id,
@@ -603,6 +623,13 @@ def generate_report_task(
             report_id=report_id
         )
         
+        with db_session() as db:
+            db_report = db.query(Report).filter(Report.report_id == report_id).first()
+            if db_report:
+                db_report.status = "completed"
+                db_report.completed_at = datetime.utcnow()
+                db.commit()
+
         idemp.mark_completed(idempotency_key, result)
         return result
     
@@ -613,6 +640,11 @@ def generate_report_task(
             case_id=case_id,
             error=str(e)
         )
+        with db_session() as db:
+            db_report = db.query(Report).filter(Report.report_id == report_id).first()
+            if db_report:
+                db_report.status = "failed"
+                db.commit()
         raise
     finally:
         try:
