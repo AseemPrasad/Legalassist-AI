@@ -8,92 +8,72 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from db.models import Attachment, Case, CaseDeadline, CaseDocument, CaseTimeline
+from db.models.dtos import CaseSummaryDTO, CaseDetailDTO, DocumentDTO, DeadlineDTO, TimelineDTO, AttachmentDTO
+from db.repositories.case_queries import fetch_case_summary_data_batch, fetch_case_detail_data_batch
 from .timeline_service import timeline_service
 
 
 def get_user_cases_summary(db: Session, user_id: int, include_closed: bool = True) -> List[Dict[str, Any]]:
+    """
+    Get summary of all cases for a user.
+    
+    Optimized to use batched queries instead of N+1 queries.
+    Fetches latest document, next deadline, and document count per case in batch.
+    """
     cases = db.query(Case).filter(Case.user_id == user_id).all()
     if not include_closed:
         cases = [case for case in cases if case.status.value != "closed"]
 
+    if not cases:
+        return []
+    
+    case_ids = [case.id for case in cases]
+    
+    # Fetch all related data in batch (3 queries instead of 3*N)
+    latest_docs, next_deadlines, doc_counts = fetch_case_summary_data_batch(db, case_ids)
+    
+    # Build DTOs and convert to dicts
     summaries = []
     for case in cases:
-        latest_doc = db.query(CaseDocument).filter(CaseDocument.case_id == case.id).order_by(CaseDocument.uploaded_at.desc()).first()
-        next_deadline = db.query(CaseDeadline).filter(
-            CaseDeadline.case_id == case.id,
-            CaseDeadline.is_completed == False,
-            CaseDeadline.deadline_date > datetime.now(timezone.utc),
-        ).order_by(CaseDeadline.deadline_date).first()
-        doc_count = db.query(CaseDocument).filter(CaseDocument.case_id == case.id).count()
-
-        summaries.append({
-            "id": case.id,
-            "case_number": case.case_number,
-            "title": case.title or case.case_number,
-            "case_type": case.case_type,
-            "jurisdiction": case.jurisdiction,
-            "status": case.status.value,
-            "created_at": case.created_at.isoformat(),
-            "latest_document_type": latest_doc.document_type.value if latest_doc else None,
-            "latest_document_date": latest_doc.uploaded_at.isoformat() if latest_doc else None,
-            "next_deadline_date": next_deadline.deadline_date.isoformat() if next_deadline else None,
-            "next_deadline_type": next_deadline.deadline_type if next_deadline else None,
-            "days_until_deadline": next_deadline.days_until_deadline() if next_deadline else None,
-            "document_count": doc_count,
-        })
+        dto = CaseSummaryDTO.from_case_and_data(
+            case,
+            latest_docs.get(case.id),
+            next_deadlines.get(case.id),
+            doc_counts.get(case.id, 0),
+        )
+        summaries.append(dto.to_dict())
 
     return summaries
 
 
 def get_case_detail(db: Session, user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Get complete case details.
+    
+    Fetches case, documents, deadlines, timeline, and attachments.
+    """
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case or case.user_id != user_id:
         return None
 
-    documents = db.query(CaseDocument).filter(CaseDocument.case_id == case_id).all()
-    docs_list = [
-        {
-            "id": doc.id,
-            "document_type": doc.document_type.value,
-            "uploaded_at": doc.uploaded_at.isoformat(),
-            "summary": doc.summary,
-            "has_remedies": bool(doc.remedies),
-        }
-        for doc in documents
-    ]
-
-    attachments = db.query(Attachment).filter(Attachment.case_id == case_id).all()
-    attachments_list = [
-        {
-            "id": a.id,
-            "original_filename": a.original_filename,
-            "uploaded_at": a.uploaded_at.isoformat(),
-            "size_bytes": a.size_bytes,
-            "content_type": a.content_type,
-        }
-        for a in attachments
-    ]
-
-    deadlines = db.query(CaseDeadline).filter(CaseDeadline.case_id == case_id).order_by(CaseDeadline.deadline_date).all()
-    deadlines_list = [
-        {
-            "id": d.id,
-            "deadline_type": d.deadline_type,
-            "deadline_date": d.deadline_date.isoformat(),
-            "description": d.description,
-            "is_completed": d.is_completed,
-            "days_until": d.days_until_deadline(),
-        }
-        for d in deadlines
-    ]
-
-    latest_doc = documents[-1] if documents else None
-    remedies = latest_doc.remedies if latest_doc else None
-
-    timeline_list = timeline_service.get_case_timeline_events(db, case_id)
-
-    return {
-        "case": {
+    # Fetch all related data in batch
+    documents, deadlines, timeline, attachments = fetch_case_detail_data_batch(db, case_id)
+    
+    # Build DTOs
+    docs_list = [DocumentDTO.from_entity(doc) for doc in documents]
+    deadlines_list = [DeadlineDTO.from_entity(d) for d in deadlines]
+    timeline_list = [TimelineDTO.from_entity(t) for t in timeline]
+    attachments_list = [AttachmentDTO.from_entity(a) for a in attachments]
+    
+    # Get latest document's remedies
+    remedies = documents[0].remedies if documents else None
+    
+    # Get timeline events via service (keeps existing behavior)
+    timeline_events = timeline_service.get_case_timeline_events(db, case_id)
+    
+    # Build and return detail DTO
+    detail = CaseDetailDTO(
+        case={
             "id": case.id,
             "case_number": case.case_number,
             "title": case.title,
@@ -102,12 +82,14 @@ def get_case_detail(db: Session, user_id: int, case_id: int) -> Optional[Dict[st
             "status": case.status.value,
             "created_at": case.created_at.isoformat(),
         },
-        "documents": docs_list,
-        "deadlines": deadlines_list,
-        "remedies": remedies,
-        "attachments": attachments_list,
-        "timeline": timeline_list,
-    }
+        documents=docs_list,
+        deadlines=deadlines_list,
+        attachments=attachments_list,
+        timeline=timeline_events,
+        remedies=remedies,
+    )
+    
+    return detail.to_dict()
 
 
 def generate_case_summary_text(db: Session, user_id: int, case_id: int) -> Optional[str]:
