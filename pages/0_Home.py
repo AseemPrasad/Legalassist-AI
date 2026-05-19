@@ -20,6 +20,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from core.app_utils import (
     get_client,
+    get_default_model,
     extract_text_from_pdf,
     compress_text,
     english_leakage_detected,
@@ -155,7 +156,7 @@ def render_page():
                     safe_text = compress_text(raw_text)
 
                     prompt = build_prompt(safe_text, language)
-                    model_id = "meta-llama/llama-3.1-8b-instruct"
+                    model_id = get_default_model()
 
                     # Use safe_llm_call for robust error handling and retries
                     summary_raw, error = safe_llm_call(
