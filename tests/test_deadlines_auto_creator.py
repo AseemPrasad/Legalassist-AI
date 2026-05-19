@@ -1,5 +1,10 @@
-import pytest
+import datetime as dt
+import types
 
+import pytest
+from unittest.mock import MagicMock
+
+import services.deadlines_auto_creator as deadlines_auto_creator
 from services.deadlines_auto_creator import _extract_days_from_text, _validate_days_value
 
 
@@ -51,3 +56,38 @@ def test_extract_days_from_text_invalid_inputs(text):
 )
 def test_validate_days_value_bounds(days, expected):
     assert _validate_days_value(days) is expected
+
+
+def test_auto_create_deadlines_from_remedies_keeps_utc_across_midnight(monkeypatch):
+    fixed_now = dt.datetime(2026, 5, 19, 23, 55, tzinfo=dt.timezone.utc)
+
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    monkeypatch.setattr(
+        deadlines_auto_creator,
+        "dt",
+        types.SimpleNamespace(
+            datetime=FixedDateTime,
+            timedelta=dt.timedelta,
+            timezone=dt.timezone,
+        ),
+    )
+
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.first.return_value = None
+
+    deadlines_auto_creator.auto_create_deadlines_from_remedies(
+        db=mock_db,
+        user_id=1,
+        case_id=42,
+        case_title="Boundary Case",
+        remedies={"appeal_days": "1", "appeal_court": "High Court"},
+        document_id=99,
+    )
+
+    created_deadline = mock_db.add.call_args[0][0]
+    assert created_deadline.deadline_date == fixed_now + dt.timedelta(days=1)
+    assert created_deadline.deadline_date.tzinfo == dt.timezone.utc
