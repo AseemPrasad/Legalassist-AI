@@ -1,5 +1,7 @@
 import datetime as dt
+import json
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, JSON, UniqueConstraint
+from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import relationship
 from db.base import Base
 
@@ -147,6 +149,51 @@ class SimilarityFeedback(Base):
         return f"<SimilarityFeedback(user_id={self.user_id}, candidate_case_id={self.candidate_case_id}, relevance={self.relevance})>"
 
 
+
+class SafeVector(TypeDecorator):
+    """Dynamically uses pgvector's Vector type on PostgreSQL, falling back to Text on other dialects (SQLite)."""
+    impl = Text
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            try:
+                from pgvector.sqlalchemy import Vector
+                return dialect.type_descriptor(Vector(1536))
+            except ImportError:
+                pass
+        return dialect.type_descriptor(Text)
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        
+        # Handle array-like or numpy object conversions
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+
+        if dialect.name == "postgresql":
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except Exception:
+                    pass
+            return value
+        else:
+            if not isinstance(value, str):
+                return json.dumps(value)
+            return value
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            if not isinstance(value, str):
+                return json.dumps(value)
+            return value
+        return value
+
+
 class CaseEmbedding(Base):
     """Model for storing semantic embeddings of cases for similarity search"""
     __tablename__ = "case_embeddings"
@@ -155,8 +202,8 @@ class CaseEmbedding(Base):
     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
     document_id = Column(Integer, ForeignKey("case_documents.id", ondelete="SET NULL"), nullable=True)
     
-    # Embedding vector (stored as JSON array for SQLite compatibility)
-    embedding_vector = Column(Text, nullable=False)  # JSON-encoded list of floats
+    # Embedding vector (stored dynamically using SafeVector type decorator)
+    embedding_vector = Column(SafeVector, nullable=False)
     embedding_model = Column(String(255), default="text-embedding-3-small")  # Model used to generate
     embedding_dimension = Column(Integer, default=1536)
     

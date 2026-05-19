@@ -19,6 +19,41 @@ from sqlalchemy.orm import Query
 logger = logging.getLogger(__name__)
 
 
+def _normalize_text(text: Optional[str]) -> str:
+    """Normalize text by converting to lowercase and stripping whitespace"""
+    if not text:
+        return ""
+    return str(text).strip().lower()
+
+
+def _parse_cost_value(cost_str: Optional[str]) -> Optional[float]:
+    """Parse a cost string (e.g. "₹12,000 - ₹18,000" or "₹15,000") and return the average float value"""
+    if not cost_str:
+        return None
+    try:
+        # Strip currency symbols and commas, keeping numbers and hyphens
+        clean_str = re.sub(r'[^\d\-]', '', str(cost_str))
+        if '-' in clean_str:
+            parts = [float(x) for x in clean_str.split('-') if x]
+            if parts:
+                return sum(parts) / len(parts)
+        elif clean_str:
+            return float(clean_str)
+    except Exception:
+        pass
+    return None
+
+
+def _confidence_from_samples(samples: int) -> str:
+    """Determine confidence level ('high', 'medium', 'low') based on sample count"""
+    if samples >= 10:
+        return "high"
+    elif samples >= 3:
+        return "medium"
+    else:
+        return "low"
+
+
 def _summary_overlap(s1: Optional[str], s2: Optional[str]) -> float:
     """Calculate overlap/similarity ratio between two summaries"""
     import difflib
