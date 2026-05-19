@@ -52,6 +52,7 @@ from database import (
 @pytest.fixture(autouse=True)
 def disable_otp_rate_limiter(monkeypatch):
     monkeypatch.setattr("db.otp_service._reserve_otp_rate_limit_slot", lambda *args, **kwargs: True)
+    monkeypatch.setattr("database._reserve_otp_rate_limit_slot", lambda *args, **kwargs: 1)
 
 @pytest.fixture(scope="function")
 def test_db():
@@ -280,7 +281,7 @@ class TestDatabaseExtended:
         index_names_before = {index["name"] for index in inspect(engine).get_indexes(NotificationLog.__tablename__)}
         assert "ix_notification_logs_status" not in index_names_before
 
-        monkeypatch.setattr("database.engine", engine)
+        monkeypatch.setattr("db.session.engine", engine)
         init_db()
 
         index_names_after = {index["name"] for index in inspect(engine).get_indexes(NotificationLog.__tablename__)}
@@ -309,6 +310,16 @@ class TestAutoDeadlineDeduplication:
             description="Pre-existing appeal deadline",
         )
         test_db.add(existing)
+        test_db.flush()
+
+        from database import CaseTimeline
+        event = CaseTimeline(
+            case_id=99,
+            event_type="deadline_created",
+            description="Appeal deadline set based on document analysis",
+            event_metadata={"source_days": 30, "document_id": 42}
+        )
+        test_db.add(event)
         test_db.commit()
         test_db.refresh(existing)
 

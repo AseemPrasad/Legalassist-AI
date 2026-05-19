@@ -81,6 +81,8 @@ from db.models import (
     OTPVerification,
     PrecedentMatch,
     Report,
+    User,
+    RevokedToken,
     UserPreference,
     UserFeedback,
     SimilarityFeedback,
@@ -273,10 +275,14 @@ def _reserve_otp_rate_limit_slot(identifier: str, max_requests_per_hour: int, la
 def _safe_reserve_otp_slot(identifier: str, max_requests_per_hour: int, label: str = "identifier") -> int:
     try:
         return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour, label=label)
-    except TypeError:
+    except TypeError as exc:
+        if exc.__traceback__.tb_next is not None:
+            raise exc
         try:
             return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour, label)
-        except TypeError:
+        except TypeError as exc_inner:
+            if exc_inner.__traceback__.tb_next is not None:
+                raise exc_inner
             return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour)
 
 
