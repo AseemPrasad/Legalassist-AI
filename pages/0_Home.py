@@ -189,7 +189,7 @@ def render_page():
                             max_tokens=Config.SUMMARY_MAX_TOKENS,
                             temperature=0.03,
                         )
-                        if len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
+                        if retry_summary and len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
                             summary = retry_summary
 
                     if not summary:
