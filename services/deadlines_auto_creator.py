@@ -18,9 +18,10 @@ logger = logging.getLogger(__name__)
 
 
 _APPEAL_CONTEXT = r"(?:file(?:\s+an?)?\s+appeal|appeal|notice(?:\s+of)?\s+appeal|challenge(?:\s+an?)?(?:\s+order)?)"
+_APPEAL_SEPARATOR = r"(?:[\s:;,\-().\[\]{}]+(?:(?!\d{1,3}\b)\w+\s+))*[\s:;,\-().\[\]{}]*"
 _APPEAL_DAY_PATTERNS = (
     re.compile(
-        rf"\b(?P<context>{_APPEAL_CONTEXT})\b(?:\W+\w+){{0,8}}?\s*(?:about\s+|approximately\s+)?(?P<days>\d{{1,3}})\s*[,.-]?\s*(?:(?:business|calendar)\s+)?day(?:s)?\b",
+        rf"\b(?P<context>{_APPEAL_CONTEXT})\b{_APPEAL_SEPARATOR}(?:about\s+|approximately\s+)?(?P<days>\d{{1,3}})\s*[,.-]?\s*(?:(?:business|calendar)\s+)?day(?:s)?\b",
         re.IGNORECASE,
     ),
     re.compile(

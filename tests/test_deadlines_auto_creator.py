@@ -67,6 +67,9 @@ def _freeze_deadline_time(monkeypatch, fixed_now):
         ("appeal within 21 calendar days", 21),
         ("appeal in about 7 days", 7),
         ("notice of appeal within 15, days", 15),
+        ("appeal in 30 days)", 30),
+        ("appeal in\n30 days", 30),
+        ("appeal: 30 days", 30),
     ],
 )
 def test_extract_days_from_text_variants(text, expected):
