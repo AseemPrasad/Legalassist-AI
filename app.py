@@ -714,11 +714,11 @@ def main():
                                             st.session_state.selected_case_id = selected_case_id
                             else:
                                 st.info("No active cases found. Create one to the right.")
-                            
+
                             if st.session_state.get("selected_case_id"):
                                 if st.button("View Case Details", key="view_existing_case"):
                                     st.switch_page(routes.PAGE_CASE_DETAILS)
-                                
+
                         with col2:
                             with st.expander("➕ Or Create New Case"):
                                 new_case_number = st.text_input("Case Number").strip()
@@ -748,10 +748,7 @@ def main():
                                             if doc:
                                                 st.success("✅ Case created and document saved!")
                                                 st.session_state.selected_case_id = new_case.id
-                                    else:
-                                        st.error("Case Number and Jurisdiction required.")
-                    
-                    # ===== ANALYTICS & TRACKING SECTION =====
+
                     st.markdown("---")
                     st.markdown("## 📊 Track Your Case & See Statistics")
                     
