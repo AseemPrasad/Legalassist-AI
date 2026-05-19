@@ -1,6 +1,25 @@
 import datetime as dt
+import enum
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
 from db.base import Base
+
+
+class ReportStatus(str, enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ReportType(str, enum.Enum):
+    COMPREHENSIVE = "comprehensive"
+    SUMMARY = "summary"
+    LEGAL_BRIEF = "legal_brief"
+
+
+class ReportFormat(str, enum.Enum):
+    PDF = "pdf"
+    DOCX = "docx"
 
 class Report(Base):
     __tablename__ = "reports"
