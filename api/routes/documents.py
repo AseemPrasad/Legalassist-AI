@@ -213,19 +213,26 @@ async def upload_document_file(
         
         # Read file content
         file_content = await file.read()
-        
+        file_ext = file.filename.split(".")[-1].lower() if file.filename else ""
+
         # Generate IDs
         document_id = str(uuid.uuid4())
-        
+
         logger.info(
             "Starting document analysis from upload",
             user_id=current_user.user_id,
             document_id=document_id,
             filename=file.filename,
         )
-        
-        # Queue async task with context propagation
-        text = file_content.decode("utf-8", errors="ignore")
+
+        # Pass file content: decode text files, keep PDFs as bytes for worker extraction
+        if file_ext in ("txt", "html", "rtf"):
+            text = file_content.decode("utf-8", errors="ignore")
+            file_bytes = None
+        else:
+            text = None
+            file_bytes = file_content
+
         task = enqueue_task_from_http_request(
             analyze_document_task,
             http_request,
@@ -233,6 +240,7 @@ async def upload_document_file(
             user_id=current_user.user_id,
             document_id=document_id,
             text=text,
+            file_bytes=file_bytes,
             document_type=document_type,
         )
         

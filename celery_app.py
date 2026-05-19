@@ -392,6 +392,7 @@ def analyze_document_task(
     user_id: str,
     document_id: str,
     text: Optional[str] = None,
+    file_bytes: Optional[bytes] = None,
     document_type: str = "unknown",
     file_path: Optional[str] = None,
     file_url: Optional[str] = None,
@@ -443,6 +444,8 @@ def analyze_document_task(
         )
         
         extracted_text = text
+        if not extracted_text and file_bytes:
+            extracted_text = extract_text_from_pdf(io.BytesIO(file_bytes))
         if not extracted_text:
             if file_url:
                 response = requests.get(file_url, timeout=30)
