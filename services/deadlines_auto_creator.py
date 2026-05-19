@@ -8,16 +8,20 @@ from typing import Dict, Optional
 
 from sqlalchemy.orm import Session
 
-from db.models import CaseDeadline
+from db.models import CaseDeadline, CaseTimeline
 from .timeline_service import timeline_service
 
 
-_APPEAL_CONTEXT_PATTERNS = (
-    r"file(?:\s+an?)?\s+appeal",
-    r"notice\s+of\s+appeal",
-    r"appeal\s+(?:should|must)\s+be\s+filed",
-    r"appeal\s+(?:to|within|in|against)",
-    r"challenge(?:d)?(?:\s+the)?(?:\s+\w+)?",
+_APPEAL_CONTEXT = r"(?:file(?:\s+an?)?\s+appeal|appeal|notice(?:\s+of)?\s+appeal|challenge(?:\s+an?)?(?:\s+order)?)"
+_APPEAL_DAY_PATTERNS = (
+    re.compile(
+        rf"\b(?P<context>{_APPEAL_CONTEXT})\b(?:\W+\w+){{0,8}}?\s*(?:about\s+|approximately\s+)?(?P<days>\d{{1,3}})\s*[,.-]?\s*(?:(?:business|calendar)\s+)?day(?:s)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?P<days>\d{{1,3}})\s*[,.-]?\s*(?:(?:business|calendar)\s+)?day(?:s)?\b\s*(?:to\s+)?(?P<context>{_APPEAL_CONTEXT})\b",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -30,19 +34,7 @@ def _extract_days_from_text(text: str) -> Optional[int]:
     if text.isdigit():
         return int(text)
 
-    appeal_context = r"(?:" + "|".join(_APPEAL_CONTEXT_PATTERNS) + r")"
-    patterns = (
-        re.compile(
-            rf"\b(?P<context>{appeal_context})\b(?:[^.\n]{{0,80}})?\b(?P<days>\d+)\s*days?\b",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            rf"\b(?P<days>\d+)\s*days?\b(?:[^.\n]{{0,80}})?\b(?P<context>{appeal_context})\b",
-            re.IGNORECASE,
-        ),
-    )
-
-    for pattern in patterns:
+    for pattern in _APPEAL_DAY_PATTERNS:
         match = pattern.search(text)
         if match:
             return int(match.group("days"))
@@ -52,6 +44,22 @@ def _extract_days_from_text(text: str) -> Optional[int]:
 
 def _validate_days_value(days: int) -> bool:
     return 1 <= days <= 365
+
+
+def _has_matching_deadline_creation(db: Session, case_id: int, days: int, document_id: int) -> bool:
+    events = db.query(CaseTimeline).filter(
+        CaseTimeline.case_id == case_id,
+        CaseTimeline.event_type == "deadline_created",
+    ).all()
+
+    for event in events:
+        metadata = event.event_metadata if isinstance(event.event_metadata, dict) else {}
+        if metadata.get("source_days") == days:
+            return True
+        if document_id is not None and metadata.get("document_id") == document_id:
+            return True
+
+    return False
 
 
 def auto_create_deadlines_from_remedies(
@@ -71,19 +79,11 @@ def auto_create_deadlines_from_remedies(
     if days is None or not _validate_days_value(days):
         return
 
+    if _has_matching_deadline_creation(db, case_id, days, document_id):
+        return
+
     current_time = dt.datetime.now(dt.timezone.utc)
     deadline_date = current_time + dt.timedelta(days=days)
-
-    existing_deadline = db.query(CaseDeadline).filter(
-        CaseDeadline.case_id == case_id,
-        CaseDeadline.deadline_type == "appeal",
-        CaseDeadline.is_completed == False,
-        CaseDeadline.deadline_date >= deadline_date - dt.timedelta(days=1),
-        CaseDeadline.deadline_date <= deadline_date + dt.timedelta(days=1),
-    ).first()
-
-    if existing_deadline:
-        return
 
     deadline = CaseDeadline(
         user_id=user_id,
