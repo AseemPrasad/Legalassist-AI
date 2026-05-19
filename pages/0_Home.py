@@ -265,7 +265,7 @@ def render_page():
                         col1, col2, col3 = st.columns(3)
 
                         with col1:
-                            if st.button(ui["view_analytics"], key="view_analytics"):
+                            if st.button(ui["view_analytics"], key="view_analytics_home"):
                                 st.session_state.show_analytics = True
 
                         with col2:

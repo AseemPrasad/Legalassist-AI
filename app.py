@@ -306,7 +306,7 @@ def render_analytics_preview_section():
     # Action buttons for the analytics module
     act_col1, act_col2, act_col3 = st.columns(3)
     with act_col1:
-        if st.button("📈 View Stats", key="view_analytics", use_container_width=True):
+        if st.button("📈 View Stats", key="view_stats_btn", use_container_width=True):
             st.session_state.show_analytics = True
     with act_col2:
         if st.button("🎯 Est. Chances", key="estimate_chances", use_container_width=True):
@@ -765,7 +765,7 @@ def main():
                     col1, col2, col3 = st.columns(3)
                     
                     with col1:
-                        if st.button("📈 View Analytics", key="view_analytics"):
+                        if st.button("📈 View Analytics", key="view_analytics_bottom"):
                             st.session_state.show_analytics = True
                     
                     with col2:
