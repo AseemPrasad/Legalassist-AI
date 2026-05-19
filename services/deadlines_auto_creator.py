@@ -63,6 +63,41 @@ def _validate_remedies_payload(remedies: Any) -> Optional[RemediesPayload]:
     return payload
 
 
+def _emit_deadline_skip_event(
+    db: Session,
+    case_id: int,
+    reason: str,
+    metadata: Dict[str, Any],
+) -> None:
+    try:
+        event_metadata = dict(metadata)
+        event_metadata["reason"] = reason
+        timeline_service.create_event(
+            db=db,
+            case_id=case_id,
+            event_type="deadline_skipped",
+            description=f"Deadline creation skipped: {reason}",
+            metadata=event_metadata,
+        )
+    except Exception:
+        logger.exception("Failed to record deadline_skipped timeline event")
+
+
+def _log_deadline_skip(
+    db: Session,
+    case_id: int,
+    reason: str,
+    **metadata: Any,
+) -> None:
+    safe_metadata = {k: v for k, v in metadata.items() if v is not None}
+    logger.warning(
+        "Skipping deadline creation: %s | metadata=%s",
+        reason,
+        safe_metadata,
+    )
+    _emit_deadline_skip_event(db, case_id, reason, safe_metadata)
+
+
 def _extract_days_from_text(text: str) -> Optional[int]:
     if not text or not isinstance(text, str):
         return None
@@ -114,14 +149,42 @@ def auto_create_deadlines_from_remedies(
 
     appeal_days = validated_remedies.appeal_days
     if appeal_days is None:
+        _log_deadline_skip(
+            db,
+            case_id,
+            "appeal_days_missing",
+            user_id=user_id,
+            case_title=case_title,
+            document_id=document_id,
+            remedies_present=True,
+        )
         return
 
     appeal_days_str = str(appeal_days).strip()
     days = _extract_days_from_text(appeal_days_str)
     if days is None or not _validate_days_value(days):
+        _log_deadline_skip(
+            db,
+            case_id,
+            "appeal_days_invalid",
+            user_id=user_id,
+            case_title=case_title,
+            document_id=document_id,
+            appeal_days_type=type(appeal_days).__name__,
+            appeal_days_value=appeal_days_str[:120],
+        )
         return
 
     if _has_matching_deadline_creation(db, case_id, days, document_id):
+        _log_deadline_skip(
+            db,
+            case_id,
+            "matching_deadline_exists",
+            user_id=user_id,
+            case_title=case_title,
+            document_id=document_id,
+            source_days=days,
+        )
         return
 
     current_time = dt.datetime.now(dt.timezone.utc)

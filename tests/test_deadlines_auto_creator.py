@@ -183,6 +183,12 @@ def test_auto_create_deadlines_from_remedies_skips_same_source_days(monkeypatch)
 
 def test_auto_create_deadlines_from_remedies_logs_when_appeal_days_missing(caplog):
     mock_db = MagicMock()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        deadlines_auto_creator,
+        "timeline_service",
+        types.SimpleNamespace(create_event=MagicMock()),
+    )
 
     with caplog.at_level("WARNING"):
         deadlines_auto_creator.auto_create_deadlines_from_remedies(
@@ -196,6 +202,7 @@ def test_auto_create_deadlines_from_remedies_logs_when_appeal_days_missing(caplo
 
     assert mock_db.add.call_count == 0
     assert "appeal_days is missing" in caplog.text
+    monkeypatch.undo()
 
 
 def test_auto_create_deadlines_from_remedies_logs_when_remedies_payload_invalid(caplog):
@@ -217,6 +224,12 @@ def test_auto_create_deadlines_from_remedies_logs_when_remedies_payload_invalid(
 
 def test_auto_create_deadlines_from_remedies_logs_when_appeal_days_type_is_invalid(caplog):
     mock_db = MagicMock()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        deadlines_auto_creator,
+        "timeline_service",
+        types.SimpleNamespace(create_event=MagicMock()),
+    )
 
     with caplog.at_level("WARNING"):
         deadlines_auto_creator.auto_create_deadlines_from_remedies(
@@ -230,3 +243,32 @@ def test_auto_create_deadlines_from_remedies_logs_when_appeal_days_type_is_inval
 
     assert mock_db.add.call_count == 0
     assert "invalid remedies payload shape" in caplog.text
+    monkeypatch.undo()
+
+
+def test_auto_create_deadlines_from_remedies_logs_and_emits_skip_event_for_invalid_days(caplog):
+    mock_db = MagicMock()
+    mock_event_creator = MagicMock()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        deadlines_auto_creator,
+        "timeline_service",
+        types.SimpleNamespace(create_event=mock_event_creator),
+    )
+
+    with caplog.at_level("WARNING"):
+        deadlines_auto_creator.auto_create_deadlines_from_remedies(
+            db=mock_db,
+            user_id=1,
+            case_id=42,
+            case_title="Boundary Case",
+            remedies={"appeal_days": "tomorrow", "appeal_court": "High Court"},
+            document_id=99,
+        )
+
+    assert mock_db.add.call_count == 0
+    assert "appeal_days_invalid" in caplog.text
+    mock_event_creator.assert_called_once()
+    assert mock_event_creator.call_args.kwargs["event_type"] == "deadline_skipped"
+    assert mock_event_creator.call_args.kwargs["metadata"]["reason"] == "appeal_days_invalid"
+    monkeypatch.undo()
