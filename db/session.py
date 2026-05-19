@@ -30,8 +30,14 @@ def _datetime_for_db(value: dt.datetime) -> dt.datetime:
 def init_db():
     # Import here to avoid circular imports at package import time
     from .base import Base
+    from sqlalchemy import text
 
     Base.metadata.create_all(bind=engine)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_logs_status ON notification_logs (status)"))
+    except Exception:
+        pass
 
 
 from contextlib import contextmanager
