@@ -250,13 +250,26 @@ def _get_otp_rate_limit_script():
     return _otp_rate_limit_script
 
 
+def _reset_otp_rate_limit_connection():
+    """Reset connection state for self-healing after Redis disconnection."""
+    global _otp_rate_limit_client, _otp_rate_limit_script
+    with _otp_rate_limit_lock:
+        _otp_rate_limit_client = None
+        _otp_rate_limit_script = None
+
+
 def _reserve_otp_rate_limit_slot(identifier: str, max_requests_per_hour: int, label: str = "identifier") -> int:
     normalized_identifier = str(identifier).strip().lower()
     if not normalized_identifier:
         raise ValueError(f"{label} is required for OTP rate limiting")
 
-    script = _get_otp_rate_limit_script()
-    current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
+    try:
+        script = _get_otp_rate_limit_script()
+        current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
+    except (redis.ConnectionError, redis.TimeoutError, OSError, IOError) as exc:
+        _reset_otp_rate_limit_connection()
+        script = _get_otp_rate_limit_script()
+        current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
 
     if current > max_requests_per_hour:
         raise ValueError("Too many OTP requests. Please try again later.")
