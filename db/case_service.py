@@ -226,7 +226,7 @@ def get_user_stats(db: Session, user_id: int) -> dict:
     now = dt.datetime.now(dt.timezone.utc)
     upcoming_deadlines = db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed == False,
+        CaseDeadline.is_completed.is_(False),
         CaseDeadline.deadline_date > now,
     ).count()
 

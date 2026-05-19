@@ -62,6 +62,6 @@ def get_user_deadlines(db: Session, user_id: int):
     now = dt.datetime.now(dt.timezone.utc)
     return db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed == False,
+        CaseDeadline.is_completed.is_(False),
         CaseDeadline.deadline_date > now,
     ).order_by(CaseDeadline.deadline_date).all()

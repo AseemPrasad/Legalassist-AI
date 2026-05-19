@@ -75,7 +75,7 @@ def fetch_next_deadlines_per_case(db: Session, case_ids: List[int]) -> Dict[int,
         )
         .filter(
             CaseDeadline.case_id.in_(case_ids),
-            CaseDeadline.is_completed == False,
+            CaseDeadline.is_completed.is_(False),
             CaseDeadline.deadline_date > now,
         )
         .group_by(CaseDeadline.case_id)

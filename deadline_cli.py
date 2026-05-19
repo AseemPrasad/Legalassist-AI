@@ -605,7 +605,7 @@ def show_stats():
     """Display comprehensive system statistics."""
     with CLIContext() as ctx:
         total_deadlines = ctx.db.query(CaseDeadline).count()
-        active_deadlines = ctx.db.query(CaseDeadline).filter(CaseDeadline.is_completed == False).count()
+active_deadlines = ctx.db.query(CaseDeadline).filter(CaseDeadline.is_completed.is_(False)).count()
         total_users = ctx.db.query(User).count()
         total_logs = ctx.db.query(NotificationLog).count()
         failed_logs = ctx.db.query(NotificationLog).filter(NotificationLog.status == NotificationStatus.FAILED).count()

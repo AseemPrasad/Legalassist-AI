@@ -119,7 +119,7 @@ def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadl
     now = now_utc
     target_date = target_utc
     return db.query(CaseDeadline).filter(
-        CaseDeadline.is_completed == False,
+        CaseDeadline.is_completed.is_(False),
         CaseDeadline.deadline_date <= target_date,
         CaseDeadline.deadline_date > now,
     ).all()
