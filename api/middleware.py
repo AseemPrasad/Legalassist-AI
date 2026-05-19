@@ -144,7 +144,7 @@ async def logging_middleware(request: Request, call_next: Callable):
 
     response = None
     error_occurred = False
-    
+
     try:
         with traced_operation(
             f"http {request.method} {endpoint}",
@@ -174,10 +174,9 @@ async def logging_middleware(request: Request, call_next: Callable):
                 raise
 
         process_time = time.time() - start_time
-        
+
         if not error_occurred and response:
             observe_request(endpoint, request.method, response.status_code, process_time)
-            
             logger.info(
                 "http_request_completed",
                 method=request.method,
@@ -187,24 +186,12 @@ async def logging_middleware(request: Request, call_next: Callable):
                 request_id=request_id,
                 user_id=user_id,
             )
-            
             response.headers["X-Process-Time"] = str(process_time)
             response.headers["X-Request-Id"] = request_id
-        
-        logger.info(
-            "http_request_completed",
-            method=request.method,
-            path=endpoint,
-            status_code=response.status_code,
-            duration_ms=round(process_time * 1000, 2),
-            request_id=request_id,
-            user_id=user_id,
-        )
-        
-        response.headers["X-Process-Time"] = str(process_time)
-        response.headers["X-Request-Id"] = request_id
-    
-    clear_request_context()
+
+    finally:
+        clear_request_context()
+
     return response
 
 
@@ -221,6 +208,16 @@ async def request_size_limit_middleware(request: Request, call_next: Callable):
 
     if request.url.path in SKIP_PATHS:
         return await call_next(request)
+
+    transfer_encoding = request.headers.get("transfer-encoding", "").lower()
+    if "chunked" in transfer_encoding:
+        return JSONResponse(
+            status_code=status.HTTP_411_LENGTH_REQUIRED,
+            content={
+                "error_code": "CHUNKED_ENCODING_NOT_SUPPORTED",
+                "message": "Chunked transfer encoding is not supported. Provide Content-Length header.",
+            },
+        )
 
     content_length = request.headers.get("content-length")
     if content_length is not None:
