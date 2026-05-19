@@ -7,6 +7,7 @@ GET /api/v1/auth/me - Get current user
 from fastapi import APIRouter, HTTPException, status, Depends
 from datetime import datetime, timedelta
 from api.auth import create_access_token, create_api_key_record, CurrentUser, get_current_user
+from database import SessionLocal
 from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
 from api.limiter import RateLimit
 import structlog
@@ -26,24 +27,32 @@ async def get_token(
     password: str
 ) -> TokenResponse:
     """
-    Authenticate user and get access token
-    
-    - **username**: User email or username
-    - **password**: User password
-    
-    Returns JWT token valid for 24 hours
+    Authenticate user and get access token.
+
+    Validates credentials against the database.
     """
-    
-    # In production, validate against database
+    from database import get_user_by_email
+
     logger.info("Token request", username=username)
-    
-    token = create_access_token({"sub": "user123", "email": username, "role": "user"})
-    
-    return TokenResponse(
-        access_token=token,
-        token_type="bearer",
-        expires_in=24 * 3600  # 24 hours in seconds
-    )
+
+    db = SessionLocal()
+    try:
+        user = get_user_by_email(db, username)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials"
+            )
+
+        token = create_access_token({"sub": str(user.id), "email": user.email})
+
+        return TokenResponse(
+            access_token=token,
+            token_type="bearer",
+            expires_in=24 * 3600
+        )
+    finally:
+        db.close()
 
 
 @router.post(
