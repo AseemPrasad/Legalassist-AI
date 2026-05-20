@@ -470,8 +470,24 @@ async def request_size_limit_middleware(request: Request, call_next: Callable):
 
     if request.url.path in SKIP_PATHS:
         return await call_next(request)
-
     transfer_encoding = request.headers.get("transfer-encoding", "").lower()
+
+    # For upload endpoints, require Content-Length header (no chunked fallback).
+    content_length = request.headers.get("content-length")
+    max_size = _request_size_limit_for_path(request.url.path)
+
+    if any(request.url.path.startswith(p) for p in UPLOAD_PATH_PREFIXES):
+        # Must provide explicit content-length for uploads
+        if content_length is None:
+            return JSONResponse(
+                status_code=status.HTTP_411_LENGTH_REQUIRED,
+                content={
+                    "error_code": "LENGTH_REQUIRED",
+                    "message": "Content-Length header is required for upload endpoints.",
+                },
+            )
+
+    # Reject explicit chunked transfer encoding as ambiguous
     if "chunked" in transfer_encoding:
         return JSONResponse(
             status_code=status.HTTP_411_LENGTH_REQUIRED,
@@ -522,8 +538,31 @@ async def request_size_limit_middleware(request: Request, call_next: Callable):
             },
         )
 
-    try:
-        return await call_next(request)
+        # If Content-Length present, ensure it matches what we actually read
+        if content_length_bytes is not None and content_length_bytes != len(received):
+            # For upload endpoints, reject mismatch strictly. For others, log and reject.
+            logger.warning(
+                "content_length_mismatch",
+                path=request.url.path,
+                header_length=content_length_bytes,
+                actual_length=len(received),
+            )
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "error_code": "CONTENT_LENGTH_MISMATCH",
+                    "message": "Content-Length header does not match actual body size.",
+                },
+            )
+
+        # Recreate request with the read body for downstream consumers
+        body_bytes = bytes(received)
+
+        async def _receive() -> dict:
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+        new_request = Request(request.scope, _receive)
+        return await call_next(new_request)
     except PayloadTooLargeError as exc:
         return JSONResponse(
             status_code=exc.status_code,
