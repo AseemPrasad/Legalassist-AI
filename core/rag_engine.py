@@ -29,6 +29,7 @@ class LegalRAG:
             raise
             
         self.vector_store = None
+        self._stored_text = ""
         self.section_header_pattern = re.compile(
             r"^(section\s+\d+[\w().:-]*|article\s+\d+[\w().:-]*|chapter\s+\d+[\w().:-]*|clause\s+\d+[\w().:-]*)",
             re.IGNORECASE,
@@ -104,8 +105,9 @@ class LegalRAG:
             LOGGER.info("Chunking document text...")
             chunks = self._split_into_section_chunks(text)
             LOGGER.info(f"Split document into {len(chunks)} chunks.")
-            
-            # Create vector store in memory using EphemeralClient
+
+            self._stored_text = text
+
             chroma_client = chromadb.EphemeralClient()
             self.vector_store = Chroma.from_texts(
                 texts=chunks,
@@ -119,6 +121,21 @@ class LegalRAG:
             LOGGER.error(f"Error initializing vector store: {e}")
             return False
 
+    def _keyword_fallback_search(self, question: str) -> List[str]:
+        """Keyword-based fallback when semantic search returns no results."""
+        if not self._stored_text:
+            return []
+        keywords = question.lower().split()
+        lines = self._stored_text.split("\n")
+        scored = []
+        for i, line in enumerate(lines):
+            line_lower = line.lower()
+            score = sum(1 for kw in keywords if kw in line_lower and len(kw) > 2)
+            if score > 0:
+                scored.append((score, len(line), line))
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        return [line for _, _, line in scored[:5]]
+
     def query(self, question: str, language: str, openai_client, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
         """
         Query the document and generate an answer using the provided LLM client.
@@ -129,14 +146,20 @@ class LegalRAG:
             
         try:
             LOGGER.info(f"Retrieving context for question: {question}")
-            # Retrieve relevant chunks
             retriever = self.vector_store.as_retriever(search_kwargs={"k": 5})
             relevant_docs = retriever.invoke(question)
-            
+
             if not relevant_docs:
-                return "I couldn't find relevant information in the document to answer your question."
-                
-            context = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs])
+                LOGGER.info("Semantic search returned no results, trying keyword fallback")
+                from core.app_utils import extract_text_from_pdf
+                keyword_results = self._keyword_fallback_search(question)
+                if keyword_results:
+                    context = "\n\n---\n\n".join(keyword_results)
+                    LOGGER.info(f"Keyword fallback found {len(keyword_results)} results")
+                else:
+                    return "I couldn't find relevant information in the document to answer your question."
+            else:
+                context = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs])
             
             # Format chat history for the prompt
             history_str = ""
