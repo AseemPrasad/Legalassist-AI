@@ -59,8 +59,13 @@ def build_reminder_jobs(upcoming_deadlines: Iterable[CaseDeadline], db: Session)
         days_left = deadline.days_until_deadline()
         if not should_process_threshold(days_left):
             continue
+        
+        user_ids = {deadline.user_id for deadline in upcoming_deadlines}
+        user_prefs = {pref.user_id: pref for pref in db.query(UserPreference).filter(UserPreferance.user_id.in(user_ids)).all()
+        }
 
-        user_pref = db.query(UserPreference).filter(UserPreference.user_id == deadline.user_id).first()
+        user_pref = user_prefs.get(deadline.user_id)
+        
         if not user_pref:
             continue
 
