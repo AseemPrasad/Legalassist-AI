@@ -194,8 +194,8 @@ def create_api_key_record(name: str, expires_in_days: Optional[int] = None) -> t
 # ============================================================================
 
 class CurrentUser:
-    """Current authenticated user"""
-    def __init__(self, user_id: int, email: str, role: str = "user"):
+    """Current authenticated user with RBAC role"""
+    def __init__(self, user_id: int, email: str, role: str = "client"):
         self.user_id = int(user_id)
         self.email = email
         self.role = role
@@ -239,7 +239,8 @@ async def get_current_user(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="User not found"
                 )
-            return CurrentUser(user.id, user.email, "admin" if user.is_verified else "user")
+            role = user.role.value if user.role else "client"
+            return CurrentUser(user.id, user.email, role)
         finally:
             db.close()
     

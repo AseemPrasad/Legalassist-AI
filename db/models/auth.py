@@ -1,13 +1,23 @@
 import datetime as dt
-from sqlalchemy import Column, Integer, String, DateTime, Boolean
+import enum
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 from db.base import Base
+
+
+class UserRole(str, enum.Enum):
+    ADMIN = "admin"
+    ATTORNEY = "attorney"
+    PARALEGAL = "paralegal"
+    CLIENT = "client"
 
 
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
     email = Column(String(255), unique=True, nullable=False)
+    password_hash = Column(String(255), nullable=True)
+    role = Column(SQLEnum(UserRole), default=UserRole.CLIENT, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     last_login = Column(DateTime(timezone=True), nullable=True)
     is_verified = Column(Boolean, default=True, nullable=False)
@@ -19,6 +29,7 @@ class User(Base):
         return {
             "id": self.id,
             "email": self.email,
+            "role": self.role.value if self.role else "client",
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_login": self.last_login.isoformat() if self.last_login else None,
             "is_verified": self.is_verified,
