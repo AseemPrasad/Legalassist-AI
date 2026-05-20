@@ -13,8 +13,18 @@ import hashlib
 from sqlalchemy.orm import Session
 
 from api.config import get_settings
-from database import SessionLocal, is_token_revoked
+from database import SessionLocal
 from db.models import APIKey, User
+
+# Import canonical JWT utilities from shared module
+from api.jwt_auth import (
+    AuthError,
+    TokenExpiredError,
+    InvalidTokenError,
+    create_access_token,
+    verify_token,
+    revoke_jwt_token,
+)
 
 
 class AuthError(Exception):
@@ -43,153 +53,7 @@ def _get_jwt_secrets_to_try() -> list[str]:
     return [secret for secret in dict.fromkeys(secret.strip() for secret in secrets_to_try if secret and secret.strip())]
 
 
-# ============================================================================
-# JWT Token Management
-# ============================================================================
-
-def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Create JWT access token"""
-    to_encode = data.copy()
-
-    if "sub" not in to_encode and "user_id" in to_encode:
-        to_encode["sub"] = str(to_encode.pop("user_id"))
-    elif "sub" not in to_encode:
-        raise ValueError("Token data must include 'sub' or 'user_id' claim")
-
-    to_encode.setdefault("jti", str(uuid.uuid4()))
-    to_encode.setdefault("iat", datetime.now(timezone.utc))
-    to_encode.setdefault("iss", settings.JWT_ISSUER)
-    to_encode.setdefault("aud", settings.JWT_AUDIENCE)
-    to_encode.setdefault("type", "access")
-
-    if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
-    else:
-        expire = datetime.now(timezone.utc) + timedelta(hours=settings.JWT_EXPIRATION_HOURS)
-
-    to_encode.update({"exp": expire})
-
-    encoded_jwt = jwt.encode(
-        to_encode,
-        settings.JWT_SECRET_KEY,
-        algorithm=settings.JWT_ALGORITHM
-    )
-    return encoded_jwt
-
-
-def verify_token(token: str) -> Dict:
-    """Verify JWT token - raises domain-specific auth errors"""
-    try:
-        payload = None
-        last_error = None
-        for secret in _get_jwt_secrets_to_try():
-            try:
-                payload = jwt.decode(
-                    token,
-                    secret,
-                    algorithms=[settings.JWT_ALGORITHM],
-                    issuer=settings.JWT_ISSUER,
-                    audience=settings.JWT_AUDIENCE,
-                    options={"require": ["exp", "iat", "iss", "aud", "jti", "type"]},
-                )
-                break
-            except jwt.ExpiredSignatureError as exc:
-                last_error = exc
-                raise TokenExpiredError("Token has expired")
-            except jwt.InvalidIssuerError as exc:
-                last_error = exc
-                raise InvalidTokenError("Invalid token issuer")
-            except jwt.InvalidAudienceError as exc:
-                last_error = exc
-                raise InvalidTokenError("Invalid token audience")
-            except jwt.InvalidTokenError as exc:
-                last_error = exc
-                continue
-
-        if payload is None:
-            raise InvalidTokenError(str(last_error) if last_error else "Invalid token")
-        if payload.get("type") != "access":
-            raise InvalidTokenError("Invalid token type")
-
-        jti = payload.get("jti")
-        if jti:
-            with SessionLocal() as db:
-                if is_token_revoked(db, jti):
-                    raise InvalidTokenError("Token has been revoked")
-        return payload
-    except jwt.ExpiredSignatureError:
-        raise TokenExpiredError("Token has expired")
-    except jwt.InvalidIssuerError:
-        raise InvalidTokenError("Invalid token issuer")
-    except jwt.InvalidAudienceError:
-        raise InvalidTokenError("Invalid token audience")
-    except jwt.InvalidTokenError:
-        raise InvalidTokenError("Invalid token")
-
-
-def revoke_jwt_token(token: str) -> bool:
-    """Revoke a JWT token by adding its JTI to the revocation table.
-
-    This verifies the token signature (but not expiration) against
-    current/previous secrets and enforces issuer/audience/type checks.
-    Returns True on success, False otherwise.
-    """
-    if not token:
-        return False
-
-    try:
-        # Fast path - extract without signature verification to get jti/exp
-        try:
-            unverified = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
-            jti = unverified.get("jti")
-            exp = unverified.get("exp")
-            if not jti or not exp:
-                return False
-        except Exception:
-            return False
-
-        payload = None
-        last_error = None
-        for secret in _get_jwt_secrets_to_try():
-            try:
-                payload = jwt.decode(
-                    token,
-                    secret,
-                    algorithms=[settings.JWT_ALGORITHM],
-                    issuer=settings.JWT_ISSUER,
-                    audience=settings.JWT_AUDIENCE,
-                    options={"verify_exp": False, "verify_signature": True, "require": ["exp", "iat", "iss", "aud", "jti", "type"]},
-                )
-                break
-            except jwt.InvalidTokenError as exc:
-                last_error = exc
-                continue
-
-        if payload is None:
-            return False
-
-        token_type = payload.get("type")
-        if token_type != "access":
-            return False
-
-        jti = payload.get("jti")
-        exp = payload.get("exp")
-        if not jti or not exp:
-            return False
-
-        # convert exp to datetime
-        expires_at = datetime.fromtimestamp(exp, tz=timezone.utc) if isinstance(exp, (int, float)) else exp
-
-        # Persist revocation
-        with SessionLocal() as db:
-            # db-level revoke_token is available via database shim
-            from database import revoke_token, is_token_revoked
-
-            if not is_token_revoked(db, jti):
-                revoke_token(db, jti, expires_at)
-        return True
-    except Exception:
-        return False
+# JWT token functions delegated to `api.jwt_auth`
 
 
 # ============================================================================
