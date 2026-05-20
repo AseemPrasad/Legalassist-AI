@@ -46,6 +46,17 @@ try:
     _REDIS_INSTRUMENTOR = RedisInstrumentor
 except Exception:
     _REDIS_INSTRUMENTOR = None
+
+try:
+    import strawberry
+    from strawberry.fastapi import GraphQLRouter
+    from api.graphql_schema import schema as graphql_schema
+    _GRAPHQL_ROUTER = GraphQLRouter
+    _GRAPHQL_SCHEMA = graphql_schema
+except Exception:
+    _GRAPHQL_ROUTER = None
+    _GRAPHQL_SCHEMA = None
+
 from api.validation import (
     ValidationConfig,
     ValidationError,
@@ -149,10 +160,16 @@ def create_app() -> FastAPI:
     app.middleware("http")(add_correlation_id_middleware)
     app.middleware("http")(logging_middleware)
     app.middleware("http")(error_handling_middleware)
-    
+
     if settings.RATE_LIMIT_ENABLED:
         app.middleware("http")(rate_limit_middleware)
-    
+
+    if _GRAPHQL_ROUTER is not None:
+        app.include_router(
+            _GRAPHQL_ROUTER(_GRAPHQL_SCHEMA, path="/graphql", graphiql=True),
+            prefix="",
+        )
+
 # ========================================================================
     # Include Routers
     # ========================================================================
