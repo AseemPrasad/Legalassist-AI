@@ -28,6 +28,25 @@ from api.csrf import CSRFProtectionMiddleware
 from api.limiter import cleanup_limiter
 from observability.integration import initialize_observability_for_environment
 from observability.instrumentation import get_metrics
+
+try:
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.trace import get_tracer
+    _FASTAPI_INSTRUMENTOR = FastAPIInstrumentor
+except Exception:
+    _FASTAPI_INSTRUMENTOR = None
+
+try:
+    from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+    _SQLALCHEMY_INSTRUMENTOR = SQLAlchemyInstrumentor
+except Exception:
+    _SQLALCHEMY_INSTRUMENTOR = None
+
+try:
+    from opentelemetry.instrumentation.redis import RedisInstrumentor
+    _REDIS_INSTRUMENTOR = RedisInstrumentor
+except Exception:
+    _REDIS_INSTRUMENTOR = None
 from api.validation import (
     ValidationConfig,
     ValidationError,
@@ -84,7 +103,22 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         """Application lifespan manager"""
         initialize_observability_for_environment()
-        
+
+        if _FASTAPI_INSTRUMENTOR:
+            _FASTAPI_INSTRUMENTOR.instrument_app(app)
+
+        if _SQLALCHEMY_INSTRUMENTOR:
+            try:
+                _SQLALCHEMY_INSTRUMENTOR().instrument()
+            except Exception:
+                pass
+
+        if _REDIS_INSTRUMENTOR:
+            try:
+                _REDIS_INSTRUMENTOR().instrument()
+            except Exception:
+                pass
+
         if settings.RATE_LIMIT_ENABLED:
             logger.info(
                 "Rate limiter enabled",

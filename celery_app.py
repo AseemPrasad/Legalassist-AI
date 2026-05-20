@@ -75,6 +75,14 @@ except ImportError:  # pragma: no cover - fallback for minimal test environments
 
             return decorator
 
+try:
+    from opentelemetry import trace
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+    _propagator = TraceContextTextMapPropagator()
+except Exception:
+    trace = None
+    _propagator = None
+
 # Import project settings for fallback and other configurations
 from api.config import get_settings
 from observability.integration import initialize_observability_for_environment
@@ -85,6 +93,12 @@ from observability.instrumentation import (
     clear_request_context,
     generate_correlation_id,
 )
+
+try:
+    from opentelemetry import trace as otel_trace
+    _celery_tracer = otel_trace.get_tracer(__name__)
+except Exception:
+    _celery_tracer = None
 from api.idempotency import IdempotencyManager
 from core.export_storage import save_export_file
 from core.document_metadata import (
@@ -212,15 +226,46 @@ class ContextTask(Task):
         user_id = headers.get("x-user-id") or headers.get("X-User-Id")
         return {"request_id": request_id, "user_id": user_id}
 
+    def apply_async(self, *args, headers=None, **kwargs):
+        if _propagator is not None and headers is not None:
+            carrier: Dict[str, str] = {}
+            _propagator.inject(carrier)
+            headers.update(carrier)
+        return super().apply_async(*args, headers=headers, **kwargs)
+
     def __call__(self, *args, **kwargs):
         context = self._extract_task_request_context(self.request)
-        bind_request_context(
-            request_id=context.get("request_id"), user_id=context.get("user_id")
-        )
-        try:
-            return self.run(*args, **kwargs)
-        finally:
-            clear_request_context()
+
+        if _propagator is not None and trace is not None:
+            carrier: Dict[str, str] = dict(getattr(self.request, "headers", None) or {})
+            ctx = _propagator.extract(carrier)
+            span = trace.get_tracer(__name__).start_span(
+                f"celery.task.{self.name}",
+                context=ctx,
+            )
+            span.set_attribute("celery.task_id", self.request.id or "")
+            span.set_attribute("celery.task_name", self.name or "")
+            if context.get("request_id"):
+                span.set_attribute("correlation.id", context["request_id"])
+            request_scope = span
+
+            with trace.use_span(request_scope):
+                bind_request_context(
+                    request_id=context.get("request_id"), user_id=context.get("user_id")
+                )
+                try:
+                    return self.run(*args, **kwargs)
+                finally:
+                    span.end()
+                    clear_request_context()
+        else:
+            bind_request_context(
+                request_id=context.get("request_id"), user_id=context.get("user_id")
+            )
+            try:
+                return self.run(*args, **kwargs)
+            finally:
+                clear_request_context()
 
 
 # ============================================================================
@@ -481,13 +526,34 @@ def analyze_document_task(
             raise RuntimeError("Failed to initialize LLM client.")
 
         summary_prompt = build_prompt(safe_text, "English")
-        summary_response = client.chat.completions.create(
-            model=Config.DEFAULT_MODEL,
-            messages=[{"role": "user", "content": summary_prompt}],
-            max_tokens=800,
-            temperature=0.3,
-        )
-        raw_summary = summary_response.choices[0].message.content
+        if _celery_tracer:
+            with _celery_tracer.start_as_current_span(
+                f"llm.{Config.DEFAULT_MODEL}.summary",
+                attributes={
+                    "llm.model": Config.DEFAULT_MODEL,
+                    "llm.operation": "summary",
+                    "celery.task_id": self.request.id or "",
+                },
+            ) as span:
+                summary_response = client.chat.completions.create(
+                    model=Config.DEFAULT_MODEL,
+                    messages=[{"role": "user", "content": summary_prompt}],
+                    max_tokens=800,
+                    temperature=0.3,
+                )
+                if hasattr(summary_response, 'usage') and summary_response.usage:
+                    span.set_attribute("llm.prompt_tokens", summary_response.usage.prompt_tokens or 0)
+                    span.set_attribute("llm.completion_tokens", summary_response.usage.completion_tokens or 0)
+                    span.set_attribute("llm.total_tokens", summary_response.usage.total_tokens or 0)
+                raw_summary = summary_response.choices[0].message.content
+        else:
+            summary_response = client.chat.completions.create(
+                model=Config.DEFAULT_MODEL,
+                messages=[{"role": "user", "content": summary_prompt}],
+                max_tokens=800,
+                temperature=0.3,
+            )
+            raw_summary = summary_response.choices[0].message.content
         # Extract JSON bullets if possible, otherwise use raw text
         summary_text = ""
         key_points = []
@@ -509,13 +575,34 @@ def analyze_document_task(
         )
         
         remedies_prompt = build_remedies_prompt(safe_text, "English")
-        remedies_response = client.chat.completions.create(
-            model=Config.DEFAULT_MODEL,
-            messages=[{"role": "user", "content": remedies_prompt}],
-            max_tokens=900,
-            temperature=0.3,
-        )
-        remedies_data = parse_remedies_response(remedies_response.choices[0].message.content)
+        if _celery_tracer:
+            with _celery_tracer.start_as_current_span(
+                f"llm.{Config.DEFAULT_MODEL}.remedies",
+                attributes={
+                    "llm.model": Config.DEFAULT_MODEL,
+                    "llm.operation": "remedies",
+                    "celery.task_id": self.request.id or "",
+                },
+            ) as span:
+                remedies_response = client.chat.completions.create(
+                    model=Config.DEFAULT_MODEL,
+                    messages=[{"role": "user", "content": remedies_prompt}],
+                    max_tokens=900,
+                    temperature=0.3,
+                )
+                if hasattr(remedies_response, 'usage') and remedies_response.usage:
+                    span.set_attribute("llm.prompt_tokens", remedies_response.usage.prompt_tokens or 0)
+                    span.set_attribute("llm.completion_tokens", remedies_response.usage.completion_tokens or 0)
+                    span.set_attribute("llm.total_tokens", remedies_response.usage.total_tokens or 0)
+                remedies_data = parse_remedies_response(remedies_response.choices[0].message.content)
+        else:
+            remedies_response = client.chat.completions.create(
+                model=Config.DEFAULT_MODEL,
+                messages=[{"role": "user", "content": remedies_prompt}],
+                max_tokens=900,
+                temperature=0.3,
+            )
+            remedies_data = parse_remedies_response(remedies_response.choices[0].message.content)
 
         # Phase 4: Finalization
         self.update_state(

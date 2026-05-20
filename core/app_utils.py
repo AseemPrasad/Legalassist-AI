@@ -31,6 +31,12 @@ import html as html_lib
 from config import Config
 from .exceptions import PDFProcessingError, OCRDependencyError, OCRProcessingError
 
+try:
+    from opentelemetry import trace
+    _tracer = trace.get_tracer(__name__)
+except Exception:
+    _tracer = None
+
 # For consistent language detection results
 DetectorFactory.seed = 0
 _LOCALIZED_UI_TEXT_CACHE = {}
@@ -1137,66 +1143,106 @@ def safe_llm_call(
     
     # Attempt the API call multiple times based on the retry configuration
     for attempt in range(retries):
-        try:
-            # Execute the completion request
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                timeout=timeout,
-            )
-            
-            # Successfully received a response
-            return response.choices[0].message.content.strip(), None
-
-        except openai.AuthenticationError:
-            # Terminal error: API key is invalid
-            return None, "Authentication failed. Please check your API key in the configuration."
-
-        except openai.RateLimitError:
-            # Recoverable error: Wait and try again if attempts remain
-            if attempt < retries - 1:
-                wait_time = Config.AI_RETRY_BACKOFF_BASE ** attempt
-                logging.warning(f"Rate limit hit. Retrying in {wait_time}s... (Attempt {attempt + 1}/{retries})")
-                time.sleep(wait_time)
-                continue
-            return None, "Rate limit exceeded. Please try again in a few minutes."
-
-        except openai.APITimeoutError:
-            # Recoverable error: Network or server was too slow
-            if attempt < retries - 1:
-                logging.warning(f"Request timed out. Retrying... (Attempt {attempt + 1}/{retries})")
-                continue
-            return None, "The request timed out. The AI server might be busy or your connection is slow."
-
-        except openai.APIConnectionError:
-            # Recoverable error: Transient network issues
-            if attempt < retries - 1:
-                time.sleep(1)
-                logging.warning(f"Connection error. Retrying... (Attempt {attempt + 1}/{retries})")
-                continue
-            return None, "Could not connect to the AI server. Please check your internet connection."
-
-        except openai.APIStatusError as e:
-            # Handle specific HTTP status codes from the API
-            if e.status_code == 402:
-                # Specific case for OpenRouter out of credits
-                return None, "AI Service Error: Out of credits. Please top up your provider account."
-            
-            if attempt < retries - 1:
-                time.sleep(1)
-                continue
-            return None, f"AI Service Error (HTTP {e.status_code}): {str(e)}"
-
-        except Exception as e:
-            # Catch-all for unexpected exceptions
-            logging.error(f"Unexpected LLM API Error (Attempt {attempt + 1}): {str(e)}", exc_info=True)
-            last_error = str(e)
-            
-            if attempt < retries - 1:
-                time.sleep(0.5)
-                continue
+        if _tracer:
+            with _tracer.start_as_current_span(
+                f"openai.chat.{model}",
+                attributes={
+                    "llm.model": model,
+                    "llm.max_tokens": max_tokens,
+                    "llm.temperature": temperature,
+                    "llm.attempt": attempt + 1,
+                },
+            ) as span:
+                try:
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        timeout=timeout,
+                    )
+                    if hasattr(response, 'usage') and response.usage:
+                        span.set_attribute("llm.prompt_tokens", response.usage.prompt_tokens or 0)
+                        span.set_attribute("llm.completion_tokens", response.usage.completion_tokens or 0)
+                        span.set_attribute("llm.total_tokens", response.usage.total_tokens or 0)
+                    return response.choices[0].message.content.strip(), None
+                except openai.AuthenticationError:
+                    return None, "Authentication failed. Please check your API key in the configuration."
+                except openai.RateLimitError:
+                    if attempt < retries - 1:
+                        wait_time = Config.AI_RETRY_BACKOFF_BASE ** attempt
+                        logging.warning(f"Rate limit hit. Retrying in {wait_time}s... (Attempt {attempt + 1}/{retries})")
+                        time.sleep(wait_time)
+                        continue
+                    return None, "Rate limit exceeded. Please try again in a few minutes."
+                except openai.APITimeoutError:
+                    if attempt < retries - 1:
+                        logging.warning(f"Request timed out. Retrying... (Attempt {attempt + 1}/{retries})")
+                        continue
+                    return None, "The request timed out. The AI server might be busy or your connection is slow."
+                except openai.APIConnectionError:
+                    if attempt < retries - 1:
+                        time.sleep(1)
+                        logging.warning(f"Connection error. Retrying... (Attempt {attempt + 1}/{retries})")
+                        continue
+                    return None, "Could not connect to the AI server. Please check your internet connection."
+                except openai.APIStatusError as e:
+                    if e.status_code == 402:
+                        return None, "AI Service Error: Out of credits. Please top up your provider account."
+                    if attempt < retries - 1:
+                        time.sleep(1)
+                        continue
+                    return None, f"AI Service Error (HTTP {e.status_code}): {str(e)}"
+                except Exception as e:
+                    last_error = str(e)
+                    span.set_attribute("error", True)
+                    span.set_attribute("error.message", last_error)
+                    if attempt < retries - 1:
+                        time.sleep(0.5)
+                        continue
+        else:
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=timeout,
+                )
+                return response.choices[0].message.content.strip(), None
+            except openai.AuthenticationError:
+                return None, "Authentication failed. Please check your API key in the configuration."
+            except openai.RateLimitError:
+                if attempt < retries - 1:
+                    wait_time = Config.AI_RETRY_BACKOFF_BASE ** attempt
+                    logging.warning(f"Rate limit hit. Retrying in {wait_time}s... (Attempt {attempt + 1}/{retries})")
+                    time.sleep(wait_time)
+                    continue
+                return None, "Rate limit exceeded. Please try again in a few minutes."
+            except openai.APITimeoutError:
+                if attempt < retries - 1:
+                    logging.warning(f"Request timed out. Retrying... (Attempt {attempt + 1}/{retries})")
+                    continue
+                return None, "The request timed out. The AI server might be busy or your connection is slow."
+            except openai.APIConnectionError:
+                if attempt < retries - 1:
+                    time.sleep(1)
+                    logging.warning(f"Connection error. Retrying... (Attempt {attempt + 1}/{retries})")
+                    continue
+                return None, "Could not connect to the AI server. Please check your internet connection."
+            except openai.APIStatusError as e:
+                if e.status_code == 402:
+                    return None, "AI Service Error: Out of credits. Please top up your provider account."
+                if attempt < retries - 1:
+                    time.sleep(1)
+                    continue
+                return None, f"AI Service Error (HTTP {e.status_code}): {str(e)}"
+            except Exception as e:
+                last_error = str(e)
+                logging.error(f"Unexpected LLM API Error (Attempt {attempt + 1}): {str(e)}", exc_info=True)
+                if attempt < retries - 1:
+                    time.sleep(0.5)
+                    continue
     
     # If all retry attempts failed, return the last error encountered
     return None, f"An unexpected error occurred after {retries} attempts: {last_error}"
@@ -1502,17 +1548,38 @@ JSON:
 {json.dumps(text_map, ensure_ascii=False, indent=2)}
 """
     try:
-        response = client.chat.completions.create(
-            model=get_default_model(),
-            messages=[
-                {"role": "system", "content": "You translate UI copy accurately and return valid JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=2200,
-            temperature=0.0,
-            timeout=Config.AI_REQUEST_TIMEOUT,
-        )
-        translated = _parse_json_object(response.choices[0].message.content)
+        if _tracer:
+            with _tracer.start_as_current_span(
+                f"openai.chat.{get_default_model()}",
+                attributes={"llm.model": get_default_model(), "llm.operation": "ui_translation"},
+            ) as span:
+                response = client.chat.completions.create(
+                    model=get_default_model(),
+                    messages=[
+                        {"role": "system", "content": "You translate UI copy accurately and return valid JSON only."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=2200,
+                    temperature=0.0,
+                    timeout=Config.AI_REQUEST_TIMEOUT,
+                )
+                if hasattr(response, 'usage') and response.usage:
+                    span.set_attribute("llm.prompt_tokens", response.usage.prompt_tokens or 0)
+                    span.set_attribute("llm.completion_tokens", response.usage.completion_tokens or 0)
+                    span.set_attribute("llm.total_tokens", response.usage.total_tokens or 0)
+                translated = _parse_json_object(response.choices[0].message.content)
+        else:
+            response = client.chat.completions.create(
+                model=get_default_model(),
+                messages=[
+                    {"role": "system", "content": "You translate UI copy accurately and return valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=2200,
+                temperature=0.0,
+                timeout=Config.AI_REQUEST_TIMEOUT,
+            )
+            translated = _parse_json_object(response.choices[0].message.content)
     except Exception as exc:
         logging.warning("Failed to translate UI text for %s: %s", language, exc)
         return {}
