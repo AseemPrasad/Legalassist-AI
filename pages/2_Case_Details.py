@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 
 from auth import require_auth, redirect_to_login, get_current_user_id
+from api.feature_flags import is_feature_enabled_for_user, get_feature_flag_manager
 import routes
 from case_manager import get_case_detail, upload_case_document, mark_deadline_completed, mark_deadline_incomplete, add_manual_deadline, mark_case_appealed, mark_case_closed, mark_case_active, generate_case_summary_text
 from case_manager import upload_case_attachment, get_case_note_state, save_case_note, publish_case_note_for_case, get_case_note_history_for_case
@@ -527,6 +528,25 @@ def render_remedies_section(remedies: Optional[Dict]):
 def render_knowledge_status_section(case_id: int, user_id: int):
     """Render the freshness dashboard for document-backed knowledge."""
     st.subheader("📡 Knowledge Status")
+
+    current_user_email = st.session_state.get("user_email", "")
+    current_user_role = st.session_state.get("user_role", "user")
+    feature_enabled = is_feature_enabled_for_user(
+        "knowledge_status_dashboard",
+        str(user_id),
+        attributes={"role": current_user_role, "email": current_user_email},
+        surface="ui",
+    )
+
+    if not feature_enabled:
+        st.info("This dashboard is being rolled out gradually. Check back soon.")
+        return
+
+    get_feature_flag_manager().mark_flag_used(
+        "knowledge_status_dashboard",
+        user_id=str(user_id),
+        surface="ui",
+    )
 
     db = SessionLocal()
     try:

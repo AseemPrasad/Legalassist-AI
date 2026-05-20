@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from api.auth import CurrentUser, get_current_user
+from api.feature_flags import is_feature_enabled_for_user, get_feature_flag_manager
 from api.models import KnowledgeInvalidationItem, KnowledgeInvalidationListResponse
 from db.crud.knowledge import get_knowledge_freshness_summary, list_knowledge_invalidations
 from database import get_db
@@ -28,6 +29,29 @@ async def list_invalidations(
     Admin users can still see their own invalidations; this endpoint keeps the
     initial scope user-centric and can be expanded later with org-level filters.
     """
+
+    feature_enabled = is_feature_enabled_for_user(
+        "knowledge_status_dashboard",
+        str(current_user.user_id),
+        attributes={"role": current_user.role, "email": current_user.email},
+        surface="api",
+    )
+
+    if not feature_enabled:
+        return KnowledgeInvalidationListResponse(
+            items=[],
+            total=0,
+            stale_count=0,
+            fresh_count=0,
+            next_recompute_at=None,
+            generated_at=datetime.now(timezone.utc),
+        )
+
+    get_feature_flag_manager().mark_flag_used(
+        "knowledge_status_dashboard",
+        user_id=str(current_user.user_id),
+        surface="api",
+    )
 
     rows = list_knowledge_invalidations(
         db,
