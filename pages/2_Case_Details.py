@@ -15,6 +15,7 @@ from case_manager import upload_case_attachment, get_case_note_state, save_case_
 from case_manager import get_user_cases_summary
 from core import extract_text_from_pdf
 from db.crud.knowledge import get_knowledge_freshness_summary, list_knowledge_invalidations
+from db.crud.audit import list_audit_events
 from database import DocumentType, CaseStatus, SessionLocal, UserPreference
 import pytz
 import html
@@ -698,7 +699,7 @@ def main():
     st.markdown("---")
 
     # Main content - tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📅 Timeline", "📄 Documents", "⏰ Deadlines", "⚖️ Remedies", "📡 Knowledge", "🗒️ Notes"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📅 Timeline", "📄 Documents", "⏰ Deadlines", "⚖️ Remedies", "📡 Knowledge", "🗒️ Notes", "🧾 Audit"])
 
     with tab1:
         render_timeline_section(timeline)
@@ -717,6 +718,25 @@ def main():
 
     with tab6:
         render_case_notes_section(case_id, user_id)
+
+    with tab7:
+        st.subheader("🧾 Audit Trail")
+        with SessionLocal() as db:
+            audit_events = list_audit_events(db, case_id=case_id, limit=100)
+
+        if not audit_events:
+            st.info("No audit events recorded for this case yet.")
+        else:
+            audit_rows = []
+            for event in audit_events:
+                audit_rows.append({
+                    "occurred_at": event.occurred_at.isoformat() if event.occurred_at else None,
+                    "actor": event.actor,
+                    "action": event.action,
+                    "resource": event.resource,
+                    "metadata": event.event_metadata or {},
+                })
+            st.dataframe(audit_rows, use_container_width=True, hide_index=True)
 
     st.markdown("---")
 

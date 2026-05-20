@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Attachment, Case, CaseDeadline, CaseDocument, CaseTimeline
 from database import SessionLocal
+from db.crud.audit import record_audit_event
 from services.privacy_redaction import (
     apply_privacy_profile,
     normalize_privacy_profile,
@@ -292,7 +293,18 @@ def build_case_export_payload(
         if "remedies" in selected_fields:
             payload["remedies"] = latest_document.remedies if latest_document else None
 
-        return apply_privacy_profile(payload, normalize_privacy_profile(privacy_profile))
+        selected_profile = normalize_privacy_profile(privacy_profile)
+        redacted_payload = apply_privacy_profile(payload, selected_profile)
+        record_audit_event(
+            db,
+            actor=f"user:{user_id}",
+            actor_user_id=user_id,
+            action="export_preview",
+            resource=f"case:{case_id}",
+            case_id=case_id,
+            metadata={"privacy_profile": selected_profile, "fields": list(selected_fields)},
+        )
+        return redacted_payload
 
 
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
@@ -460,6 +472,21 @@ def build_case_export_artifact(
         mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         file_name = f"{base_name}.docx"
 
+    with SessionLocal() as db:
+        record_audit_event(
+            db,
+            actor=f"user:{user_id}",
+            actor_user_id=user_id,
+            action="export_download",
+            resource=f"case:{case_id}",
+            case_id=case_id,
+            metadata={
+                "format": format_name,
+                "privacy_profile": normalize_privacy_profile(privacy_profile),
+                "fields": list(selected_fields),
+            },
+        )
+
     return ExportArtifact(
         file_name=file_name,
         mime_type=mime_type,
@@ -532,7 +559,36 @@ def build_case_export_bundle(
                         "size_bytes": len(artifact.data),
                     }
                 )
+                with SessionLocal() as db:
+                    record_audit_event(
+                        db,
+                        actor=f"user:{user_id}",
+                        actor_user_id=user_id,
+                        action="export_bundle_item",
+                        resource=f"case:{case_id}",
+                        case_id=case_id,
+                        metadata={
+                            "format": format_name,
+                            "privacy_profile": normalize_privacy_profile(privacy_profile),
+                            "bundle_entry": entry_name,
+                        },
+                    )
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+
+    with SessionLocal() as db:
+        record_audit_event(
+            db,
+            actor=f"user:{user_id}",
+            actor_user_id=user_id,
+            action="export_bundle",
+            resource=f"case_bundle:{case_label}",
+            metadata={
+                "case_ids": list(unique_case_ids),
+                "formats": list(normalized_formats),
+                "privacy_profile": normalize_privacy_profile(privacy_profile),
+                "fields": list(selected_fields),
+            },
+        )
 
     case_label = "_".join(str(case_id) for case_id in unique_case_ids)
     file_name = _safe_filename(f"case_export_bundle_{case_label}.zip")

@@ -11,6 +11,7 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     last_login = Column(DateTime(timezone=True), nullable=True)
     is_verified = Column(Boolean, default=True, nullable=False)
+    is_admin = Column(Boolean, default=False, nullable=False)
 
     cases = relationship("Case", back_populates="user", cascade="all, delete-orphan")
     preferences = relationship("UserPreference", back_populates="user", cascade="all, delete-orphan")
@@ -22,6 +23,7 @@ class User(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_login": self.last_login.isoformat() if self.last_login else None,
             "is_verified": self.is_verified,
+            "is_admin": self.is_admin,
         }
 
 

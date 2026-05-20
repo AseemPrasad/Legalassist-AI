@@ -19,6 +19,7 @@ from services.privacy_redaction import (
     get_privacy_profile_definition,
     normalize_privacy_profile,
 )
+from db.crud.audit import record_audit_event
 
 # Minimum secret length required for anonymization secret
 _MIN_SECRET_LENGTH = 32
@@ -139,6 +140,20 @@ def generate_anonymized_case_data(case_id: int, profile_name: Optional[str] = No
             ],
             "created_date": case.created_at.strftime("%B %Y"),
         }
+
+        record_audit_event(
+            db,
+            actor=f"user:{case.user_id}",
+            actor_user_id=case.user_id,
+            action="anonymization_run",
+            resource=f"case:{case_id}",
+            case_id=case_id,
+            metadata={
+                "privacy_profile": selected_profile,
+                "document_count": len(documents),
+                "timeline_events": len(timeline),
+            },
+        )
 
         return apply_privacy_profile(payload, selected_profile, anonymized_id=anonymized_id)
     finally:

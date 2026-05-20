@@ -12,6 +12,7 @@ from pathlib import Path
 from fpdf import FPDF
 from database import SessionLocal, Case, CaseDocument, CaseDeadline, CaseTimeline
 from case_manager import get_case_detail
+from db.crud.audit import record_audit_event
 
 logger = logging.getLogger(__name__)
 
@@ -595,7 +596,13 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
     finally:
         db.close()
 
-def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int, profile_name: Optional[str] = None) -> Optional[bytes]:
+def generate_anonymized_pdf(
+    case_id: int,
+    anon_id: str,
+    user_id: int,
+    profile_name: Optional[str] = None,
+    anonymized_data: Optional[Dict[str, Any]] = None,
+) -> Optional[bytes]:
     """
     Generate an anonymized PDF for external legal review.
     Strips all personal identifiers to maintain privacy.
@@ -617,12 +624,12 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int, profile_na
         selected_profile = normalize_privacy_profile(profile_name)
         profile = get_privacy_profile_definition(selected_profile)
 
-        anonymized_data = None
-        try:
-            from case_manager import generate_anonymized_case_data
-            anonymized_data = generate_anonymized_case_data(case_id, profile_name=selected_profile)
-        except Exception:
-            anonymized_data = None
+        if anonymized_data is None:
+            try:
+                from case_manager import generate_anonymized_case_data
+                anonymized_data = generate_anonymized_case_data(case_id, profile_name=selected_profile)
+            except Exception:
+                anonymized_data = None
 
         pdf = LegalAssistPDF()
         pdf.add_page()
@@ -709,7 +716,25 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int, profile_na
 
         final_out = pdf.output(dest='S')
         if isinstance(final_out, (bytes, bytearray)):
+            record_audit_event(
+                db,
+                actor=f"user:{user_id}",
+                actor_user_id=user_id,
+                action="download_anonymized_pdf",
+                resource=f"case:{case_id}",
+                case_id=case_id,
+                metadata={"privacy_profile": selected_profile, "anonymized_id": anon_id},
+            )
             return bytes(final_out)
+        record_audit_event(
+            db,
+            actor=f"user:{user_id}",
+            actor_user_id=user_id,
+            action="download_anonymized_pdf",
+            resource=f"case:{case_id}",
+            case_id=case_id,
+            metadata={"privacy_profile": selected_profile, "anonymized_id": anon_id},
+        )
         return final_out.encode('utf-8')
 
     except Exception as e:

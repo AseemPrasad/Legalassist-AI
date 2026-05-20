@@ -239,7 +239,7 @@ async def get_current_user(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="User not found"
                 )
-            return CurrentUser(user.id, user.email, "admin" if user.is_verified else "user")
+            return CurrentUser(user.id, user.email, "admin" if getattr(user, "is_admin", False) else "user")
         finally:
             db.close()
     

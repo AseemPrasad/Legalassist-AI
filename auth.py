@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, Any
 import logging
 from config import Config
+from db.crud.audit import record_audit_event
 
 import uuid
 import jwt
@@ -306,6 +307,15 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
 
         # Create JWT token
         token = create_jwt_token(user.id, user.email)
+
+        record_audit_event(
+            db,
+            actor=f"user:{user.id}",
+            actor_user_id=user.id,
+            action="login_success",
+            resource="auth:session",
+            metadata={"email_domain": user.email.split("@")[-1] if "@" in user.email else None},
+        )
 
         logger.info(f"User logged in successfully: {email} (user_id={user.id})")
         return True, "Login successful", token

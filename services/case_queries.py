@@ -11,6 +11,7 @@ from db.models import Attachment, Case, CaseDeadline, CaseDocument, CaseTimeline
 from db.models.dtos import CaseSummaryDTO, CaseDetailDTO, DocumentDTO, DeadlineDTO, TimelineDTO, AttachmentDTO
 from db.repositories.case_queries import fetch_case_summary_data_batch, fetch_case_detail_data_batch
 from .timeline_service import timeline_service
+from db.crud.audit import record_audit_event
 
 
 def get_user_cases_summary(db: Session, user_id: int, include_closed: bool = True) -> List[Dict[str, Any]]:
@@ -87,6 +88,21 @@ def get_case_detail(db: Session, user_id: int, case_id: int) -> Optional[Dict[st
         attachments=attachments_list,
         timeline=timeline_events,
         remedies=remedies,
+    )
+
+    record_audit_event(
+        db,
+        actor=f"user:{user_id}",
+        actor_user_id=user_id,
+        action="view_case_detail",
+        resource=f"case:{case_id}",
+        case_id=case_id,
+        metadata={
+            "documents": len(docs_list),
+            "deadlines": len(deadlines_list),
+            "timeline_events": len(timeline_events),
+            "attachments": len(attachments_list),
+        },
     )
     
     return detail.to_dict()

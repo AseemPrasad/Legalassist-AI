@@ -22,11 +22,12 @@ from pathlib import Path
 from report_service import _get_reports_base_dir
 from sqlalchemy.orm import Session
 
-from report_service import _get_reports_base_dir
 from api.models import ReportGenerationRequest, ReportGenerationResponse
 from api.auth import get_current_user, CurrentUser
 from celery_app import generate_report_task, TaskStatus, enqueue_task_from_http_request
 from database import get_db, Report
+from db.crud.reports import create_report, get_report_by_id, update_report_status, list_reports_by_user
+from db.crud.audit import record_audit_event
 import structlog
 from datetime import datetime
 
@@ -118,6 +119,7 @@ async def generate_report(
         report_id=report_id,
         report_type=request.report_type,
         format=request.format,
+        privacy_profile=request.privacy_profile,
     )
 
     # Save job_id to the database record
@@ -298,6 +300,16 @@ async def download_report(
         user_id=current_user.user_id,
         file_path=str(file_path)
     )
+
+    record_audit_event(
+        db,
+        actor=f"user:{current_user.user_id}",
+        actor_user_id=current_user.user_id,
+        action="download_report",
+        resource=f"report:{report_id}",
+        case_id=db_report.case_id,
+        metadata={"report_type": db_report.report_type, "format": db_report.format},
+    )
     
     return FileResponse(
         path=file_path,
@@ -313,6 +325,7 @@ async def download_report(
 async def list_reports(
     limit: int = 10,
     offset: int = 0,
+    status_filter: str | None = None,
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> dict:
