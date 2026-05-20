@@ -1,8 +1,16 @@
 import datetime as dt
 import logging
-from sqlalchemy import create_engine
+from contextlib import contextmanager
+from typing import Optional
+
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
+
+try:
+    from fastapi import Request
+except ImportError:
+    Request = type("Request", (), {})  # type: ignore
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -10,6 +18,7 @@ logger = logging.getLogger(__name__)
 DATABASE_URL = Config.DATABASE_URL
 _db_url = make_url(DATABASE_URL)
 _is_sqlite = _db_url.get_backend_name() == "sqlite"
+_is_postgres = _db_url.get_backend_name() == "postgresql"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if _is_sqlite else {})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
 
@@ -28,13 +37,9 @@ def _datetime_for_db(value: dt.datetime) -> dt.datetime:
 
 
 def init_db():
-    # Import here to avoid circular imports at package import time
     from .base import Base
 
     Base.metadata.create_all(bind=engine)
-
-
-from contextlib import contextmanager
 
 
 @contextmanager
@@ -56,3 +61,42 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def apply_rls_context(db: Session, user_id: int) -> None:
+    if not _is_postgres:
+        return
+    db.execute(text("SET app.current_user_id = :uid"), {"uid": str(user_id)})
+
+
+def clear_rls_context(db: Session) -> None:
+    if not _is_postgres:
+        return
+    db.execute(text("RESET app.current_user_id"))
+
+
+def get_db_with_rls(request: "Request") -> Session:
+    db = SessionLocal()
+    if _is_postgres:
+        user_id = getattr(request.state, "db_rls_user_id", None) or getattr(request.state, "user_id", None)
+        if user_id and str(user_id).isdigit():
+            apply_rls_context(db, int(user_id))
+    return db
+
+
+class RLSSession:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def __enter__(self):
+        return self.db
+
+    def __exit__(self, *args):
+        if _is_postgres:
+            clear_rls_context(self.db)
+        self.db.close()
+
+
+def rls_db(request: "Request") -> RLSSession:
+    db = get_db_with_rls(request)
+    return RLSSession(db)
