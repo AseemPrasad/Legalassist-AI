@@ -18,7 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from pdf_exporter import generate_case_pdf
+from pdf_exporter import generate_case_pdf, generate_anonymized_pdf
+from services.case_anonymization import generate_anonymized_case_data
+from services.privacy_redaction import normalize_privacy_profile
+from db.crud.audit import record_audit_event
+from database import SessionLocal
 
 
 @dataclass(frozen=True)
@@ -119,6 +123,7 @@ def generate_report(
     style: str = "formal",
     report_id: Optional[str] = None,
     watermark: Optional[str] = None,
+    privacy_profile: Optional[str] = None,
 ) -> GeneratedReport:
     """Generate a single report and persist it to disk."""
 
@@ -144,12 +149,38 @@ def generate_report(
             "Additional formats (csv, html, docx) coming in Phase 2."
         )
 
-    pdf_bytes = generate_case_pdf(user_id=int(user_id), case_id=int(case_id))
+    selected_profile = normalize_privacy_profile(privacy_profile)
+    anon_data = generate_anonymized_case_data(case_id=int(case_id), profile_name=selected_profile)
+    if anon_data:
+        pdf_bytes = generate_anonymized_pdf(
+            case_id=int(case_id),
+            anon_id=str(anon_data.get("anonymized_id", "anon")),
+            user_id=int(user_id),
+            profile_name=selected_profile,
+            anonymized_data=anon_data,
+        )
+    else:
+        pdf_bytes = generate_case_pdf(user_id=int(user_id), case_id=int(case_id))
     if not pdf_bytes:
         raise RuntimeError("PDF generation returned empty content")
 
     file_path = out_dir / file_name
     _store_report(file_path, pdf_bytes, _storage_type)
+
+    with SessionLocal() as db:
+        record_audit_event(
+            db,
+            actor=f"user:{user_id}",
+            actor_user_id=int(user_id),
+            action="report_generated",
+            resource=f"case:{case_id}",
+            case_id=int(case_id),
+            metadata={
+                "report_type": report_type,
+                "format": format,
+                "privacy_profile": selected_profile,
+            },
+        )
 
     return GeneratedReport(
         report_id=str(report_id),

@@ -1,6 +1,7 @@
 from .notifications import NotificationStatus, NotificationChannel, NotificationLog, NotificationTemplate, UserPreference
 from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote, CaseNoteVersion, CaseStatus, DocumentType
 from .auth import User, OTPVerification, APIKey, APIKey
+from .audit import AuditEvent
 from .feedback import UserFeedback
 from .reports import Report, ReportStatus, ReportType, ReportFormat
 from .analytics import (
@@ -38,6 +39,7 @@ __all__ = [
     "User",
     "OTPVerification",
     "APIKey",
+    "AuditEvent",
     "UserFeedback",
     "Report",
     "ReportStatus",

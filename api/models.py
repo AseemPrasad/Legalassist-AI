@@ -256,6 +256,28 @@ class ReportGenerationRequest(BaseModel):
     include_similar_cases: bool = True
     format: str = "pdf"  # pdf, docx, html
     style: str = "formal"  # formal, casual
+    privacy_profile: str = "personal_identifiers"
+
+
+# ============================================================================
+# Audit Models
+# ============================================================================
+
+class AuditEventItem(BaseModel):
+    id: int
+    actor: str
+    actor_user_id: Optional[int] = None
+    action: str
+    resource: str
+    case_id: Optional[int] = None
+    occurred_at: datetime
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditEventListResponse(BaseModel):
+    case_id: int
+    total: int
+    events: List[AuditEventItem]
 
 
 class ReportGenerationResponse(BaseModel):

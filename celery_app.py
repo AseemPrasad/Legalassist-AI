@@ -672,6 +672,7 @@ def generate_report_task(
     report_id: str,
     report_type: str = "comprehensive",
     format: str = "pdf",
+    privacy_profile: str = "personal_identifiers",
 ) -> Dict[str, Any]:
     """
     Asynchronous task to generate a formal report for a legal case.
@@ -698,7 +699,7 @@ def generate_report_task(
 
     # Idempotency: avoid regenerating same report repeatedly
     idemp = IdempotencyManager()
-    idempotency_key = f"report:{user_id}:{case_id}:{report_type}:{format}"
+    idempotency_key = f"report:{user_id}:{case_id}:{report_type}:{format}:{privacy_profile}"
     if not idemp.acquire(idempotency_key, ttl=600):
         existing = idemp.get_result(idempotency_key)
         logger.info(
@@ -771,6 +772,7 @@ def generate_report_task(
             format=format,
             style="formal",
             report_id=report_id,
+            privacy_profile=privacy_profile,
         )
 
         # Update Report record with completion details

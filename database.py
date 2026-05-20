@@ -60,6 +60,12 @@ from db.crud.knowledge import (
     get_knowledge_freshness_summary,
     process_due_knowledge_invalidations,
 )
+from db.crud.audit import (
+    record_audit_event,
+    list_audit_events,
+    audit_events_to_csv,
+    sanitize_audit_metadata,
+)
 from db.models import (
     Attachment,
     Case,
@@ -73,6 +79,7 @@ from db.models import (
     CaseRecord,
     CaseStatus,
     CaseTimeline,
+    AuditEvent,
     CaseNote,
     CaseNoteVersion,
     DocumentType,
@@ -136,6 +143,7 @@ __all__ = [
     "CaseNoteVersion",
     "Attachment",
     "CaseTimeline",
+    "AuditEvent",
     "CaseStatus",
     "DocumentType",
     "User",
@@ -214,6 +222,10 @@ __all__ = [
     "list_knowledge_invalidations",
     "get_knowledge_freshness_summary",
     "process_due_knowledge_invalidations",
+    "record_audit_event",
+    "list_audit_events",
+    "audit_events_to_csv",
+    "sanitize_audit_metadata",
 ]
 
 

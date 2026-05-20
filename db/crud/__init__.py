@@ -14,6 +14,12 @@ from .knowledge import (
     get_knowledge_freshness_summary,
     process_due_knowledge_invalidations,
 )
+from .audit import (
+    record_audit_event,
+    list_audit_events,
+    audit_events_to_csv,
+    sanitize_audit_metadata,
+)
 
 __all__ = [
     "create_report",
@@ -26,5 +32,9 @@ __all__ = [
     "list_knowledge_invalidations",
     "get_knowledge_freshness_summary",
     "process_due_knowledge_invalidations",
+    "record_audit_event",
+    "list_audit_events",
+    "audit_events_to_csv",
+    "sanitize_audit_metadata",
 ]
 

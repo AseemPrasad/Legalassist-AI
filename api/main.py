@@ -35,7 +35,7 @@ from api.validation import (
 )
 
 # Import routes
-from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, knowledge
+from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, knowledge, audit
 from api.auth import get_current_user_optional
 
 settings = get_settings()
@@ -134,6 +134,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(case_search.router)  # Case search and precedent matching
     app.include_router(knowledge.router)
+    app.include_router(audit.router)
     # Model feedback & optimization
     from api.routes import models as models_router
     app.include_router(models_router.router)
