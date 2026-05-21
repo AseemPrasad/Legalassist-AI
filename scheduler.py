@@ -59,6 +59,9 @@ import signal
 import sys
 import os
 import uuid
+import subprocess
+import shlex
+import time
 from datetime import datetime, timezone
 from typing import Optional
 from contextlib import contextmanager
@@ -331,6 +334,137 @@ def recompute_due_knowledge_invalidations():
             db.close()
 
 
+@contextmanager
+def managed_subprocess(command: list[str] | str, **kwargs):
+    """
+    ============================================================================
+    MANAGED SUBPROCESS CONTEXT MANAGER
+    ============================================================================
+    
+    This context manager wraps the execution of OS-level subprocesses to guarantee
+    cleanup, preventing the accumulation of zombie processes when a scheduled
+    task crashes or times out abruptly.
+    
+    WHY THIS IS CRITICAL:
+    ----------------------------------------------------------------------------
+    1. ZOMBIE PROCESS PREVENTION: When a child process terminates, it remains
+       in the process table as a "zombie" until the parent reads its exit status.
+       If the parent scheduler crashes or abandons the child, these accumulate
+       and eventually exhaust the host's PID space, causing system freezes.
+       
+    2. RESOURCE LEAK MITIGATION: Subprocesses hold onto file descriptors (stdout,
+       stderr) and memory. Abrupt failures without cleanup leak these resources.
+       
+    3. TIMEOUT ENFORCEMENT: Ensures long-running hung processes can be forcibly
+       terminated if they exceed their expected execution window.
+       
+    IMPLEMENTATION DETAILS:
+    ----------------------------------------------------------------------------
+    - Spawns the subprocess using `subprocess.Popen`.
+    - Yields the process object to the caller.
+    - In the `finally` block, it enforces termination.
+    - First attempts graceful `terminate()` (SIGTERM).
+    - If the process doesn't exit, escalates to `kill()` (SIGKILL).
+    - Finally, calls `wait()` to ensure the process is reaped from the OS table.
+    """
+    if isinstance(command, str):
+        command = shlex.split(command)
+        
+    logger.info(f"Spawning managed subprocess: {command}")
+    process = None
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **kwargs
+        )
+        yield process
+    except Exception as e:
+        logger.error(f"Error executing subprocess {command}: {e}")
+        raise
+    finally:
+        if process is not None:
+            # Check if process is still running
+            if process.poll() is None:
+                logger.warning(f"Subprocess {process.pid} did not exit cleanly. Initiating termination sequence.")
+                try:
+                    # Attempt graceful termination (SIGTERM)
+                    process.terminate()
+                    
+                    # Give it a brief moment to exit gracefully
+                    try:
+                        process.wait(timeout=5.0)
+                        logger.info(f"Subprocess {process.pid} terminated gracefully.")
+                    except subprocess.TimeoutExpired:
+                        # Escalate to SIGKILL if it refuses to die
+                        logger.error(f"Subprocess {process.pid} ignored SIGTERM. Escalating to SIGKILL.")
+                        process.kill()
+                        process.wait(timeout=2.0)
+                        logger.info(f"Subprocess {process.pid} killed forcefully.")
+                except ProcessLookupError:
+                    # Process might have exited just before we tried to terminate
+                    pass
+                except Exception as cleanup_error:
+                    logger.critical(f"Failed to cleanup subprocess {process.pid}: {cleanup_error}")
+            else:
+                # Process already exited, but we must read its exit code to prevent zombies
+                process.wait()
+            
+            # Always ensure stdout/stderr pipes are closed to prevent FD leaks
+            if process.stdout:
+                process.stdout.close()
+            if process.stderr:
+                process.stderr.close()
+
+
+def run_system_maintenance_task():
+    """
+    ============================================================================
+    SYSTEM MAINTENANCE TASK
+    ============================================================================
+    
+    A scheduled job that performs OS-level maintenance (e.g., log rotation,
+    temporary file cleanup, database vacuuming) using a subprocess.
+    
+    This function utilizes the `managed_subprocess` context manager to ensure
+    that even if the script hangs or crashes, the child process is reaped
+    and does not become a zombie process.
+    """
+    lock_id = f"{_instance_id}:{os.getpid()}"
+    with distributed_lock("legalassist:maintenance:lock", 300, lock_id) as has_lock:
+        if not has_lock:
+            logger.debug("Skipping maintenance task - another instance holds the lock")
+            return
+
+        logger.info("Starting system maintenance task.")
+        
+        # Example maintenance command (could be a custom bash script or system tool)
+        # We'll use a python one-liner for illustration that sleeps to simulate work.
+        command = ["python", "-c", "import time; print('Maintenance started'); time.sleep(2); print('Maintenance complete')"]
+        
+        try:
+            with managed_subprocess(command) as process:
+                try:
+                    # Wait for completion with a timeout
+                    stdout, stderr = process.communicate(timeout=30)
+                    
+                    if process.returncode == 0:
+                        logger.info("System maintenance completed successfully.")
+                        if stdout:
+                            logger.debug(f"Maintenance output:\n{stdout.strip()}")
+                    else:
+                        logger.error(f"System maintenance failed with return code {process.returncode}.")
+                        if stderr:
+                            logger.error(f"Maintenance errors:\n{stderr.strip()}")
+                except subprocess.TimeoutExpired:
+                    logger.error("System maintenance task timed out after 30 seconds.")
+                    # The managed_subprocess finally block will handle termination
+        except Exception as e:
+            logger.error(f"Exception during system maintenance: {e}", exc_info=True)
+
+
 def setup_scheduler(scheduler_class):
     """
     ============================================================================
@@ -431,6 +565,14 @@ def setup_scheduler(scheduler_class):
             id="knowledge_recompute_job",
             name="Quarter-Hour Knowledge Recompute",
             replace_existing=True,
+        )
+
+        scheduler.add_job(
+            run_system_maintenance_task,
+            trigger=CronTrigger(hour=3, minute=0),  # 3 AM every day
+            id="system_maintenance_job",
+            name="Daily OS-level System Maintenance",
+            replace_existing=True
         )
         
         logger.info(f"Successfully configured {scheduler_class.__name__}")

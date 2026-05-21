@@ -173,8 +173,93 @@ def test_parse_3section_format():
 
 
 def test_parse_empty_response():
+    """Test response containing only whitespace characters"""
     remedies = parse_remedies_response("   ")
     assert isinstance(remedies, dict)
+    assert remedies["_is_partial"] is True
+    assert remedies.get("_warning") == "Empty response"
+    assert remedies["what_happened"] == ""
+    assert remedies["can_appeal"] == ""
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["cost"] == ""
+    assert remedies["first_action"] == ""
+    assert remedies["important_deadline"] == ""
+    assert remedies["deadline"] == ""
+    assert "confidence_score" in remedies
+
+
+def test_parse_null_response():
+    """Test response when None is explicitly passed"""
+    remedies = parse_remedies_response(None)
+    assert isinstance(remedies, dict)
+    assert remedies["_is_partial"] is True
+    assert remedies.get("_warning") == "Empty response"
+    assert remedies["what_happened"] == ""
+    assert remedies["can_appeal"] == ""
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["cost"] == ""
+    assert remedies["first_action"] == ""
+    assert remedies["important_deadline"] == ""
+    assert remedies["deadline"] == ""
+    assert "confidence_score" in remedies
+
+
+def test_parse_empty_string_response():
+    """Test response with a completely empty string"""
+    remedies = parse_remedies_response("")
+    assert isinstance(remedies, dict)
+    assert remedies["_is_partial"] is True
+    assert remedies.get("_warning") == "Empty response"
+    assert remedies["what_happened"] == ""
+    assert remedies["can_appeal"] == ""
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["cost"] == ""
+    assert remedies["first_action"] == ""
+    assert remedies["important_deadline"] == ""
+    assert remedies["deadline"] == ""
+    assert "confidence_score" in remedies
+
+
+def test_parse_newline_only_response():
+    """Test response containing only newline characters"""
+    remedies = parse_remedies_response("\n\n\n\r\n")
+    assert isinstance(remedies, dict)
+    assert remedies["_is_partial"] is True
+    assert remedies.get("_warning") == "Empty response"
+    assert remedies["what_happened"] == ""
+    assert remedies["can_appeal"] == ""
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["cost"] == ""
+    assert remedies["first_action"] == ""
+    assert remedies["important_deadline"] == ""
+    assert remedies["deadline"] == ""
+    assert "confidence_score" in remedies
+
+
+def test_parse_tab_only_response():
+    """Test response containing only tab characters"""
+    remedies = parse_remedies_response("\t\t\t")
+    assert isinstance(remedies, dict)
+    assert remedies["_is_partial"] is True
+    assert remedies.get("_warning") == "Empty response"
+    assert remedies["what_happened"] == ""
+    assert remedies["can_appeal"] == ""
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["cost"] == ""
+    assert remedies["first_action"] == ""
+    assert remedies["important_deadline"] == ""
+    assert remedies["deadline"] == ""
+    assert "confidence_score" in remedies
 
 
 def test_parse_only_unmapped_sections_returns_none():
