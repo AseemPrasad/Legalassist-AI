@@ -39,9 +39,20 @@ class TimelineRealtimeBus:
         return q
 
     async def unsubscribe(self, case_id: int, q: asyncio.Queue[str]) -> None:
-        channel = await self._get_or_create_channel(case_id)
+        async with self._global_lock:
+            channel = self._channels.get(case_id)
+            if channel is None:
+                return
         async with channel.lock:
             channel.connections.discard(q)
+            if not channel.connections:
+                async with self._global_lock:
+                    if self._channels.get(case_id) is channel:
+                        del self._channels[case_id]
+
+    async def close(self) -> None:
+        async with self._global_lock:
+            self._channels.clear()
 
     async def publish(self, case_id: int, payload: Dict[str, Any]) -> None:
         channel = await self._get_or_create_channel(case_id)

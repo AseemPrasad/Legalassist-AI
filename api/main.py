@@ -135,6 +135,12 @@ def create_app() -> FastAPI:
         yield
         
         await cleanup_limiter()
+        try:
+            from services.timeline_realtime import timeline_realtime_bus
+
+            await timeline_realtime_bus.close()
+        except Exception:
+            pass
         logger.info("API Shutting down")
     
     app = FastAPI(
