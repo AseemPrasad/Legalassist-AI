@@ -72,3 +72,36 @@ def test_repeated_write_requests_return_same_result(monkeypatch):
     assert first.json() == second.json()
     assert second.headers.get("X-Idempotent-Replay") == "true"
     assert counter["value"] == 1
+
+
+def test_same_json_with_different_whitespace_reuses_idempotency_result(monkeypatch):
+    app, counter = build_app()
+    client = TestClient(app)
+
+    fake = FakeRedis()
+    http_idempotency_manager._client = fake
+
+    headers = {
+        "Idempotency-Key": "resource-key-2",
+        "Content-Type": "application/json",
+    }
+
+    first = client.post(
+        "/resources",
+        content='{"name":"alpha","tags":[1,2]}',
+        headers=headers,
+    )
+    second = client.post(
+        "/resources",
+        content='''{
+            "tags": [1, 2],
+            "name": "alpha"
+        }''',
+        headers=headers,
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+    assert second.headers.get("X-Idempotent-Replay") == "true"
+    assert counter["value"] == 1

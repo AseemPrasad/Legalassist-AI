@@ -65,10 +65,10 @@ class IdempotencyManager:
         path: str,
         idempotency_key: str,
         principal: str,
-        body: bytes,
+        body_fingerprint: str,
     ) -> str:
         principal_hash = hashlib.sha256(principal.encode("utf-8")).hexdigest()
-        return f"{method.upper()}:{path}:{principal_hash}:{idempotency_key}"
+        return f"{method.upper()}:{path}:{principal_hash}:{idempotency_key}:{body_fingerprint}"
 
     def acquire(self, key: str, ttl: int = 60) -> bool:
         """Acquire a lock for the given idempotency key. Returns True if acquired."""
