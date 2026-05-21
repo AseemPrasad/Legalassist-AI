@@ -30,7 +30,7 @@ def setup_production_observability():
         "application_started",
         environment=os.getenv("ENVIRONMENT", "development"),
         version="1.0.0",
-        timestamp=str(__import__("datetime").datetime.utcnow()),
+        timestamp=str(datetime.now(timezone.utc)),
     )
     
     # 4. Verify all services are connected

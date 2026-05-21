@@ -7,7 +7,8 @@ This data is crucial for training the analytics engine.
 
 import streamlit as st
 from datetime import datetime, timezone
-from database import SessionLocal, submit_user_feedback
+from database import submit_user_feedback, CaseRecord
+from pages.ui_components import db_context, section
 import logging
 
 logger = logging.getLogger(__name__)
@@ -42,14 +43,11 @@ prediction models that help future users make better decisions.
 All data is anonymized and kept private.
 """)
 
-# Get database session
-db = SessionLocal()
-
 try:
     # Create form
     with st.form("outcome_form", clear_on_submit=True):
         
-        st.subheader("1️⃣ About Your Case")
+        with section("1️⃣ About Your Case"):
         
         # User ID (optional, for tracking if user wants)
         user_id = st.text_input(
@@ -80,7 +78,7 @@ try:
             )
         
         st.markdown("---")
-        st.subheader("2️⃣ First Judgment Outcome")
+        with section("2️⃣ First Judgment Outcome"):
         
         col1, col2 = st.columns(2)
         
@@ -97,7 +95,7 @@ try:
             )
         
         st.markdown("---")
-        st.subheader("3️⃣ Appeal Status")
+        with section("3️⃣ Appeal Status"):
         
         did_appeal = st.radio(
             "Did you appeal the judgment?",
@@ -142,7 +140,7 @@ try:
                 st.warning("We'd love to hear from you once you make a decision. Please come back and update!")
         
         st.markdown("---")
-        st.subheader("4️⃣ Your Feedback")
+        with section("4️⃣ Your Feedback"):
         
         satisfaction = st.slider(
             "How satisfied are you with the legal system?",
@@ -180,18 +178,19 @@ try:
                     appeal_outcome_mapped = outcome_map.get(appeal_outcome)
                 
                 # Submit feedback
-                feedback = submit_user_feedback(
-                    db,
-                    user_id=user_id,
-                    did_appeal=did_appeal == "Yes" if did_appeal in ["Yes", "No"] else None,
-                    appeal_outcome=appeal_outcome_mapped,
-                    appeal_cost=int(appeal_cost) if appeal_cost and did_appeal == "Yes" else None,
-                    time_to_verdict=int(time_to_verdict) if time_to_verdict and did_appeal == "Yes" else None,
-                    case_type=case_type,
-                    jurisdiction=jurisdiction,
-                    satisfaction_rating=satisfaction,
-                    feedback_text=feedback_text if feedback_text else None,
-                )
+                with db_context() as db:
+                    feedback = submit_user_feedback(
+                        db,
+                        user_id=user_id,
+                        did_appeal=did_appeal == "Yes" if did_appeal in ["Yes", "No"] else None,
+                        appeal_outcome=appeal_outcome_mapped,
+                        appeal_cost=int(appeal_cost) if appeal_cost and did_appeal == "Yes" else None,
+                        time_to_verdict=int(time_to_verdict) if time_to_verdict and did_appeal == "Yes" else None,
+                        case_type=case_type,
+                        jurisdiction=jurisdiction,
+                        satisfaction_rating=satisfaction,
+                        feedback_text=feedback_text if feedback_text else None,
+                    )
                 
                 logger.info(f"Feedback submitted by {user_id}")
                 
@@ -234,9 +233,6 @@ except Exception as e:
     logger.error(f"Form error: {str(e)}")
     st.error(f"Error: {str(e)}")
 
-finally:
-    db.close()
-
 # ==================== INFORMATION ====================
 st.markdown("---")
 st.subheader("ℹ️ Why We Need This Data")
@@ -259,8 +255,8 @@ st.markdown("---")
 st.subheader("📊 Recent Feedback Stats")
 
 try:
-    from database import CaseRecord
-    all_cases = db.query(CaseRecord).all()
+    with db_context() as db:
+        all_cases = db.query(CaseRecord).all()
     
     if all_cases:
         st.write(f"✅ {len(all_cases)} cases tracked")

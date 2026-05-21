@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import time
 
 from config import Config
+import routes
 
 from auth import (
     init_auth_session,
@@ -27,6 +28,18 @@ st.set_page_config(
 )
 
 # No custom styling, using Streamlit default theme
+
+
+def clear_auth_session_state():
+    """Clear all authentication-related session state"""
+    keys_to_clear = [
+        "pending_email", "otp_sent", "auth_flow_active",
+        "temp_user_id", "otp_unlocked", "jwt_token",
+        "user_id", "user_email", "logged_in"
+    ]
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
 
 
 def render_login_card():
@@ -119,8 +132,7 @@ def render_otp_verification():
         st.markdown("---")
 
         if st.button("← Use different email", use_container_width=True):
-            st.session_state.pending_email = None
-            st.session_state.otp_sent = False
+            clear_auth_session_state()
             st.rerun()
 
 
@@ -138,16 +150,17 @@ def render_logged_in_state():
 
         with col1:
             if st.button("📊 Go to Dashboard", use_container_width=True):
-                st.switch_page("pages/1_My_Cases.py")
+                st.switch_page(routes.PAGE_MY_CASES)
 
         with col2:
             if st.button("🚀 Upload Judgment", use_container_width=True):
-                st.switch_page("pages/0_Home.py")
+                st.switch_page(routes.PAGE_HOME)
 
         st.markdown("---")
 
         if st.button("🚪 Logout", type="secondary", use_container_width=True):
             logout_user()
+            clear_auth_session_state()
             st.rerun()
 
 

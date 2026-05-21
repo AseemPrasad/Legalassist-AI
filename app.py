@@ -33,15 +33,17 @@ from core.app_utils import (
     export_draft_to_pdf,
 )
 
-# ==================== Notification System Setup ====================
-from database import init_db, SessionLocal, get_db, DocumentType, db_session
-from scheduler import start_scheduler
+# ==================== Notification System ====================
+# NOTE: Use scheduler.run_worker() for production deployments.
+# Do NOT start scheduler in Streamlit - it causes failures on reruns.
 from auth import init_auth_session, require_auth, get_current_user_id, get_current_user_email, logout_user
 from case_manager import get_user_cases_summary, upload_case_document, create_new_case, get_case_detail
+import routes
 from observability.integration import initialize_observability_for_environment
 
 # Initialize database
 from config import Config
+Config.validate_runtime_security()
 init_db()
 
 # ==================== Logging Setup ====================
@@ -61,7 +63,7 @@ initialize_observability_for_environment()
 st.set_page_config(
     page_title=Config.APP_NAME,
     page_icon="⚖",
-    layout="wide" if st.query_params.get("page") == "deadlines" else "centered"
+    layout="wide"
 )
 
 # Using default Streamlit theme
@@ -218,7 +220,7 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
     if not require_auth():
         st.info("Log in to save this document, track deadlines, and view timeline history.")
         if st.button("Go to Login", key="login_to_save"):
-            st.switch_page("pages/0_Login.py")
+            st.switch_page(routes.PAGE_LOGIN)
         return
 
     cases = get_user_cases_summary(user_id, include_closed=False)
@@ -249,7 +251,7 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
         
         if st.session_state.get("selected_case_id"):
             if st.button("🔍 View Case Details", key="view_existing_case", use_container_width=True):
-                st.switch_page("pages/2_Case_Details.py")
+                st.switch_page(routes.PAGE_CASE_DETAILS)
             
     with col2:
         st.markdown("### New Case")
@@ -261,13 +263,15 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
             
             if st.button("Create Case & Save Document", use_container_width=True):
                 if new_case_number and new_jurisdiction:
-                    new_case = create_new_case(
+                    new_case, was_existing = create_new_case(
                         user_id=user_id,
                         case_number=new_case_number,
                         case_type=new_case_type,
                         jurisdiction=new_jurisdiction,
                         title=new_case_title
                     )
+                    if was_existing:
+                        st.warning("Case already exists. Document will be added to existing case.")
                     if new_case:
                         doc = upload_case_document(
                             user_id=user_id,
@@ -302,14 +306,14 @@ def render_analytics_preview_section():
     # Action buttons for the analytics module
     act_col1, act_col2, act_col3 = st.columns(3)
     with act_col1:
-        if st.button("📈 View Stats", key="view_analytics", use_container_width=True):
+        if st.button("📈 View Stats", key="view_stats_btn", use_container_width=True):
             st.session_state.show_analytics = True
     with act_col2:
         if st.button("🎯 Est. Chances", key="estimate_chances", use_container_width=True):
-            st.switch_page("pages/2_Appeal_Estimator.py")
+            st.switch_page(routes.PAGE_APPEAL_ESTIMATOR)
     with act_col3:
         if st.button("📝 Report Outcome", key="report_outcome", use_container_width=True):
-            st.switch_page("pages/3_Report_Outcome.py")
+            st.switch_page(routes.PAGE_REPORT_OUTCOME)
     
     # Detailed analytics preview
     if st.session_state.get("show_analytics"):
@@ -336,7 +340,8 @@ def render_analytics_preview_section():
                             try:
                                 rate_f = float(success_rate) / 100.0
                                 st.progress(rate_f, text=f"Success Rate Intensity")
-                            except: pass
+                            except (ValueError, TypeError):
+                                pass
                             
                     with m3:
                         st.metric("Appeals Filed", summary.get("appeals_filed", 0))
@@ -446,7 +451,7 @@ def render_sidebar_navigation():
         st.sidebar.info("🔒 Secure Mode: Not logged in. Please sign in to access case history and tracking features.")
         
         if st.sidebar.button("🚀 Go to Login", use_container_width=True, type="primary"):
-            st.switch_page("pages/0_Login.py")
+            st.switch_page(routes.PAGE_LOGIN)
             
     st.sidebar.markdown("---")
     st.sidebar.caption("v2.4.0 | LegalAssist AI Enterprise")
@@ -456,10 +461,10 @@ def render_sidebar_navigation():
 def main():
     # Initialize the auth state at the very beginning of the run
     init_auth_session()
-    
+
     # Render the sidebar navigation and auth controls
     render_sidebar_navigation()
-    
+
     st.title("⚡ LegalEase AI")
     client = get_client()
     current_language = st.session_state.get("judgment_language", "English")
@@ -532,6 +537,7 @@ def main():
         # the same name correctly invalidates the cached result.
         file_bytes = uploaded_file.getvalue()
         content_hash = hashlib.md5(file_bytes).hexdigest()
+        cache_key = f"{uploaded_file.name}_{content_hash}_{language}"
         st.session_state.processed_file = uploaded_file.name
         st.session_state.processed_file_hash = content_hash
         st.session_state.last_language = language
@@ -545,7 +551,7 @@ def main():
 
         with st.spinner(ui["processing"]):
             try:
-                # Build the same content-based cache key used when the button was clicked.
+                # Compute content hash for cache validation
                 file_bytes = uploaded_file.getvalue()
                 content_hash = hashlib.md5(file_bytes).hexdigest()
                 cache_key = f"{uploaded_file.name}_{content_hash}_{language}"
@@ -707,7 +713,7 @@ def main():
                     if not require_auth():
                         st.info("Log in to save this document, track deadlines, and view timeline history.")
                         if st.button("Go to Login", key="login_to_save"):
-                            st.switch_page("pages/0_Login.py")
+                            st.switch_page(routes.PAGE_LOGIN)
                     else:
                         user_id = get_current_user_id()
                         cases = get_user_cases_summary(user_id, include_closed=False)
@@ -734,11 +740,11 @@ def main():
                                             st.session_state.selected_case_id = selected_case_id
                             else:
                                 st.info("No active cases found. Create one to the right.")
-                            
+
                             if st.session_state.get("selected_case_id"):
                                 if st.button("View Case Details", key="view_existing_case"):
-                                    st.switch_page("pages/2_Case_Details.py")
-                                
+                                    st.switch_page(routes.PAGE_CASE_DETAILS)
+
                         with col2:
                             with st.expander("➕ Or Create New Case"):
                                 new_case_number = st.text_input("Case Number").strip()
@@ -747,13 +753,15 @@ def main():
                                 new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court").strip()
                                 if st.button("Create & Save"):
                                     if new_case_number and new_jurisdiction:
-                                        new_case = create_new_case(
+                                        new_case, was_existing = create_new_case(
                                             user_id=user_id,
                                             case_number=new_case_number,
                                             case_type=new_case_type,
                                             jurisdiction=new_jurisdiction,
                                             title=new_case_title
                                         )
+                                        if was_existing:
+                                            st.warning("Case already exists. Document will be added to existing case.")
                                         if new_case:
                                             doc = upload_case_document(
                                                 user_id=user_id,
@@ -766,10 +774,7 @@ def main():
                                             if doc:
                                                 st.success("✅ Case created and document saved!")
                                                 st.session_state.selected_case_id = new_case.id
-                                    else:
-                                        st.error("Case Number and Jurisdiction required.")
-                    
-                    # ===== ANALYTICS & TRACKING SECTION =====
+
                     st.markdown("---")
                     st.markdown("## 📊 Track Your Case & See Statistics")
                     
@@ -783,7 +788,7 @@ def main():
                     col1, col2, col3 = st.columns(3)
                     
                     with col1:
-                        if st.button("📈 View Analytics", key="view_analytics"):
+                        if st.button("📈 View Analytics", key="view_analytics_bottom"):
                             st.session_state.show_analytics = True
                     
                     with col2:
@@ -817,7 +822,7 @@ def main():
                                     st.metric("Appeals Filed", summary["appeals_filed"])
                                 
                                 if st.button("📊 View Full Dashboard", use_container_width=True, key="full_dashboard"):
-                                    st.switch_page("pages/1_Analytics_Dashboard.py")
+                                    st.switch_page(routes.PAGE_ANALYTICS_DASHBOARD)
                             else:
                                 st.info("Analytics will be available as more cases are tracked.")
                         except Exception as e:

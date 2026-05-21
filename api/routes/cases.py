@@ -6,13 +6,19 @@ GET /api/v1/cases/{id}/timeline - Get case timeline
 """
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, Form, Request
+from sqlalchemy.orm import Session
 from api.models import (
     CaseSearchRequest, CaseSearchResponse, CaseResult,
     CaseTimeline, CaseEvent, SimilarityFeedbackRequest,
     SimilarityFeedbackResponse,
+    CaseNoteDraftRequest,
+    CaseNotePublishRequest,
+    CaseNoteHistoryResponse,
+    CaseNoteVersionItem,
 )
 from api.auth import get_current_user, CurrentUser
+from api.validation import validate_file_upload, validate_file_upload_streaming, ValidationConfig
 import structlog
 from sqlalchemy import func
 
@@ -21,7 +27,16 @@ from database import (
     CaseOutcome,
     get_db,
     submit_similarity_feedback,
+    Case,
+    DocumentType,
+    CaseDocument,
+    Attachment,
+    save_case_note_draft,
+    publish_case_note,
+    get_case_note_history,
 )
+from case_manager import upload_case_document_file
+from celery_app import enqueue_task_from_http_request, process_case_document_upload_task
 from analytics_engine import CaseSimilarityCalculator
 
 router = APIRouter(prefix="/api/v1/cases", tags=["cases"])
@@ -35,7 +50,8 @@ logger = structlog.get_logger(__name__)
 )
 async def search_cases(
     request: CaseSearchRequest,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> CaseSearchResponse:
     """
     Search for similar cases in database
@@ -68,138 +84,131 @@ async def search_cases(
     candidate_limit = 1000  # keeps the response time low
 
     reference_case = None
-    db = None
-    try:
-        db = get_db()
 
-        query_signature = request.query_signature or _build_query_signature(request)
+    query_signature = request.query_signature or _build_query_signature(request)
 
-        # Build candidate query from filters (cheap DB-side filtering)
-        query = db.query(CaseRecord)
-        if request.case_type and request.case_type != "general":
-            query = query.filter(CaseRecord.case_type == request.case_type)
-        if request.jurisdiction:
-            query = query.filter(CaseRecord.jurisdiction == request.jurisdiction)
-        if request.court_name:
-            query = query.filter(CaseRecord.court_name == request.court_name)
-        if request.judge_name:
-            query = query.filter(CaseRecord.judge_name == request.judge_name)
-        if request.plaintiff_type:
-            query = query.filter(CaseRecord.plaintiff_type == request.plaintiff_type)
-        if request.defendant_type:
-            query = query.filter(CaseRecord.defendant_type == request.defendant_type)
+    # Build candidate query from filters (cheap DB-side filtering)
+    query = db.query(CaseRecord)
+    if request.case_type and request.case_type != "general":
+        query = query.filter(CaseRecord.case_type == request.case_type)
+    if request.jurisdiction:
+        query = query.filter(CaseRecord.jurisdiction == request.jurisdiction)
+    if request.court_name:
+        query = query.filter(CaseRecord.court_name == request.court_name)
+    if request.judge_name:
+        query = query.filter(CaseRecord.judge_name == request.judge_name)
+    if request.plaintiff_type:
+        query = query.filter(CaseRecord.plaintiff_type == request.plaintiff_type)
+    if request.defendant_type:
+        query = query.filter(CaseRecord.defendant_type == request.defendant_type)
 
-        # Restrict time window if requested
-        if request.year_from is not None:
-            query = query.filter(CaseRecord.created_at >= datetime(request.year_from, 1, 1))
-        if request.year_to is not None:
-            query = query.filter(CaseRecord.created_at <= datetime(request.year_to, 12, 31, 23, 59, 59))
+    # Restrict time window if requested
+    if request.year_from is not None:
+        query = query.filter(CaseRecord.created_at >= datetime(request.year_from, 1, 1))
+    if request.year_to is not None:
+        query = query.filter(CaseRecord.created_at <= datetime(request.year_to, 12, 31, 23, 59, 59))
 
-        # Keep result set small for <2s performance
-        candidates = query.order_by(CaseRecord.created_at.desc()).limit(candidate_limit).all()
+    # Keep result set small for <2s performance
+    candidates = query.order_by(CaseRecord.created_at.desc()).limit(candidate_limit).all()
 
-        # If we cannot get a real reference_case, we use the first candidate as proxy when possible.
-        # This still returns meaningful “similar cases” under the attribute-only scoring.
-        if candidates:
-            reference_case = candidates[0]
+    # If we cannot get a real reference_case, we use the first candidate as proxy when possible.
+    # This still returns meaningful “similar cases” under the attribute-only scoring.
+    if candidates:
+        reference_case = candidates[0]
 
-        if not reference_case:
-            return CaseSearchResponse(
-                total_results=0,
-                results=[],
-                search_time_seconds=round(perf_counter() - start, 4),
-            )
-
-        # Score candidates and apply threshold
-        scored = []
-        for c in candidates:
-            if c.id == reference_case.id:
-                continue
-            raw = CaseSimilarityCalculator.case_similarity_score(reference_case, c)
-            # raw is 0..100. normalize to 0..1
-            score01 = raw / 100.0
-            # Optional: slight boost for recency to match ranking requirement.
-            # (Cheap: based on created_at within last ~365 days)
-            try:
-                created_at = c.created_at
-                if created_at and created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=timezone.utc)
-                recency_days = (datetime.now(timezone.utc) - created_at).days if created_at else 0
-                recency_boost = max(0.0, 0.05 - recency_days * 0.0002)  # up to +0.05
-            except Exception:
-                recency_boost = 0.0
-            feedback_boost = CaseSimilarityCalculator.get_feedback_adjustment(
-                db,
-                c,
-                user_id=current_user.user_id,
-                query_signature=query_signature,
-            )
-            score01 = min(1.0, score01 + recency_boost + feedback_boost)
-
-            if score01 > min_similarity:
-                scored.append((c, score01))
-
-        scored.sort(key=lambda x: x[1], reverse=True)
-        top = scored[: request.limit]
-
-        # Fetch appeal analytics for the returned set
-        result_ids = [c.id for c, _ in top]
-        outcome_rows = []
-        if result_ids:
-            outcome_rows = (
-                db.query(CaseOutcome)
-                .filter(CaseOutcome.case_id.in_(result_ids))
-                .all()
-            )
-
-        outcome_map = {row.case_id: row for row in outcome_rows}
-        appealed_cases = sum(1 for row in outcome_rows if row.appeal_filed)
-        appeal_successful_cases = sum(1 for row in outcome_rows if row.appeal_filed and row.appeal_success)
-        appeal_success_rate = (
-            round(appeal_successful_cases / appealed_cases, 4) if appealed_cases > 0 else None
-        )
-
-        results = []
-        for c, score in top:
-            verdict = c.outcome
-            # We don't have a stored case_number/title on CaseRecord for analytics in current schema.
-            # Use placeholders derived from available fields.
-            case_number = c.hashed_case_id
-            title = c.judge_name or "Precedent"
-            outcome = outcome_map.get(c.id)
-            case_appeal_success_rate = None
-            if outcome and outcome.appeal_filed:
-                case_appeal_success_rate = 1.0 if outcome.appeal_success else 0.0
-
-            results.append(
-                CaseResult(
-                    case_id=str(c.id),
-                    case_number=case_number,
-                    title=title,
-                    year=c.created_at.year if c.created_at else 0,
-                    jurisdiction=c.jurisdiction,
-                    case_type=c.case_type,
-                    summary=c.judgment_summary or "",
-                    verdict=verdict,
-                    relevance_score=round(float(score), 4),
-                    appeal_success_rate=case_appeal_success_rate,
-                    url=None,
-                )
-            )
-
-        total_results = len(scored)
+    if not reference_case:
         return CaseSearchResponse(
-            total_results=total_results,
-            results=results,
+            total_results=0,
+            results=[],
             search_time_seconds=round(perf_counter() - start, 4),
-            appeal_success_rate=appeal_success_rate,
-            appealed_cases=appealed_cases,
-            appeal_successful_cases=appeal_successful_cases,
         )
 
-    finally:
-        if db is not None:
-            db.close()
+    # Score candidates and apply threshold
+    scored = []
+    for c in candidates:
+        if c.id == reference_case.id:
+            continue
+        raw = CaseSimilarityCalculator.case_similarity_score(reference_case, c)
+        # raw is 0..100. normalize to 0..1
+        score01 = raw / 100.0
+        # Optional: slight boost for recency to match ranking requirement.
+        # (Cheap: based on created_at within last ~365 days)
+        try:
+            created_at = c.created_at
+            if created_at and created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            recency_days = (datetime.now(timezone.utc) - created_at).days if created_at else 0
+            recency_boost = max(0.0, 0.05 - recency_days * 0.0002)  # up to +0.05
+        except Exception:
+            recency_boost = 0.0
+        feedback_boost = CaseSimilarityCalculator.get_feedback_adjustment(
+            db,
+            c,
+            user_id=current_user.user_id,
+            query_signature=query_signature,
+        )
+        score01 = min(1.0, score01 + recency_boost + feedback_boost)
+
+        if score01 > min_similarity:
+            scored.append((c, score01))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top = scored[: request.limit]
+
+    # Fetch appeal analytics for the returned set
+    result_ids = [c.id for c, _ in top]
+    outcome_rows = []
+    if result_ids:
+        outcome_rows = (
+            db.query(CaseOutcome)
+            .filter(CaseOutcome.case_id.in_(result_ids))
+            .all()
+        )
+
+    outcome_map = {row.case_id: row for row in outcome_rows}
+    appealed_cases = sum(1 for row in outcome_rows if row.appeal_filed)
+    appeal_successful_cases = sum(1 for row in outcome_rows if row.appeal_filed and row.appeal_success)
+    appeal_success_rate = (
+        round(appeal_successful_cases / appealed_cases, 4) if appealed_cases > 0 else None
+    )
+
+    results = []
+    for c, score in top:
+        verdict = c.outcome
+        # We don't have a stored case_number/title on CaseRecord for analytics in current schema.
+        # Use placeholders derived from available fields.
+        case_number = c.hashed_case_id
+        title = c.judge_name or "Precedent"
+        outcome = outcome_map.get(c.id)
+        case_appeal_success_rate = None
+        if outcome and outcome.appeal_filed:
+            case_appeal_success_rate = 1.0 if outcome.appeal_success else 0.0
+
+        results.append(
+            CaseResult(
+                case_id=str(c.id),
+                case_number=case_number,
+                title=title,
+                year=c.created_at.year if c.created_at else 0,
+                jurisdiction=c.jurisdiction,
+                case_type=c.case_type,
+                summary=c.judgment_summary or "",
+                verdict=verdict,
+                relevance_score=round(float(score), 4),
+                appeal_success_rate=case_appeal_success_rate,
+                url=None,
+            )
+        )
+
+    total_results = len(scored)
+    return CaseSearchResponse(
+        total_results=total_results,
+        results=results,
+        search_time_seconds=round(perf_counter() - start, 4),
+        appeal_success_rate=appeal_success_rate,
+        appealed_cases=appealed_cases,
+        appeal_successful_cases=appeal_successful_cases,
+    )
 
 
 @router.post(
@@ -209,28 +218,23 @@ async def search_cases(
 )
 async def submit_similarity_result_feedback(
     request: SimilarityFeedbackRequest,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> SimilarityFeedbackResponse:
     """Persist user feedback for a similarity search result."""
-    db = None
-    try:
-        db = get_db()
-        query_signature = request.query_signature or ""
-        feedback = submit_similarity_feedback(
-            db,
-            user_id=current_user.user_id,
-            candidate_case_id=request.candidate_case_id,
-            query_signature=query_signature,
-            relevance=request.relevance,
-        )
-        return SimilarityFeedbackResponse(
-            success=True,
-            saved_at=feedback.created_at,
-            feedback_id=feedback.id,
-        )
-    finally:
-        if db is not None:
-            db.close()
+    query_signature = request.query_signature or ""
+    feedback = submit_similarity_feedback(
+        db,
+        user_id=current_user.user_id,
+        candidate_case_id=request.candidate_case_id,
+        query_signature=query_signature,
+        relevance=request.relevance,
+    )
+    return SimilarityFeedbackResponse(
+        success=True,
+        saved_at=feedback.created_at,
+        feedback_id=feedback.id,
+    )
 
 
 def _build_query_signature(request: CaseSearchRequest) -> str:
@@ -267,7 +271,7 @@ async def get_case_timeline(
     )
     
     # Mock timeline data
-    base_date = datetime.utcnow() - timedelta(days=365)
+    base_date = datetime.now(timezone.utc) - timedelta(days=365)
     events = [
         CaseEvent(
             date=base_date,
@@ -310,18 +314,20 @@ async def get_case_timeline(
             documents=["decision.pdf"]
         ),
     ]
-    
-    return CaseTimeline(
-        case_id=case_id,
-        case_number="2023-CV-00001",
-        title="Example Case",
-        status="closed",
-        created_at=base_date,
-        updated_at=datetime.utcnow(),
-        events=events,
-        total_events=len(events),
-        duration_years=1.0
-    )
+
+    timeline_payload = {
+        "case_id": case_id,
+        "case_number": "2023-CV-00001",
+        "title": "Example Case",
+        "status": "closed",
+        "created_at": base_date,
+        "updated_at": datetime.now(timezone.utc),
+        "events": events,
+        "total_events": len(events),
+        "duration_years": 1.0,
+    }
+
+    return CaseTimeline.model_validate(timeline_payload)
 
 
 @router.get(
@@ -330,19 +336,260 @@ async def get_case_timeline(
 )
 async def get_case_details(
     case_id: str,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> dict:
     """Get complete case details"""
     
+    logger.info(
+        "Retrieving case details",
+        case_id=case_id,
+        user_id=current_user.user_id
+    )
+    
+    try:
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid user ID format"
+        )
+        
+    try:
+        case_id_int = int(case_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid case ID format"
+        )
+        
+    case = db.query(Case).filter(Case.id == case_id_int).first()
+    
+    if not case:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Case not found"
+        )
+        
+    if case.user_id != user_id_int:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: You do not own this case"
+        )
+        
+    latest_doc = None
+    if case.documents:
+        sorted_docs = sorted(case.documents, key=lambda d: d.uploaded_at, reverse=True)
+        latest_doc = sorted_docs[0]
+        
     return {
-        "case_id": case_id,
-        "case_number": "2023-CV-00001",
-        "title": "Example Case",
-        "parties": ["Smith", "Jones"],
-        "jurisdiction": "US",
-        "status": "closed",
-        "summary": "Case summary here"
+        "case_id": str(case.id),
+        "case_number": case.case_number,
+        "title": case.title or case.case_number,
+        "parties": ["Smith", "Jones"],  # Placeholder
+        "jurisdiction": case.jurisdiction,
+        "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
+        "summary": latest_doc.summary if latest_doc else ""
     }
+
+
+@router.post(
+    "/{case_id}/documents/upload",
+    summary="Upload a PDF or image document to a case",
+)
+async def upload_case_document_endpoint(
+    case_id: str,
+    http_request: Request,
+    file: UploadFile = File(...),
+    document_type: str = Form(default="Other"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Store an upload, create linked attachment/document rows, and queue OCR extraction."""
+    try:
+        case_id_int = int(case_id)
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID format")
+
+    case = db.query(Case).filter(Case.id == case_id_int).first()
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+    if case.user_id != user_id_int:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: You do not own this case")
+
+    allowed_extensions = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+    allowed_mime_types = {
+        "application/pdf",
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/tiff",
+        "image/bmp",
+        "image/webp",
+    }
+
+    validate_file_upload(
+        file,
+        max_size=ValidationConfig.MAX_UPLOAD_SIZE,
+        allowed_extensions=allowed_extensions,
+        allowed_mime_types=allowed_mime_types,
+    )
+    await validate_file_upload_streaming(file, max_size=ValidationConfig.MAX_UPLOAD_SIZE)
+    file_bytes = await file.read()
+
+    stored = upload_case_document_file(
+        user_id=user_id_int,
+        case_id=case_id_int,
+        file_bytes=file_bytes,
+        filename=file.filename,
+        document_type=getattr(DocumentType, document_type.upper(), DocumentType.OTHER),
+        content_type=file.content_type,
+    )
+    if not stored:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to store uploaded file")
+
+    task = enqueue_task_from_http_request(
+        process_case_document_upload_task,
+        http_request,
+        context_user_id=current_user.user_id,
+        user_id=str(current_user.user_id),
+        case_id=str(case_id_int),
+        attachment_id=str(stored["attachment"]["id"]),
+        document_id=str(stored["document"]["id"]),
+        original_filename=file.filename,
+    )
+
+    return {
+        "status": "queued",
+        "task_id": task.id,
+        "case_id": case_id_int,
+        "attachment_id": stored["attachment"]["id"],
+        "document_id": stored["document"]["id"],
+        "document_type": stored["document"]["document_type"],
+        "filename": file.filename,
+    }
+
+
+@router.post(
+    "/{case_id}/notes/draft",
+    summary="Save case note draft",
+)
+async def save_case_note_draft_endpoint(
+    case_id: str,
+    request: CaseNoteDraftRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        case_id_int = int(case_id)
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID format")
+
+    case = db.query(Case).filter(Case.id == case_id_int).first()
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+    if case.user_id != user_id_int:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: You do not own this case")
+
+    note = save_case_note_draft(
+        db,
+        case_id=case_id_int,
+        user_id=user_id_int,
+        note_text=request.note_text,
+        changed_by_email=current_user.email,
+    )
+    return {
+        "case_id": str(case_id_int),
+        "note_id": note.id,
+        "draft_text": note.draft_text,
+        "draft_updated_at": note.draft_updated_at,
+        "published_at": note.published_at,
+    }
+
+
+@router.post(
+    "/{case_id}/notes/publish",
+    summary="Publish case note",
+)
+async def publish_case_note_endpoint(
+    case_id: str,
+    request: CaseNotePublishRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        case_id_int = int(case_id)
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID format")
+
+    case = db.query(Case).filter(Case.id == case_id_int).first()
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+    if case.user_id != user_id_int:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: You do not own this case")
+
+    version = publish_case_note(
+        db,
+        case_id=case_id_int,
+        user_id=user_id_int,
+        note_text=request.note_text,
+        changed_by_email=current_user.email,
+    )
+    return {
+        "case_id": str(case_id_int),
+        "version_number": version.version_number,
+        "note_text": version.note_text,
+        "changed_by_user_id": str(version.changed_by_user_id),
+        "changed_by_email": version.changed_by_email,
+        "created_at": version.created_at,
+        "version_metadata": version.version_metadata,
+    }
+
+
+@router.get(
+    "/{case_id}/notes/history",
+    response_model=CaseNoteHistoryResponse,
+    summary="Get case note history",
+)
+async def get_case_note_history_endpoint(
+    case_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CaseNoteHistoryResponse:
+    try:
+        case_id_int = int(case_id)
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID format")
+
+    case = db.query(Case).filter(Case.id == case_id_int).first()
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+    if case.user_id != user_id_int:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: You do not own this case")
+
+    versions = get_case_note_history(db, case_id_int, user_id_int)
+    return CaseNoteHistoryResponse(
+        case_id=str(case_id_int),
+        case_number=case.case_number,
+        title=case.title or case.case_number,
+        total_versions=len(versions),
+        versions=[
+            CaseNoteVersionItem(
+                version_number=version.version_number,
+                note_text=version.note_text,
+                change_type=version.change_type,
+                changed_by_user_id=str(version.changed_by_user_id),
+                changed_by_email=version.changed_by_email,
+                created_at=version.created_at,
+                version_metadata=version.version_metadata,
+            )
+            for version in versions
+        ],
+    )
 
 
 @router.get(
@@ -352,13 +599,57 @@ async def get_case_details(
 async def list_cases(
     limit: int = 10,
     offset: int = 0,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> dict:
     """Get list of cases for current user"""
     
+    logger.info(
+        "Listing user cases",
+        user_id=current_user.user_id,
+        limit=limit,
+        offset=offset
+    )
+    
+    try:
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid user ID format"
+        )
+    
+    total = db.query(Case).filter(Case.user_id == user_id_int).count()
+    
+    cases = (
+        db.query(Case)
+        .filter(Case.user_id == user_id_int)
+        .order_by(Case.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    
+    cases_list = []
+    for c in cases:
+        latest_doc = None
+        if c.documents:
+            sorted_docs = sorted(c.documents, key=lambda d: d.uploaded_at, reverse=True)
+            latest_doc = sorted_docs[0]
+            
+        cases_list.append({
+            "case_id": str(c.id),
+            "case_number": c.case_number,
+            "title": c.title or c.case_number,
+            "parties": ["Smith", "Jones"],  # Placeholder
+            "jurisdiction": c.jurisdiction,
+            "status": c.status.value if hasattr(c.status, 'value') else str(c.status),
+            "summary": latest_doc.summary if latest_doc else ""
+        })
+        
     return {
-        "total": 0,
+        "total": total,
         "limit": limit,
         "offset": offset,
-        "cases": []
+        "cases": cases_list
     }

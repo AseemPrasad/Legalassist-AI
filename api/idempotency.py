@@ -3,6 +3,8 @@ Redis-backed idempotency manager for Celery tasks.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import json
 import time
@@ -49,6 +51,24 @@ class IdempotencyManager:
 
     def _key_result(self, key: str) -> str:
         return f"idemp:result:{key}"
+
+    def _key_http_result(self, key: str) -> str:
+        return f"idemp:http:result:{key}"
+
+    def _key_http_lock(self, key: str) -> str:
+        return f"idemp:http:lock:{key}"
+
+    @staticmethod
+    def build_http_key(
+        *,
+        method: str,
+        path: str,
+        idempotency_key: str,
+        principal: str,
+        body_fingerprint: str,
+    ) -> str:
+        principal_hash = hashlib.sha256(principal.encode("utf-8")).hexdigest()
+        return f"{method.upper()}:{path}:{principal_hash}:{idempotency_key}:{body_fingerprint}"
 
     def acquire(self, key: str, ttl: int = 60) -> bool:
         """Acquire a lock for the given idempotency key. Returns True if acquired."""
@@ -97,5 +117,72 @@ class IdempotencyManager:
     def release_lock(self, key: str) -> None:
         try:
             self.client.delete(self._key_lock(key))
+        except Exception:
+            pass
+
+    def acquire_http(self, key: str, ttl: int = 3600) -> bool:
+        """Acquire a lock for a HTTP idempotency key."""
+        lock_key = self._key_http_lock(key)
+        try:
+            acquired = self.client.set(lock_key, b"1", nx=True, ex=ttl)
+            if acquired:
+                logger.info("http_idempotency_lock_acquired", key=key)
+            else:
+                logger.info("http_idempotency_lock_exists", key=key)
+            return bool(acquired)
+        except Exception as e:
+            logger.error("http_idempotency_acquire_failed", key=key, error=str(e))
+            return True
+
+    def store_http_response(
+        self,
+        key: str,
+        response: dict,
+        ttl: int = 86400,
+    ) -> None:
+        """Persist the serialized HTTP response for replay on retry."""
+        payload = {
+            "response": {
+                "status_code": int(response.get("status_code", 200)),
+                "headers": response.get("headers", {}),
+                "body_b64": base64.b64encode(response.get("body", b"")).decode("ascii"),
+                "media_type": response.get("media_type"),
+            },
+            "request_fingerprint": response.get("request_fingerprint"),
+            "timestamp": int(time.time()),
+        }
+        try:
+            self.client.set(self._key_http_result(key), json.dumps(payload).encode("utf-8"), ex=ttl)
+            try:
+                self.client.delete(self._key_http_lock(key))
+            except Exception:
+                pass
+            logger.info("http_idempotency_response_stored", key=key)
+        except Exception as e:
+            logger.error("http_idempotency_store_failed", key=key, error=str(e))
+
+    def get_http_response(self, key: str) -> Optional[dict]:
+        """Return a stored HTTP response payload for the given key."""
+        try:
+            raw = self.client.get(self._key_http_result(key))
+            if not raw:
+                return None
+            data = json.loads(raw.decode("utf-8"))
+            response = data.get("response") or {}
+            body_b64 = response.get("body_b64") or ""
+            return {
+                "status_code": int(response.get("status_code", 200)),
+                "headers": response.get("headers", {}),
+                "body": base64.b64decode(body_b64.encode("ascii")) if body_b64 else b"",
+                "media_type": response.get("media_type"),
+                "request_fingerprint": data.get("request_fingerprint"),
+            }
+        except Exception as e:
+            logger.error("http_idempotency_get_failed", key=key, error=str(e))
+            return None
+
+    def release_http_lock(self, key: str) -> None:
+        try:
+            self.client.delete(self._key_http_lock(key))
         except Exception:
             pass
