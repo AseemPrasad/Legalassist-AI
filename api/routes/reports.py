@@ -24,7 +24,12 @@ from sqlalchemy.orm import Session
 
 from api.models import ReportGenerationRequest, ReportGenerationResponse
 from api.auth import get_current_user, CurrentUser
-from celery_app import generate_report_task, TaskStatus, enqueue_task_from_http_request
+try:
+    from celery_app import generate_report_task, TaskStatus, enqueue_task_from_http_request
+except Exception:
+    generate_report_task = None
+    TaskStatus = None
+    enqueue_task_from_http_request = None
 from database import get_db, Report
 from db.crud.reports import create_report, get_report_by_id, update_report_status, list_reports_by_user
 from db.crud.audit import record_audit_event

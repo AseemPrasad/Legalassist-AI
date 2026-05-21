@@ -75,8 +75,13 @@ class Case(Base):
     jurisdiction = Column(String(255), nullable=False, index=True)
     status = Column(SQLEnum(CaseStatus), default=CaseStatus.ACTIVE, nullable=False)
     title = Column(String(255), nullable=True)
+    version = Column(Integer, default=1, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    __mapper_args__ = {
+        "version_id_col": version
+    }
 
     user = relationship("User", back_populates="cases")
     documents = relationship("CaseDocument", back_populates="case", cascade="all, delete-orphan")

@@ -52,6 +52,9 @@ opentelemetry-instrumentation-redis>=0.41b0
 sentry-sdk>=2.0.0
 
 # Utilities
+# Vector Database & RAG
+chromadb>=0.4.0
+
 tenacity>=8.2.0
 python-dotenv>=1.0.0
 python-dateutil>=2.8.0
