@@ -79,23 +79,13 @@ class APISettings(BaseSettings):
     DATABASE_POOL_SIZE: int = 20
     DATABASE_MAX_OVERFLOW: int = 10
     
-    # Redis - require explicit configuration
-    _redis_env = os.getenv("REDIS_URL")
-    if not _redis_env:
-        raise ValueError("REDIS_URL environment variable is required. No localhost fallback.")
-    REDIS_URL: str = _redis_env
+    # Redis — validated lazily in __init__; empty default so APISettings can be imported
+    REDIS_URL: str = ""
     REDIS_CACHE_TTL: int = 3600  # 1 hour
-    
-    # Celery - require explicit configuration
-    _celery_broker = os.getenv("CELERY_BROKER_URL")
-    if not _celery_broker:
-        raise ValueError("CELERY_BROKER_URL environment variable is required.")
-    CELERY_BROKER_URL: str = _celery_broker
-    
-    _celery_backend = os.getenv("CELERY_RESULT_BACKEND")
-    if not _celery_backend:
-        raise ValueError("CELERY_RESULT_BACKEND environment variable is required.")
-    CELERY_RESULT_BACKEND: str = _celery_backend
+
+    # Celery — validated lazily in __init__; empty default so APISettings can be imported
+    CELERY_BROKER_URL: str = ""
+    CELERY_RESULT_BACKEND: str = ""
     CELERY_TASK_TIMEOUT: int = 3600  # 1 hour
     CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes
     
@@ -144,7 +134,23 @@ class APISettings(BaseSettings):
             canonical_prev = os.getenv("JWT_SECRET_PREVIOUS") or os.getenv("JWT_SECRET_KEY_PREVIOUS", "")
             if canonical_prev:
                 data["JWT_SECRET_KEY_PREVIOUS"] = canonical_prev
+        # Lazily resolve Redis & Celery URLs from env (fail only when instantiated)
+        if not data.get("REDIS_URL"):
+            data["REDIS_URL"] = os.getenv("REDIS_URL", "")
+        if not data.get("CELERY_BROKER_URL"):
+            data["CELERY_BROKER_URL"] = os.getenv("CELERY_BROKER_URL", "")
+        if not data.get("CELERY_RESULT_BACKEND"):
+            data["CELERY_RESULT_BACKEND"] = os.getenv("CELERY_RESULT_BACKEND", "")
         super().__init__(**data)
+        # Fail hard if Redis/Celery env vars are missing in production
+        is_prod = self.ENVIRONMENT in ("production", "prod", "live")
+        if is_prod:
+            if not self.REDIS_URL:
+                raise ValueError("REDIS_URL environment variable is required in production.")
+            if not self.CELERY_BROKER_URL:
+                raise ValueError("CELERY_BROKER_URL environment variable is required in production.")
+            if not self.CELERY_RESULT_BACKEND:
+                raise ValueError("CELERY_RESULT_BACKEND environment variable is required in production.")
         # Parse ALLOWED_HOSTS from environment
         hosts_env = os.getenv("APP_ALLOWED_HOSTS", "")
         if hosts_env.strip():

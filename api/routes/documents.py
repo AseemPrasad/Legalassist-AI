@@ -9,7 +9,13 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, De
 from fastapi import Request
 from api.models import DocumentAnalysisRequest, DocumentAnalysisSummary, AnalysisJobResponse
 from api.auth import get_current_user, CurrentUser
-from celery_app import analyze_document_task, TaskStatus, enqueue_task_from_http_request
+
+try:
+    from celery_app import analyze_document_task, TaskStatus, enqueue_task_from_http_request
+except Exception:
+    analyze_document_task = None
+    TaskStatus = None
+    enqueue_task_from_http_request = None
 from api.validation import (
     validate_file_upload,
     validate_text_input,

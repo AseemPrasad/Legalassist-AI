@@ -36,7 +36,11 @@ from database import (
     get_case_note_history,
 )
 from case_manager import upload_case_document_file
-from celery_app import enqueue_task_from_http_request, process_case_document_upload_task
+try:
+    from celery_app import enqueue_task_from_http_request, process_case_document_upload_task
+except Exception:
+    enqueue_task_from_http_request = None
+    process_case_document_upload_task = None
 from analytics_engine import CaseSimilarityCalculator
 
 router = APIRouter(prefix="/api/v1/cases", tags=["cases"])

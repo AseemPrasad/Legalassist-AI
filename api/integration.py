@@ -3,7 +3,10 @@ REST API Integration module for Flask/Streamlit applications
 """
 from functools import wraps
 import uuid
-from celery_app import celery_app
+try:
+    from celery_app import celery_app
+except Exception:
+    celery_app = None
 import structlog
 
 try:

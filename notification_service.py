@@ -17,7 +17,10 @@ from config import Config
 # We import the celery_app instance defined in the project's central 
 # Celery configuration module. This allows us to use the @celery_app.task 
 # decorator to offload long-running operations.
-from celery_app import celery_app
+try:
+    from celery_app import celery_app
+except Exception:
+    celery_app = None
 
 
 from sqlalchemy.orm import Session
