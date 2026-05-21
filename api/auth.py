@@ -11,6 +11,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2Pas
 import secrets
 import hashlib
 from sqlalchemy.orm import Session
+from passlib.context import CryptContext
 
 from api.config import get_settings
 from api.errors import StructuredAPIError
@@ -47,6 +48,17 @@ settings = get_settings()
 security = HTTPBearer(auto_error=False)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+# Configure Bcrypt password hashing with cost factor of 14 for security
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=14)
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a plain password against a bcrypt hash."""
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    """Generate a bcrypt hash for a password with cost factor 14."""
+    return pwd_context.hash(password)
 
 
 def _get_jwt_secrets_to_try() -> list[str]:

@@ -18,6 +18,53 @@ from db.crud.audit import record_audit_event
 
 import uuid
 import jwt
+from passlib.context import CryptContext
+
+# Configure Bcrypt password hashing with cost factor of 14 for security
+# The Bcrypt password hashing algorithm was previously using an outdated work factor (cost) of 10
+# We are upgrading to 14 to slow down hash generation and harden against brute-force attacks.
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=14)
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a plain password against a bcrypt hash.
+    This function uses passlib to automatically handle the salt and rounds verification.
+    
+    Parameters:
+    -----------
+    plain_password : str
+        The password provided by the user during login.
+    hashed_password : str
+        The bcrypt hash stored in the database for the user.
+        
+    Returns:
+    --------
+    bool
+        True if the password matches the hash, False otherwise.
+    """
+    if not hashed_password:
+        return False
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    """
+    Generate a bcrypt hash for a password with cost factor 14.
+    The higher cost factor (14 vs old 10) significantly increases the
+    computational resources required to generate a hash, mitigating
+    dictionary and brute-force attacks.
+    
+    Parameters:
+    -----------
+    password : str
+        The raw password to be hashed.
+        
+    Returns:
+    --------
+    str
+        The resulting bcrypt hash string, including algorithm identifier,
+        cost factor, salt, and hash.
+    """
+    return pwd_context.hash(password)
 
 try:
     import sendgrid
@@ -322,6 +369,55 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
 
     except Exception as e:
         logger.error(f"Error verifying OTP for {email}: {str(e)}")
+        return False, f"Error: {str(e)}", None
+    finally:
+        db.close()
+
+
+def verify_password_and_create_token(email: str, password: str) -> Tuple[bool, str, Optional[str]]:
+    """
+    Verify password and create JWT token with brute-force protection.
+    Returns (success, message, token).
+    
+    Security features:
+    - Uses Bcrypt with a work factor (cost) of 14 for secure hashing
+    - Hardened against modern GPU computing power
+    """
+    db = SessionLocal()
+    try:
+        # Get user by email
+        user = get_user_by_email(db, email)
+        
+        if not user or not user.password_hash:
+            # We return generic message to prevent user enumeration
+            logger.warning(f"Failed password login attempt for {email}: User not found or no password set")
+            return False, "Invalid email or password.", None
+
+        # Verify password using bcrypt (cost=14)
+        if not verify_password(password, user.password_hash):
+            logger.warning(f"Failed password login attempt for {email}: Invalid password")
+            return False, "Invalid email or password.", None
+
+        # Update last login
+        update_user_last_login(db, user.id)
+
+        # Create JWT token
+        token = create_jwt_token(user.id, user.email)
+
+        record_audit_event(
+            db,
+            actor=f"user:{user.id}",
+            actor_user_id=user.id,
+            action="login_password_success",
+            resource="auth:session",
+            metadata={"email_domain": user.email.split("@")[-1] if "@" in user.email else None},
+        )
+
+        logger.info(f"User logged in successfully via password: {email} (user_id={user.id})")
+        return True, "Login successful", token
+
+    except Exception as e:
+        logger.error(f"Error verifying password for {email}: {str(e)}")
         return False, f"Error: {str(e)}", None
     finally:
         db.close()
