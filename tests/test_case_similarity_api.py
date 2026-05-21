@@ -36,6 +36,7 @@ def client(test_db, monkeypatch):
     app = FastAPI()
     app.include_router(cases_route.router)
     app.dependency_overrides[get_current_user] = lambda: CurrentUser("42", "tester@example.com", "user")
+    app.dependency_overrides[cases_route.get_db] = lambda: test_db
     monkeypatch.setattr(cases_route, "get_db", lambda: test_db)
     yield TestClient(app)
 

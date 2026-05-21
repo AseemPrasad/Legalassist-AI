@@ -62,6 +62,6 @@ def render_template(template: str, values: Dict[str, str], allowed: Set[str] = A
     try:
         rendered = template.format_map(safe_map)
     except Exception as e:
-        raise TemplateValidationError(f"Failed to render template: {e}")
+        raise TemplateValidationError(f"Failed to render template: {e}") from e
 
     return rendered

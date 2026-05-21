@@ -21,12 +21,12 @@ async def get_rate_limit_key(
 
 
 async def verify_api_version(
-    x_api_version: Optional[str] = None
+    api_version: Optional[str] = None
 ) -> str:
-    """Verify API version from header"""
-    if x_api_version and x_api_version not in ["v1"]:
+    """Verify API version from query parameter"""
+    if api_version and api_version not in ["v1"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported API version: {x_api_version}. Use v1"
+            detail=f"Unsupported API version: {api_version}. Use v1"
         )
-    return x_api_version or "v1"
+    return api_version or "v1"

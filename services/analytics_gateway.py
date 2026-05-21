@@ -6,10 +6,9 @@ import logging
 from typing import Any, Dict
 from urllib.parse import urljoin
 
-import requests
-
 from analytics_engine import AnalyticsAggregator
 from config import Config
+from core.api_client import call_with_fallback, APIResponse
 
 logger = logging.getLogger(__name__)
 
@@ -53,21 +52,26 @@ def get_dashboard_summary(db=None) -> Dict[str, Any]:
 
     api_base_url = str(Config.API_BASE_URL or "").strip()
     if api_base_url:
-        try:
-            response = requests.get(
-                _dashboard_endpoint(api_base_url),
-                timeout=Config.API_REQUEST_TIMEOUT_SECONDS,
-            )
-            response.raise_for_status()
-            return _coerce_summary(response.json())
-        except Exception as exc:
-            logger.warning(
-                "Falling back to local analytics summary",
-                api_base_url=api_base_url,
-                error=str(exc),
-            )
+        response = call_with_fallback(
+            _dashboard_endpoint(api_base_url),
+            timeout=Config.API_REQUEST_TIMEOUT_SECONDS,
+            retries=2,
+            fallback=lambda: _local_summary_fallback(db),
+        )
 
+        if response.success:
+            return _coerce_summary(response.data)
+        logger.warning(
+            "Falling back to local analytics summary. api_base_url=%s, error=%s",
+            api_base_url,
+            response.error,
+        )
+
+    return _local_summary_fallback(db)
+
+
+def _local_summary_fallback(db):
+    """Return local analytics summary or raise if db unavailable."""
     if db is None:
         raise RuntimeError("A database session is required when the analytics API is unavailable.")
-
     return AnalyticsAggregator.get_dashboard_summary(db)

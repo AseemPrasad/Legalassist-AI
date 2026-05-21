@@ -244,6 +244,13 @@ api_errors_total = Counter(
     registry=registry
 )
 
+feature_flag_events_total = Counter(
+    'feature_flag_events_total',
+    'Feature flag lifecycle events',
+    ['event', 'flag_name', 'surface', 'variant'],
+    registry=registry
+)
+
 
 # ==================== Structured Logging ====================
 def setup_structured_logging():
@@ -586,6 +593,23 @@ def observe_business_metrics(*, active_cases_count: int | None = None, pending_d
         pending_deadlines.set(max(0, pending_deadlines_count))
     if active_users_count is not None:
         user_sessions_active.set(max(0, active_users_count))
+
+
+def record_feature_flag_event(event: str, flag_name: str, *, surface: str = "api", variant: str = "control"):
+    """Record feature flag exposure or usage for rollout analysis."""
+    feature_flag_events_total.labels(
+        event=event,
+        flag_name=flag_name,
+        surface=surface,
+        variant=variant,
+    ).inc()
+    log.info(
+        "feature_flag_event",
+        event=event,
+        flag_name=flag_name,
+        surface=surface,
+        variant=variant,
+    )
 
 
 # ==================== Metrics Endpoint ====================

@@ -220,10 +220,27 @@ class TestDatabaseModels:
             now + timedelta(days=40), "submission"
         )
 
+        case4 = Case(
+            user_id=1,
+            case_number="CASE-4",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case 4",
+        )
+        test_db.add(case4)
+        test_db.commit()
+        test_db.refresh(case4)
+
+        create_case_deadline(
+            test_db, 1, case4.id, "Case 4",
+            now + timedelta(days=30, microseconds=123456), "hearing"
+        )
+
 
         # Get deadlines within 30 days
         upcoming = get_upcoming_deadlines(test_db, days_before=30)
-        assert len(upcoming) == 2  # Should get cases 1 and 2
+        assert len(upcoming) == 3  # Should get cases 1, 2, and 4
 
     def test_notification_logging(self, test_db):
         """Test logging notification attempts"""

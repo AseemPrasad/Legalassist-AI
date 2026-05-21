@@ -82,7 +82,9 @@ class DocumentAnalysisSummary(BaseModel):
     remedies: List[RemediaryItem]
     deadlines: List[DeadlineItem]
     obligations: List[str]
-    confidence_score: float = Field(ge=0, le=1)
+    confidence_score: float = Field(ge=0.0, le=1.0, description="Model confidence for extraction quality (0.0-1.0)")
+    remedies_confidence_score: Optional[float] = Field(None, ge=0.0, le=1.0, description="Confidence for remedies extraction (0.0-1.0)")
+    remedies_evidence_spans: List[Dict[str, Any]] = Field(default_factory=list)
     analysis_time_seconds: float
 
 
@@ -213,6 +215,34 @@ class CaseTimeline(BaseModel):
     duration_years: float
 
 
+class CaseNoteDraftRequest(BaseModel):
+    case_id: Optional[str] = None
+    note_text: str = Field(..., min_length=1)
+
+
+class CaseNotePublishRequest(BaseModel):
+    case_id: Optional[str] = None
+    note_text: Optional[str] = None
+
+
+class CaseNoteVersionItem(BaseModel):
+    version_number: int
+    note_text: str
+    change_type: str
+    changed_by_user_id: str
+    changed_by_email: Optional[str] = None
+    created_at: datetime
+    version_metadata: Optional[Dict[str, Any]] = None
+
+
+class CaseNoteHistoryResponse(BaseModel):
+    case_id: str
+    case_number: str
+    title: str
+    total_versions: int
+    versions: List[CaseNoteVersionItem]
+
+
 # ============================================================================
 # Report Generation Models
 # ============================================================================
@@ -226,6 +256,28 @@ class ReportGenerationRequest(BaseModel):
     include_similar_cases: bool = True
     format: str = "pdf"  # pdf, docx, html
     style: str = "formal"  # formal, casual
+    privacy_profile: str = "personal_identifiers"
+
+
+# ============================================================================
+# Audit Models
+# ============================================================================
+
+class AuditEventItem(BaseModel):
+    id: int
+    actor: str
+    actor_user_id: Optional[int] = None
+    action: str
+    resource: str
+    case_id: Optional[int] = None
+    occurred_at: datetime
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditEventListResponse(BaseModel):
+    case_id: int
+    total: int
+    events: List[AuditEventItem]
 
 
 class ReportGenerationResponse(BaseModel):
@@ -315,6 +367,37 @@ class UpcomingDeadlinesResponse(BaseModel):
 
 
 # ============================================================================
+# Knowledge Freshness Models
+# ============================================================================
+
+class KnowledgeInvalidationItem(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    case_id: Optional[int] = None
+    document_id: Optional[int] = None
+    scope_type: str
+    scope_value: str
+    reason: str
+    details: Optional[Dict[str, Any]] = None
+    status: str
+    invalidated_at: datetime
+    scheduled_for: Optional[datetime] = None
+    recompute_started_at: Optional[datetime] = None
+    recompute_completed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    recompute_attempts: int = 0
+
+
+class KnowledgeInvalidationListResponse(BaseModel):
+    items: List[KnowledgeInvalidationItem]
+    total: int
+    stale_count: int
+    fresh_count: int
+    next_recompute_at: Optional[datetime] = None
+    generated_at: datetime
+
+
+# ============================================================================
 # User Models
 # ============================================================================
 
@@ -340,7 +423,7 @@ class ErrorResponse(BaseModel):
     error_code: str
     message: str
     details: Optional[Dict[str, Any]] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ValidationError(ErrorResponse):

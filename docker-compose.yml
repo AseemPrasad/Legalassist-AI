@@ -12,7 +12,7 @@ services:
       - "8000:8000"
       - "9090:9090"
     environment:
-      - DATABASE_URL=postgresql://legal_user:secure_password@postgres:5432/legalassist_db
+      - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=redis://redis:6379/0
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
@@ -49,7 +49,7 @@ services:
     container_name: legalassist-postgres
     environment:
       - POSTGRES_USER=legal_user
-      - POSTGRES_PASSWORD=secure_password
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=legalassist_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
