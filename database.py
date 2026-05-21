@@ -1,30 +1,20 @@
-"""
-Database models for deadline tracking and notification management.
-Uses SQLAlchemy ORM with SQLite for persistence.
+"""Compatibility shim for the original monolithic `database.py`.
+
+The project now keeps business logic in `db/` modules and `db.crud.*` helpers.
+This file remains as a stable public API surface for legacy imports.
 """
 
+from __future__ import annotations
+
+from db.attachments_service import create_attachment, get_attachments_for_case
 import datetime as dt
-import logging
-from typing import Optional, List
-from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    DateTime,
-    Boolean,
-    Text,
-    ForeignKey,
-    Enum as SQLEnum,
-    JSON,
-    UniqueConstraint,
-    Index,
-)
-from sqlalchemy.engine import make_url
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
-import enum
-from contextlib import contextmanager
+import hashlib
+import threading
 from config import Config
+try:
+    import redis
+except ImportError:
+    redis = None
 
 # Database setup
 DATABASE_URL = Config.DATABASE_URL
@@ -1346,107 +1336,70 @@ def submit_model_feedback(
 def aggregate_model_performance(db: Session, task: Optional[str] = None) -> List[ModelPerformance]:
     """Compute simple model performance aggregates from `model_feedback` rows.
 
-    This is a lightweight aggregator used by the dashboard and can be run periodically.
-    Returns newly-created/updated ModelPerformance rows (in-memory list) but does NOT persist them automatically.
-    """
-    query = db.query(ModelFeedback)
-    if task:
-        query = query.filter(ModelFeedback.task == task)
 
-    rows = query.all()
-    stats = {}
-    for r in rows:
-        key = (r.model_name, r.task, getattr(r.case, "case_type", None), getattr(r.case, "jurisdiction", None))
-        if key not in stats:
-            stats[key] = {"samples": 0, "accurate": 0}
-        stats[key]["samples"] += 1
-        if r.is_accurate:
-            stats[key]["accurate"] += 1
-
-    results = []
-    for (model_name, task_name, case_type, jurisdiction), v in stats.items():
-        samples = v["samples"]
-        accurate = v["accurate"]
-        accuracy = f"{(accurate / samples * 100):.1f}%" if samples > 0 else "0%"
-        mp = ModelPerformance(
-            model_name=model_name,
-            task=task_name,
-            case_type=case_type,
-            jurisdiction=jurisdiction,
-            samples=samples,
-            accurate_count=accurate,
-            accuracy=accuracy,
-        )
-        results.append(mp)
-
-    return results
+def _otp_rate_limit_key(identifier: str) -> str:
+    normalized = str(identifier).strip().lower()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"otp:rate:{digest}"
 
 
-def submit_similarity_feedback(
-    db: Session,
-    user_id: str,
-    candidate_case_id: int,
-    query_signature: str,
-    relevance: bool,
-) -> SimilarityFeedback:
-    """Persist feedback for a similarity search result"""
-    feedback = SimilarityFeedback(
-        user_id=str(user_id),
-        candidate_case_id=candidate_case_id,
-        query_signature=query_signature,
-        relevance=relevance,
-    )
-    db.add(feedback)
-    db.commit()
-    db.refresh(feedback)
-    return feedback
+def _get_otp_rate_limit_script():
+    global _otp_rate_limit_client, _otp_rate_limit_script
+
+    if _otp_rate_limit_script is not None:
+        return _otp_rate_limit_script
+
+    with _otp_rate_limit_lock:
+        if _otp_rate_limit_script is None:
+            if redis is None:
+                raise RuntimeError("Redis is required for OTP rate limiting but is not installed.")
+
+            redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+            _otp_rate_limit_client = redis.from_url(redis_url, decode_responses=True)
+            _otp_rate_limit_script = _otp_rate_limit_client.register_script(_OTP_RATE_LIMIT_SCRIPT)
+
+    return _otp_rate_limit_script
 
 
-def get_similarity_feedback(
-    db: Session,
-    user_id: Optional[str] = None,
-    query_signature: Optional[str] = None,
-    candidate_case_id: Optional[int] = None,
-    limit: int = 100,
-) -> List[SimilarityFeedback]:
-    """Get similarity feedback rows filtered by user, query, or candidate case"""
-    query = db.query(SimilarityFeedback)
-
-    if user_id is not None:
-        query = query.filter(SimilarityFeedback.user_id == str(user_id))
-    if query_signature is not None:
-        query = query.filter(SimilarityFeedback.query_signature == query_signature)
-    if candidate_case_id is not None:
-        query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
-
-    return query.order_by(SimilarityFeedback.created_at.desc()).limit(limit).all()
+def _reset_otp_rate_limit_connection():
+    """Reset connection state for self-healing after Redis disconnection."""
+    global _otp_rate_limit_client, _otp_rate_limit_script
+    with _otp_rate_limit_lock:
+        _otp_rate_limit_client = None
+        _otp_rate_limit_script = None
 
 
-# ==================== User & Authentication Helper Functions ====================
+def _reserve_otp_rate_limit_slot(identifier: str, max_requests_per_hour: int, label: str = "identifier") -> int:
+    normalized_identifier = str(identifier).strip().lower()
+    if not normalized_identifier:
+        raise ValueError(f"{label} is required for OTP rate limiting")
+
+    try:
+        script = _get_otp_rate_limit_script()
+        current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
+    except (redis.ConnectionError, redis.TimeoutError, OSError, IOError) as exc:
+        _reset_otp_rate_limit_connection()
+        script = _get_otp_rate_limit_script()
+        current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
+
+    if current > max_requests_per_hour:
+        raise ValueError("Too many OTP requests. Please try again later.")
+
+    return current
 
 
-def get_user_by_email(db: Session, email: str) -> Optional[User]:
-    """Get user by email address"""
-    return db.query(User).filter(User.email == email).first()
-
-
-def create_user(db: Session, email: str) -> User:
-    """Create a new user"""
-    user = User(email=email)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
-
-
-def update_user_last_login(db: Session, user_id: int) -> User:
-    """Update user's last login timestamp"""
-    user = db.query(User).filter(User.id == user_id).first()
-    if user:
-        user.last_login = dt.datetime.now(dt.timezone.utc)
-        db.commit()
-        db.refresh(user)
-    return user
+def _safe_reserve_otp_slot(identifier: str, max_requests_per_hour: int, label: str = "identifier") -> int:
+    try:
+        return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour, label=label)
+    except TypeError as exc:
+        if exc.__traceback__.tb_next is not None:
+            raise exc
+        try:
+            return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour, label)
+        except TypeError as exc_inner:
+            if exc_inner.__traceback__.tb_next is not None:
+                raise exc_inner
+            return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour)
 
 
 def create_otp_verification(
@@ -1455,17 +1408,12 @@ def create_otp_verification(
     otp_hash: str,
     expires_at: dt.datetime,
     max_requests_per_hour: int = 5,
+    requester_ip: Optional[str] = None,
 ) -> OTPVerification:
-    """Create a new OTP verification record with rate limiting"""
-    # Check recent OTPs
-    one_hour_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
-    recent_otps = db.query(OTPVerification).filter(
-        OTPVerification.email == email,
-        OTPVerification.created_at > one_hour_ago,
-    ).count()
-
-    if recent_otps >= max_requests_per_hour:
-        raise ValueError("Too many OTP requests. Please try again later.")
+    """Create a new OTP verification record with rate limiting."""
+    _safe_reserve_otp_slot(email, max_requests_per_hour, label="Email")
+    if requester_ip:
+        _safe_reserve_otp_slot(requester_ip, max_requests_per_hour, label="IP")
 
     otp = OTPVerification(
         email=email,
@@ -1479,49 +1427,54 @@ def create_otp_verification(
 
 
 def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
-    """Get unused, non-expired OTP for email"""
+    """Get the latest unused, non-expired OTP for an email"""
     now = dt.datetime.now(dt.timezone.utc)
     return db.query(OTPVerification).filter(
         OTPVerification.email == email,
         OTPVerification.is_used == False,
-        OTPVerification.expires_at > now,
+        OTPVerification.expires_at > now
     ).order_by(OTPVerification.created_at.desc()).first()
 
 
 def mark_otp_as_used(db: Session, otp_id: int) -> bool:
-    """Mark an OTP as used"""
-    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
-    if otp:
-        otp.is_used = True
+    """Atomically mark OTP as used. Returns True only if OTP was not already used."""
+    result = db.query(OTPVerification).filter(
+        OTPVerification.id == otp_id,
+        OTPVerification.is_used == False
+    ).update({"is_used": True}, synchronize_session=False)
+    try:
         db.commit()
-        return True
-    return False
+        return result > 0
+    except Exception:
+        db.rollback()
+        return False
+
+
+def is_email_locked_out(db: Session, email: str) -> Optional[dt.datetime]:
+    """Check if email is currently locked out. Returns locked_until if locked, None otherwise."""
+    lockout = db.query(OTPVerification).filter(
+        OTPVerification.email == email,
+        OTPVerification.locked_until != None,
+        OTPVerification.locked_until > dt.datetime.now(dt.timezone.utc)
+    ).order_by(OTPVerification.locked_until.desc()).first()
+    return lockout.locked_until if lockout else None
 
 
 def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
-    """
-    Record a failed OTP verification attempt and implement lockout after max attempts.
-    
-    Args:
-        db: Database session
-        otp_id: OTP record ID
-        lockout_duration_minutes: Minutes to lock OTP after max attempts exceeded
-        max_failed_attempts: Maximum failed attempts before lockout
-    
-    Returns:
-        True if updated, False if OTP not found
-    """
+    """Record failed OTP attempt with email-level lockout protection."""
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts += 1
-        
-        # Lock OTP if max attempts exceeded
         if otp.failed_attempts >= max_failed_attempts:
-            otp.locked_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
-            logger.warning(
-                f"OTP for {otp.email} locked after {otp.failed_attempts} failed attempts. "
-                f"Locked until {otp.locked_until}"
-            )
+            # Lock out at email level, not just OTP level
+            lockout_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
+            otp.locked_until = lockout_until
+            
+            # Also lock all other pending OTPs for same email
+            db.query(OTPVerification).filter(
+                OTPVerification.email == otp.email,
+                OTPVerification.id != otp_id
+            ).update({"locked_until": lockout_until})
         
         db.commit()
         db.refresh(otp)
@@ -1530,7 +1483,6 @@ def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes
 
 
 def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
-    """Reset failed attempt counter on successful verification"""
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts = 0
@@ -1542,17 +1494,14 @@ def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
 
 
 def cleanup_expired_otps(db: Session) -> int:
-    """Delete expired OTPs, return count of deleted"""
+    """Delete expired OTP records"""
     now = dt.datetime.now(dt.timezone.utc)
-    deleted = db.query(OTPVerification).filter(
-        OTPVerification.expires_at < now
-    ).delete()
+    deleted = db.query(OTPVerification).filter(OTPVerification.expires_at < now).delete()
     db.commit()
     return deleted
 
 
 def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
-    """Add a token JTI to the revoked list"""
     token = RevokedToken(jti=jti, expires_at=expires_at)
     db.add(token)
     db.commit()
@@ -1561,32 +1510,38 @@ def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken
 
 
 def is_token_revoked(db: Session, jti: str) -> bool:
-    """Check if a token has been revoked"""
     return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
 
 
-def cleanup_expired_revoked_tokens(db: Session) -> int:
-    """Delete revoked tokens that have naturally expired"""
+def cleanup_expired_revoked_tokens(db: Session, batch_size: int = 1000) -> int:
+    """Delete expired revoked tokens in batches to avoid lock contention."""
     now = dt.datetime.now(dt.timezone.utc)
-    deleted = db.query(RevokedToken).filter(
-        RevokedToken.expires_at < now
-    ).delete()
-    db.commit()
-    return deleted
+    total_deleted = 0
+
+    while True:
+        deleted = db.query(RevokedToken).filter(
+            RevokedToken.expires_at < now
+        ).limit(batch_size).delete(synchronize_session=False)
+        db.commit()
+        total_deleted += deleted
+        if deleted < batch_size:
+            break
+
+    return total_deleted
 
 
-# ==================== Case Management Helper Functions ====================
+def schedule_token_cleanup():
+    """Standalone cleanup runner for cron/celery scheduling."""
+    from database import SessionLocal, cleanup_expired_revoked_tokens
+    db = SessionLocal()
+    try:
+        deleted = cleanup_expired_revoked_tokens(db)
+        return deleted
+    finally:
+        db.close()
 
 
-def create_case(
-    db: Session,
-    user_id: int,
-    case_number: str,
-    case_type: str,
-    jurisdiction: str,
-    title: Optional[str] = None,
-    status: CaseStatus = CaseStatus.ACTIVE,
-) -> Case:
+def create_case(db: Session, user_id: int, case_number: str, case_type: str, jurisdiction: str, title: Optional[str] = None) -> Case:
     """Create a new case"""
     case = Case(
         user_id=user_id,
@@ -1594,7 +1549,6 @@ def create_case(
         case_type=case_type,
         jurisdiction=jurisdiction,
         title=title,
-        status=status,
     )
     db.add(case)
     db.commit()
@@ -1602,12 +1556,9 @@ def create_case(
     return case
 
 
-def get_user_cases(db: Session, user_id: int, include_closed: bool = True) -> List[Case]:
+def get_user_cases(db: Session, user_id: int) -> List[Case]:
     """Get all cases for a user"""
-    query = db.query(Case).filter(Case.user_id == user_id)
-    if not include_closed:
-        query = query.filter(Case.status != CaseStatus.CLOSED)
-    return query.order_by(Case.created_at.desc()).all()
+    return db.query(Case).filter(Case.user_id == user_id).order_by(Case.created_at.desc()).all()
 
 
 def get_case_by_id(db: Session, case_id: int) -> Optional[Case]:
@@ -1622,45 +1573,12 @@ def get_case_by_number(db: Session, user_id: int, case_number: str) -> Optional[
         Case.case_number == case_number,
     ).first()
 
-def get_notification_template_for_user(db: Session, user_id: int) -> Optional["NotificationTemplate"]:
-    return db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
-
-def create_or_update_notification_template(
-    db: Session,
-    user_id: int,
-    sms_template: Optional[str] = None,
-    email_subject_template: Optional[str] = None,
-    email_html_template: Optional[str] = None,
-):
-    tmpl = db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
-    if tmpl:
-        if sms_template is not None:
-            tmpl.sms_template = sms_template
-        if email_subject_template is not None:
-            tmpl.email_subject_template = email_subject_template
-        if email_html_template is not None:
-            tmpl.email_html_template = email_html_template
-        tmpl.updated_at = dt.datetime.now(dt.timezone.utc)
-    else:
-        tmpl = NotificationTemplate(
-            user_id=user_id,
-            sms_template=sms_template,
-            email_subject_template=email_subject_template,
-            email_html_template=email_html_template,
-        )
-        db.add(tmpl)
-
-    db.commit()
-    db.refresh(tmpl)
-    return tmpl
-
 
 def update_case_status(db: Session, case_id: int, status: CaseStatus) -> Optional[Case]:
     """Update case status"""
     case = db.query(Case).filter(Case.id == case_id).first()
     if case:
         case.status = status
-        case.updated_at = dt.datetime.now(dt.timezone.utc)
         db.commit()
         db.refresh(case)
     return case
@@ -1674,9 +1592,6 @@ def delete_case(db: Session, case_id: int) -> bool:
         db.commit()
         return True
     return False
-
-
-# ==================== Case Document Helper Functions ====================
 
 
 def create_case_document(
@@ -1720,6 +1635,269 @@ def create_case_document(
     return doc
 
 
+def create_case_record(
+    db: Session,
+    hashed_case_id: str,
+    case_type: str,
+    jurisdiction: str,
+    court_name: Optional[str] = None,
+    judge_name: Optional[str] = None,
+    plaintiff_type: Optional[str] = None,
+    defendant_type: Optional[str] = None,
+    case_value: Optional[str] = None,
+    outcome: Optional[str] = None,
+    judgment_summary: Optional[str] = None,
+) -> CaseRecord:
+    """Create a new case record for analytics"""
+    case = CaseRecord(
+        hashed_case_id=hashed_case_id,
+        case_type=case_type,
+        jurisdiction=jurisdiction,
+        court_name=court_name,
+        judge_name=judge_name,
+        plaintiff_type=plaintiff_type,
+        defendant_type=defendant_type,
+        case_value=case_value,
+        outcome=outcome,
+        judgment_summary=judgment_summary,
+    )
+    db.add(case)
+    db.commit()
+    db.refresh(case)
+    return case
+
+
+def get_case_record(db: Session, hashed_case_id: str) -> Optional[CaseRecord]:
+    """Get a case record by hashed ID"""
+    return db.query(CaseRecord).filter(CaseRecord.hashed_case_id == hashed_case_id).first()
+
+
+def get_cases_by_criteria(db: Session, **criteria) -> List[CaseRecord]:
+    """Search case records by criteria"""
+    query = db.query(CaseRecord)
+    for key, value in criteria.items():
+        if hasattr(CaseRecord, key) and value:
+            query = query.filter(getattr(CaseRecord, key) == value)
+    return query.all()
+
+
+def update_case_outcome(
+    db: Session,
+    hashed_case_id: str,
+    appeal_filed: bool = False,
+    appeal_date: Optional[dt.datetime] = None,
+    appeal_outcome: Optional[str] = None,
+    appeal_success: Optional[bool] = None,
+    time_to_appeal_verdict: Optional[int] = None,
+    appeal_cost: Optional[str] = None,
+    additional_notes: Optional[str] = None,
+) -> CaseOutcome:
+    """Update or create case outcome data"""
+    record = get_case_record(db, hashed_case_id)
+    if not record:
+        raise ValueError(f"Case {hashed_case_id} not found")
+
+    outcome = db.query(CaseOutcome).filter(CaseOutcome.case_id == record.id).first()
+    if not outcome:
+        outcome = CaseOutcome(case_id=record.id)
+        db.add(outcome)
+
+    outcome.appeal_filed = appeal_filed
+    if appeal_date: outcome.appeal_date = appeal_date
+    if appeal_outcome: outcome.appeal_outcome = appeal_outcome
+    if appeal_success is not None: outcome.appeal_success = appeal_success
+    if time_to_appeal_verdict: outcome.time_to_appeal_verdict = time_to_appeal_verdict
+    if appeal_cost: outcome.appeal_cost = appeal_cost
+    if additional_notes: outcome.additional_notes = additional_notes
+
+    db.commit()
+    db.refresh(outcome)
+    return outcome
+
+
+def submit_user_feedback(
+    db: Session,
+    user_id: int,
+    case_id: Optional[int] = None,
+    did_appeal: Optional[bool] = None,
+    appeal_outcome: Optional[str] = None,
+    satisfaction_rating: Optional[int] = None,
+    feedback_text: Optional[str] = None,
+) -> UserFeedback:
+    """Submit user feedback"""
+    feedback = UserFeedback(
+        user_id=user_id,
+        case_id=case_id,
+        did_appeal=did_appeal,
+        appeal_outcome=appeal_outcome,
+        satisfaction_rating=satisfaction_rating,
+        feedback_text=feedback_text,
+    )
+    db.add(feedback)
+    db.commit()
+    db.refresh(feedback)
+    return feedback
+
+
+def get_user_feedback(db: Session, user_id: int) -> List[UserFeedback]:
+    """Get feedback history for a user"""
+    return db.query(UserFeedback).filter(UserFeedback.user_id == user_id).order_by(UserFeedback.created_at.desc()).all()
+
+
+def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
+    """Get all active deadlines for a user"""
+    now = dt.datetime.now(dt.timezone.utc)
+    return db.query(CaseDeadline).filter(
+        CaseDeadline.user_id == user_id,
+        CaseDeadline.is_completed.is_(False),
+        CaseDeadline.deadline_date > now,
+    ).order_by(CaseDeadline.deadline_date).all()
+
+
+def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
+    """Get all documents for a case"""
+    return db.query(CaseDocument).filter(
+        CaseDocument.case_id == case_id
+    ).order_by(CaseDocument.uploaded_at).all()
+
+
+def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocument]:
+    """Get a document by ID"""
+    return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
+
+
+def get_notification_template_for_user(db: Session, user_id: int) -> Optional[NotificationTemplate]:
+    """Get notification template for a user"""
+    return db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
+
+
+def get_user_stats(db: Session, user_id: int) -> dict:
+    """Calculate high-level stats for a user dashboard"""
+    cases = get_user_cases(db, user_id)
+
+    active_count = len([c for c in cases if c.status == CaseStatus.ACTIVE])
+    appealed_count = len([c for c in cases if c.status == CaseStatus.APPEALED])
+    closed_count = len([c for c in cases if c.status == CaseStatus.CLOSED])
+
+    # Get upcoming deadlines count
+    now = dt.datetime.now(dt.timezone.utc)
+    upcoming_deadlines = db.query(CaseDeadline).filter(
+        CaseDeadline.user_id == user_id,
+        CaseDeadline.is_completed.is_(False),
+        CaseDeadline.deadline_date > now,
+    ).count()
+
+    return {
+        "total_cases": len(cases),
+        "active_cases": active_count,
+        "appealed_cases": appealed_count,
+        "closed_cases": closed_count,
+        "upcoming_deadlines": upcoming_deadlines,
+    }
+
+
+def create_or_update_user_preference(
+    db: Session,
+    user_id: int,
+    email: str,
+    phone_number: Optional[str] = None,
+    notification_channel: NotificationChannel = NotificationChannel.BOTH,
+    timezone: str = "UTC",
+    # Holiday-aware reminder engine (MVP)
+    holiday_aware_reminders: bool = False,
+    holiday_country: Optional[str] = None,
+    holiday_region: Optional[str] = None,
+    holiday_calendar_json: Optional[str] = None,
+) -> UserPreference:
+    """Create or update user notification preferences"""
+    pref = db.query(UserPreference).filter(UserPreference.user_id == user_id).first()
+
+    if pref:
+        pref.email = email
+        pref.phone_number = phone_number
+        pref.notification_channel = notification_channel
+        pref.timezone = timezone
+        pref.holiday_aware_reminders = holiday_aware_reminders
+        pref.holiday_country = holiday_country
+        pref.holiday_region = holiday_region
+        pref.holiday_calendar_json = holiday_calendar_json
+        pref.updated_at = dt.datetime.now(dt.timezone.utc)
+    else:
+        pref = UserPreference(
+            user_id=user_id,
+            email=email,
+            phone_number=phone_number,
+            notification_channel=notification_channel,
+            timezone=timezone,
+            holiday_aware_reminders=holiday_aware_reminders,
+            holiday_country=holiday_country,
+            holiday_region=holiday_region,
+            holiday_calendar_json=holiday_calendar_json,
+        )
+        db.add(pref)
+    
+    db.commit()
+    db.refresh(pref)
+    return pref
+
+
+def submit_model_feedback(
+    db: Session,
+    user_id: str,
+    model_name: str,
+    task: str,
+    case_id: Optional[int] = None,
+    is_accurate: Optional[bool] = None,
+    corrected_text: Optional[str] = None,
+    feedback_notes: Optional[str] = None,
+) -> ModelFeedback:
+    """Submit model output feedback"""
+    fb = ModelFeedback(
+        user_id=str(user_id),
+        model_name=model_name,
+        task=task,
+        case_id=case_id,
+        is_accurate=is_accurate,
+        corrected_text=corrected_text,
+        feedback_notes=feedback_notes,
+    )
+    db.add(fb)
+    db.commit()
+    db.refresh(fb)
+    return fb
+
+
+def get_case_timeline(db: Session, case_id: int) -> List[CaseTimeline]:
+    """Get all timeline events for a case"""
+    return db.query(CaseTimeline).filter(CaseTimeline.case_id == case_id).order_by(CaseTimeline.event_date.desc()).all()
+
+
+def create_timeline_event(
+    db: Session,
+    case_id: int,
+    event_type: str,
+    description: str,
+    event_date: Optional[dt.datetime] = None,
+    metadata: Optional[dict] = None,
+) -> CaseTimeline:
+    """Create a new timeline event"""
+    event = CaseTimeline(
+        case_id=case_id,
+        event_type=event_type,
+        description=description,
+        event_date=event_date or dt.datetime.now(dt.timezone.utc),
+        event_metadata=metadata,
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return event
+
+
+# create_case_document_secure is deprecated - use create_case_document which already has ownership validation
+create_case_document_secure = create_case_document
+
+
 def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
     """Get all documents for a case"""
     return db.query(CaseDocument).filter(
@@ -1748,8 +1926,12 @@ def update_case_document(
             doc.summary = summary
         if remedies is not None:
             doc.remedies = remedies
-        db.commit()
-        db.refresh(doc)
+        try:
+            db.commit()
+            db.refresh(doc)
+        except Exception as e:
+            db.rollback()
+            raise RuntimeError(f"Database write failed for case document {document_id}: {str(e)}") from e
     return doc
 
 
@@ -1762,16 +1944,16 @@ def create_attachment(
     size_bytes: Optional[int] = None,
     case_id: Optional[int] = None,
     deadline_id: Optional[int] = None,
-) -> "Attachment":
-    """Create a new attachment record linked to a case or deadline"""
+) -> Attachment:
+    """Create a new file attachment record"""
     att = Attachment(
         user_id=user_id,
-        case_id=case_id,
-        deadline_id=deadline_id,
         original_filename=original_filename,
         stored_path=stored_path,
         content_type=content_type,
         size_bytes=size_bytes,
+        case_id=case_id,
+        deadline_id=deadline_id,
     )
     db.add(att)
     db.commit()
@@ -1779,58 +1961,73 @@ def create_attachment(
     return att
 
 
-def get_attachments_for_case(db: Session, case_id: int):
-    return db.query(Attachment).filter(Attachment.case_id == case_id).order_by(Attachment.uploaded_at.desc()).all()
+def get_attachments_for_case(db: Session, case_id: int) -> List[Attachment]:
+    """Get all attachments for a case"""
+    return db.query(Attachment).filter(Attachment.case_id == case_id).all()
 
 
-def get_attachments_for_deadline(db: Session, deadline_id: int):
-    return db.query(Attachment).filter(Attachment.deadline_id == deadline_id).order_by(Attachment.uploaded_at.desc()).all()
+def is_token_revoked(db: Session, jti: str) -> bool:
+    """Check if token JTI is in the revocation blacklist"""
+    return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
 
 
-def get_attachment_by_id(db: Session, attachment_id: int):
-    return db.query(Attachment).filter(Attachment.id == attachment_id).first()
-
-
-def delete_attachment(db: Session, attachment_id: int) -> bool:
-    att = db.query(Attachment).filter(Attachment.id == attachment_id).first()
-    if not att:
-        return False
-    db.delete(att)
+def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
+    """Add a token JTI to the revocation blacklist"""
+    token = RevokedToken(jti=jti, expires_at=expires_at)
+    db.add(token)
     db.commit()
-    return True
+    db.refresh(token)
+    return token
+
+def aggregate_model_performance(db: Session, task: str = None) -> list:
+    return []
 
 
-# ==================== Case Timeline Helper Functions ====================
+
+def cleanup_expired_revoked_tokens(db: Session) -> int:
+    """Remove expired tokens from the blacklist"""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = db.query(RevokedToken).filter(RevokedToken.expires_at < now).delete(synchronize_session=False)
+    db.commit()
+    return deleted
 
 
-def create_timeline_event(
+def submit_similarity_feedback(
     db: Session,
-    case_id: int,
-    event_type: str,
-    description: str,
-    event_date: Optional[dt.datetime] = None,
-    metadata: Optional[dict] = None,
-) -> CaseTimeline:
-    """Create a new timeline event"""
-    event = CaseTimeline(
-        case_id=case_id,
-        event_type=event_type,
-        description=description,
-        event_date=event_date or dt.datetime.now(dt.timezone.utc),
-        event_metadata=metadata,
+    user_id: str,
+    candidate_case_id: int,
+    query_signature: str,
+    relevance: bool,
+) -> SimilarityFeedback:
+    """Persist feedback for a similarity search result"""
+    feedback = SimilarityFeedback(
+        user_id=str(user_id),
+        candidate_case_id=candidate_case_id,
+        query_signature=query_signature,
+        relevance=relevance,
     )
-    db.add(event)
+    db.add(feedback)
     db.commit()
-    db.refresh(event)
-    return event
+    db.refresh(feedback)
+    return feedback
 
 
-def get_case_timeline(db: Session, case_id: int) -> List[CaseTimeline]:
-    """Get timeline events for a case"""
-    return db.query(CaseTimeline).filter(
-        CaseTimeline.case_id == case_id
-    ).order_by(CaseTimeline.event_date.desc()).all()
+def get_similarity_feedback(
+    db: Session,
+    user_id: Optional[str] = None,
+    query_signature: Optional[str] = None,
+    candidate_case_id: Optional[int] = None,
+    limit: int = 100,
+) -> List[SimilarityFeedback]:
+    """Get similarity feedback rows filtered by user, query, or candidate case"""
+    query = db.query(SimilarityFeedback)
 
+    if user_id is not None:
+        query = query.filter(SimilarityFeedback.user_id == str(user_id))
+    if query_signature is not None:
+        query = query.filter(SimilarityFeedback.query_signature == query_signature)
+    if candidate_case_id is not None:
+        query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
 
 def create_case_comment(
     db: Session,
@@ -1936,22 +2133,5 @@ def get_user_stats(db: Session, user_id: int) -> dict:
     """Get statistics for a user's cases"""
     cases = get_user_cases(db, user_id)
 
-    active_count = len([c for c in cases if c.status == CaseStatus.ACTIVE])
-    appealed_count = len([c for c in cases if c.status == CaseStatus.APPEALED])
-    closed_count = len([c for c in cases if c.status == CaseStatus.CLOSED])
 
-    # Get upcoming deadlines
-    now = dt.datetime.now(dt.timezone.utc)
-    upcoming_deadlines = db.query(CaseDeadline).filter(
-        CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed == False,
-        CaseDeadline.deadline_date > now,
-    ).count()
 
-    return {
-        "total_cases": len(cases),
-        "active_cases": active_count,
-        "appealed_cases": appealed_count,
-        "closed_cases": closed_count,
-        "upcoming_deadlines": upcoming_deadlines,
-    }

@@ -2,6 +2,7 @@
 import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
+from sqlalchemy import event
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -12,9 +13,11 @@ from database import (
     NotificationChannel,
     create_case_deadline,
     create_or_update_user_preference,
+    log_notification,
     Case,
     CaseStatus,
     User,
+    NotificationStatus,
 )
 from notification_service import NotificationResult
 from scheduler import (
@@ -83,6 +86,65 @@ class TestSchedulerComprehensive:
             # Verify it called send_reminders 4 times (once per threshold)
             assert mock_send_reminders.call_count == 4
 
+    def test_check_and_send_reminders_bulk_prefetch_avoids_n_plus_one(self, test_db):
+        """Test that preference lookup stays bulk even with many deadlines."""
+        now = datetime.now(timezone.utc)
+        user_count = 40
+
+        for user_id in range(1, user_count + 1):
+            user = User(id=user_id, email=f"user{user_id}@example.com")
+            test_db.add(user)
+            test_db.commit()
+
+            case = Case(
+                user_id=user_id,
+                case_number=f"CASE-{user_id}",
+                case_type="civil",
+                jurisdiction="Delhi",
+                status=CaseStatus.ACTIVE,
+                title=f"Title {user_id}",
+            )
+            test_db.add(case)
+            test_db.commit()
+
+            create_case_deadline(
+                test_db,
+                user_id,
+                case.id,
+                f"Title {user_id}",
+                now + timedelta(days=30, hours=1),
+                "appeal",
+            )
+            create_or_update_user_preference(
+                test_db,
+                user_id,
+                f"user{user_id}@example.com",
+                phone_number=f"+91{user_id:02d}00000000",
+                notification_channel=NotificationChannel.SMS,
+            )
+
+        statements = []
+
+        def capture_sql(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(test_db.bind, "before_cursor_execute", capture_sql)
+        try:
+            with patch("scheduler.SessionLocal", return_value=test_db), \
+                 patch("scheduler.notification_service.send_reminders") as mock_send_reminders, \
+                 patch("scheduler.is_reminder_time_for_user", return_value=True):
+                mock_send_reminders.return_value = [MagicMock(success=True)]
+                check_and_send_reminders()
+        finally:
+            event.remove(test_db.bind, "before_cursor_execute", capture_sql)
+
+        preference_queries = [
+            statement for statement in statements
+            if "user_preferences" in statement.lower()
+        ]
+        assert len(preference_queries) == 1
+        assert mock_send_reminders.call_count == user_count
+
     def test_check_and_send_reminders_no_preferences(self, test_db):
         """Test when user has no preferences"""
         now = datetime.now(timezone.utc)
@@ -105,6 +167,53 @@ class TestSchedulerComprehensive:
              patch("scheduler.notification_service") as mock_service:
             check_and_send_reminders()
             assert mock_service.send_sms_reminder.call_count == 0
+
+    def test_check_and_send_reminders_skips_already_sent_notifications(self, test_db):
+        """Test that a previously sent reminder is not dispatched again."""
+        now = datetime.now(timezone.utc)
+
+        user = User(id=1, email="dup@example.com")
+        test_db.add(user)
+        test_db.commit()
+
+        case = Case(user_id=1, case_number="CASE-dup", case_type="civil", jurisdiction="Delhi", status=CaseStatus.ACTIVE)
+        test_db.add(case)
+        test_db.commit()
+
+        deadline = create_case_deadline(
+            test_db,
+            1,
+            case.id,
+            "Title",
+            now + timedelta(days=30, minutes=5),
+            "appeal",
+        )
+        pref = create_or_update_user_preference(
+            test_db,
+            1,
+            "dup@example.com",
+            phone_number="+911234567890",
+            notification_channel=NotificationChannel.SMS,
+        )
+        log_notification(
+            test_db,
+            deadline_id=deadline.id,
+            user_id=1,
+            channel=NotificationChannel.SMS,
+            recipient=pref.phone_number,
+            days_before=30,
+            status=NotificationStatus.SENT,
+            message_id="sms-existing",
+        )
+
+        with patch("scheduler.SessionLocal", return_value=test_db), \
+             patch("scheduler.notification_service.send_sms_reminder") as mock_sms_reminder, \
+             patch("scheduler.notification_service.send_email_reminder") as mock_email_reminder, \
+             patch("scheduler.is_reminder_time_for_user", return_value=True):
+            check_and_send_reminders()
+
+        mock_sms_reminder.assert_not_called()
+        mock_email_reminder.assert_not_called()
 
     def test_get_scheduler_initialization(self):
         """Test scheduler singleton initialization"""

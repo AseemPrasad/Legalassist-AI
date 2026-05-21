@@ -30,3 +30,4 @@ htmlcov/
 requirements.txt
 requirements.in
 /.venv
+.exports/

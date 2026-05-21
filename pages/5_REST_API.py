@@ -116,6 +116,18 @@ if page == "📄 Document Analysis":
             for remedy in result['remedies']:
                 with st.expander(f"{remedy['type'].title()} - {remedy['jurisdiction']}"):
                     st.write(remedy['description'])
+
+        remedies_confidence = result.get('remedies_confidence_score')
+        if remedies_confidence is not None:
+            st.metric("Remedies confidence", f"{remedies_confidence * 100:.1f}%")
+
+        evidence_spans = result.get('remedies_evidence_spans') or []
+        if evidence_spans:
+            with st.expander("Remedies evidence excerpts"):
+                for span in evidence_spans:
+                    st.markdown(f"**{span.get('field', 'field')}**")
+                    st.caption(span.get('snippet_reason', 'Evidence excerpt'))
+                    st.write(span.get('span_text', ''))
         
         # Deadlines
         if result.get('deadlines'):

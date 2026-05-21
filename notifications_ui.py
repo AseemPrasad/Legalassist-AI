@@ -29,6 +29,8 @@ def apply_custom_css():
         unsafe_allow_html=True,
     )
 
+import routes
+
 from database import (
     SessionLocal,
     create_case_deadline,
@@ -314,7 +316,7 @@ def page_manage_deadlines():
         if not user_pref:
             st.warning("⚠️ Please set up your notification preferences first!")
             if st.button("Go to Preferences"):
-                st.switch_page("pages/3_Settings.py")
+                st.switch_page(routes.PAGE_SETTINGS)
             return
 
         # Add new deadline
@@ -530,7 +532,16 @@ def page_bulk_import():
     if uploaded_file is not None:
         try:
             df = pd.read_csv(uploaded_file)
-            st.write("### Preview of Uploaded Data")
+            
+            # Validate required columns for deadline import
+            required_columns = ["case_title", "deadline_date"]
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                st.error(f"CSV is missing required columns: {', '.join(missing_columns)}. "
+                         f"Required columns: case_title, deadline_date. Optional: case_number, deadline_type, description.")
+                return
+            
+            st.write("### Data Preview")
             st.dataframe(df.head())
 
             if st.button("🚀 Process and Import Deadlines", use_container_width=True):
