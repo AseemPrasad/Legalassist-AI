@@ -58,8 +58,8 @@ def test_analyze_task_skips_when_duplicate(monkeypatch):
             return None
 
     with patch("celery_app.IdempotencyManager", return_value=fake_manager):
-        # call underlying wrapped function with a dummy self
-        res = celery_app.analyze_document_task.__wrapped__(_Self(), "u1", "d1", "text")
+        # call the stable task wrapper interface with a dummy self
+        res = celery_app.analyze_document_task.run(_Self(), "u1", "d1", "text")
         assert res["document_id"] == "d1"
         assert res["summary"] == "already"
 
@@ -83,7 +83,39 @@ def test_generate_report_marks_completed(monkeypatch):
             fake_manager.mark_completed("report:stub", result)
             return result
 
-        celery_app.generate_report_task.__wrapped__ = _stub
-        res = celery_app.generate_report_task.__wrapped__(None, "u1", "case1")
+        celery_app.generate_report_task.run = _stub
+        res = celery_app.generate_report_task.run(None, "u1", "case1")
         assert fake_manager.mark_completed.called
         assert res["report_id"] == "stubbed"
+
+
+def test_python_sdk_sends_idempotency_key(monkeypatch):
+    from sdk.python.client import LegalassistClient
+
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class FakeHttpClient:
+        def post(self, url, **kwargs):
+            captured["url"] = url
+            captured["headers"] = kwargs.get("headers", {})
+            captured["json"] = kwargs.get("json")
+            captured["data"] = kwargs.get("data")
+            return FakeResponse()
+
+        def close(self):
+            return None
+
+    client = LegalassistClient(api_key="api-key")
+    client.client = FakeHttpClient()
+
+    client.create_api_key("Example")
+
+    assert captured["headers"].get("Idempotency-Key")
+    assert captured["headers"].get("X-API-Key") == "api-key"

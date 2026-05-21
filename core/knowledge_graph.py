@@ -17,6 +17,8 @@ from database import (
     KnowledgeGraphEdge,
     CaseDocument,
 )
+from core.argument_extraction_engine import ArgumentExtractionEngine
+from core.argument_extraction_schema import ArgumentExtractionResult
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +114,7 @@ class KnowledgeGraphBuilder:
         case_id: int,
         override_existing: bool = False,
     ) -> List[CaseArgument]:
-        """Extract legal arguments from a case
+        """Extract legal arguments from a case using LLM-powered engine
         
         Args:
             db: Database session
@@ -125,6 +127,7 @@ class KnowledgeGraphBuilder:
         try:
             case = db.query(Case).filter(Case.id == case_id).first()
             if not case:
+                logger.error(f"Case {case_id} not found")
                 return []
             
             if override_existing:
@@ -138,6 +141,7 @@ class KnowledgeGraphBuilder:
             ).first()
             
             if not doc or not doc.document_content:
+                logger.warning(f"No judgment document found for case {case_id}")
                 return []
             
             # Get case issues
@@ -149,45 +153,60 @@ class KnowledgeGraphBuilder:
                 logger.warning(f"No issues found for case {case_id}")
                 return []
             
+            # Initialize extraction engine
+            engine = ArgumentExtractionEngine(use_llm=True)
+            
             # Extract arguments for each issue
             argument_objects = []
             
             for issue in issues:
-                # Extract arguments related to this issue
-                arguments = KnowledgeGraphBuilder._extract_arguments_from_text(
-                    doc.document_content,
-                    issue.issue_name,
-                    case_id,
+                # Use LLM-powered extraction
+                result: ArgumentExtractionResult = engine.extract_arguments(
+                    text=doc.document_content,
+                    issue_name=issue.issue_name,
+                    case_id=case_id,
                 )
                 
-                for arg_data in arguments:
-                    # Check if argument already exists
-                    existing = db.query(CaseArgument).filter(
-                        CaseArgument.case_id == case_id,
-                        CaseArgument.issue_id == issue.id,
-                        CaseArgument.argument_text == arg_data["text"]
-                    ).first()
-                    
-                    if existing:
-                        argument_objects.append(existing)
-                        continue
-                    
-                    arg_obj = CaseArgument(
-                        case_id=case_id,
-                        issue_id=issue.id,
-                        argument_text=arg_data["text"],
-                        argument_type=arg_data.get("type", "general"),
-                        argument_succeeded=arg_data.get("succeeded"),
-                        supporting_evidence=arg_data.get("evidence"),
-                        citation_references=arg_data.get("citations"),
-                    )
-                    
-                    db.add(arg_obj)
-                    argument_objects.append(arg_obj)
+                # Log extraction result
+                logger.info(
+                    f"Issue '{issue.issue_name}': extracted {result.total_extracted} arguments "
+                    f"(method={result.extraction_method}, quality={result.extraction_quality})"
+                )
+                
+                # Store arguments in database
+                for arg_data in result.arguments:
+                    try:
+                        # Check if argument already exists
+                        existing = db.query(CaseArgument).filter(
+                            CaseArgument.case_id == case_id,
+                            CaseArgument.issue_id == issue.id,
+                            CaseArgument.argument_text == arg_data.argument_text
+                        ).first()
+                        
+                        if existing:
+                            argument_objects.append(existing)
+                            continue
+                        
+                        # Create CaseArgument object
+                        arg_obj = CaseArgument(
+                            case_id=case_id,
+                            issue_id=issue.id,
+                            argument_text=arg_data.argument_text,
+                            argument_type=arg_data.argument_type,
+                            argument_succeeded=None,  # Determined from outcome
+                            supporting_evidence=arg_data.supporting_evidence,
+                            citation_references=arg_data.citation_references or [],
+                        )
+                        
+                        db.add(arg_obj)
+                        argument_objects.append(arg_obj)
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to store argument: {str(e)}")
             
             db.commit()
             
-            logger.info(f"Extracted {len(argument_objects)} arguments for case {case_id}")
+            logger.info(f"Extracted {len(argument_objects)} total arguments for case {case_id}")
             return argument_objects
             
         except Exception as e:
@@ -428,7 +447,11 @@ class KnowledgeGraphBuilder:
         issue_name: str,
         case_id: int,
     ) -> List[Dict[str, Any]]:
-        """Extract arguments from case text
+        """DEPRECATED: Use ArgumentExtractionEngine instead.
+        
+        This method is kept for backward compatibility but should not be used.
+        All argument extraction now goes through ArgumentExtractionEngine which
+        provides LLM-powered extraction with structured schema validation.
         
         Args:
             text: Case document text
@@ -436,25 +459,13 @@ class KnowledgeGraphBuilder:
             case_id: Case ID
             
         Returns:
-            List of extracted arguments
+            Empty list (deprecated)
         """
-        # In production, use GPT-4 for extraction
-        # For now, return placeholder
-        
-        # Split text into sentences
-        sentences = text.split(".")
-        
-        arguments = []
-        for i, sentence in enumerate(sentences[:10]):  # Limit to first 10 sentences
-            if len(sentence.strip()) > 20:
-                arguments.append({
-                    "text": sentence.strip()[:300],
-                    "type": "legal_principle",
-                    "succeeded": None,  # Would be determined from outcome
-                    "evidence": None,
-                })
-        
-        return arguments
+        logger.warning(
+            "KnowledgeGraphBuilder._extract_arguments_from_text() is deprecated. "
+            "Use ArgumentExtractionEngine instead."
+        )
+        return []
 
     @staticmethod
     def _extract_outcome_from_case(db: Session, case_id: int) -> str:
@@ -485,3 +496,4 @@ class KnowledgeGraphBuilder:
         except Exception as e:
             logger.error(f"Failed to extract outcome: {str(e)}")
             return "unknown"
+

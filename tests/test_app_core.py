@@ -8,6 +8,7 @@ import io
 import os
 from unittest.mock import MagicMock, patch
 from pypdf import PdfWriter
+from core.exceptions import PDFProcessingError
 from core.app_utils import (
     extract_text_from_pdf,
     compress_text,
@@ -353,7 +354,11 @@ class TestRemediesParsing:
         
         # Should return empty dictionary values gracefully
         assert isinstance(remedies, dict)
-        assert all(isinstance(v, str) for k, v in remedies.items() if not k.startswith("_"))
+        assert all(
+            isinstance(v, str)
+            for k, v in remedies.items()
+            if k not in {"confidence_score", "evidence_spans"} and not k.startswith("_")
+        )
 
 
 # ==================== APPEAL INFO EXTRACTION TESTS ====================

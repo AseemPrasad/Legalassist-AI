@@ -8,9 +8,14 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 
 from auth import require_auth, redirect_to_login, get_current_user_id
+from api.feature_flags import is_feature_enabled_for_user, get_feature_flag_manager
+import routes
 from case_manager import get_case_detail, upload_case_document, mark_deadline_completed, mark_deadline_incomplete, add_manual_deadline, mark_case_appealed, mark_case_closed, mark_case_active, generate_case_summary_text
-from case_manager import upload_case_attachment
+from case_manager import upload_case_attachment, get_case_note_state, save_case_note, publish_case_note_for_case, get_case_note_history_for_case
+from case_manager import get_user_cases_summary
 from core import extract_text_from_pdf
+from db.crud.knowledge import get_knowledge_freshness_summary, list_knowledge_invalidations
+from db.crud.audit import list_audit_events
 from database import DocumentType, CaseStatus, SessionLocal, UserPreference
 import pytz
 import html
@@ -90,6 +95,58 @@ def render_timeline_section(timeline: list):
             )
 
 
+def render_case_notes_section(case_id: int, user_id: int):
+    """Render draft and version controls for case notes."""
+    st.subheader("🗒️ Case Notes")
+
+    note = get_case_note_state(user_id, case_id)
+    draft_key = f"case_note_draft_{case_id}"
+    history_key = f"case_note_history_open_{case_id}"
+
+    if draft_key not in st.session_state:
+        st.session_state[draft_key] = note.draft_text if note else ""
+
+    st.text_area(
+        "Draft note",
+        height=200,
+        key=draft_key,
+        placeholder="Capture the latest update, next step, or internal note...",
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("Save Draft", use_container_width=True, key=f"save_case_note_{case_id}"):
+            saved = save_case_note(user_id, case_id, st.session_state[draft_key])
+            if saved:
+                st.success("Draft saved.")
+            else:
+                st.error("Could not save draft.")
+
+    with col2:
+        if st.button("Publish", use_container_width=True, key=f"publish_case_note_{case_id}"):
+            published = publish_case_note_for_case(user_id, case_id, st.session_state[draft_key])
+            if published:
+                st.success(f"Published version {published.version_number}.")
+            else:
+                st.error("Could not publish note.")
+
+    with col3:
+        if st.button("View History", use_container_width=True, key=f"view_case_note_history_{case_id}"):
+            st.session_state[history_key] = not st.session_state.get(history_key, False)
+
+    if st.session_state.get(history_key):
+        history = get_case_note_history_for_case(user_id, case_id)
+        if not history:
+            st.info("No published versions yet.")
+        else:
+            for version in history:
+                with st.container(border=True):
+                    st.markdown(
+                        f"**Version {version.version_number}** · {version.changed_by_email or version.changed_by_user_id} · {version.created_at.strftime('%d %b %Y, %H:%M')}"
+                    )
+                    st.write(version.note_text)
+
+
 def render_documents_section(case_id: int, documents: list, user_id: int):
     """Render documents list and upload"""
     st.subheader("📄 Documents")
@@ -97,6 +154,7 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
     if documents:
         for doc in documents:
             doc_date = datetime.fromisoformat(doc["uploaded_at"]).strftime("%d %b %Y")
+            metadata = doc.get("extracted_metadata") or {}
 
             with st.container(border=True):
                 col1, col2 = st.columns([3, 1])
@@ -104,6 +162,8 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
                 with col1:
                     st.markdown(f"### {doc['document_type']}")
                     st.caption(f"Uploaded: {doc_date}")
+                    if doc.get("source_attachment_id"):
+                        st.caption(f"Linked attachment: #{doc['source_attachment_id']}")
 
                     if doc.get("summary"):
                         with st.expander("📝 View Summary"):
@@ -111,6 +171,22 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
 
                     if doc.get("has_remedies"):
                         st.success("✅ Legal remedies extracted")
+
+                    if metadata:
+                        with st.expander("🔎 Extracted Fields"):
+                            if metadata.get("parties"):
+                                st.markdown("**Parties**")
+                                st.write(", ".join(metadata["parties"]))
+                            if metadata.get("dates"):
+                                st.markdown("**Dates**")
+                                st.write(", ".join(metadata["dates"]))
+                            if metadata.get("claims"):
+                                st.markdown("**Claims**")
+                                st.write("\n".join(f"- {item}" for item in metadata["claims"]))
+                            if metadata.get("statutes"):
+                                st.markdown("**Statutes**")
+                                st.write(", ".join(metadata["statutes"]))
+                            st.caption(f"Extraction method: {doc.get('extraction_method') or 'n/a'} · OCR used: {bool(doc.get('ocr_used'))}")
 
                 with col2:
                     if st.button("📄 View Full", key=f"doc_{doc['id']}"):
@@ -197,6 +273,8 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
                 with col1:
                     st.markdown(f"**{a['original_filename']}**")
                     st.caption(f"Uploaded: {a['uploaded_at']} • {a.get('size_bytes', 0)} bytes")
+                    if a.get("document_id"):
+                        st.caption(f"Linked document: #{a['document_id']}")
                 with col2:
                     try:
                         from core.storage import get_attachment_path
@@ -396,6 +474,16 @@ def render_remedies_section(remedies: Optional[Dict]):
         st.info("No remedies advice available. Upload a judgment document to get advice.")
         return
 
+    confidence_score = remedies.get("confidence_score")
+    if confidence_score is not None:
+        confidence_label = f"{float(confidence_score) * 100:.0f}%"
+        if float(confidence_score) >= 0.75:
+            st.success(f"Remedies confidence: {confidence_label}")
+        elif float(confidence_score) >= 0.5:
+            st.warning(f"Remedies confidence: {confidence_label}")
+        else:
+            st.error(f"Remedies confidence: {confidence_label}")
+
     col1, col2 = st.columns(2)
 
     with col1:
@@ -426,6 +514,91 @@ def render_remedies_section(remedies: Optional[Dict]):
         if remedies.get("deadline"):
             st.markdown("**Important Deadline**")
             st.warning(f"⏰ {remedies['deadline']}")
+
+    evidence_spans = remedies.get("evidence_spans") or []
+    if evidence_spans:
+        with st.expander("Show evidence excerpts"):
+            for span in evidence_spans:
+                field = span.get("field", "unknown field")
+                reason = span.get("snippet_reason", "Evidence extracted from remedies response.")
+                span_text = span.get("span_text", "")
+                st.markdown(f"**{field}**")
+                st.caption(reason)
+                st.write(span_text)
+
+
+def render_knowledge_status_section(case_id: int, user_id: int):
+    """Render the freshness dashboard for document-backed knowledge."""
+    st.subheader("📡 Knowledge Status")
+
+    current_user_email = st.session_state.get("user_email", "")
+    current_user_role = st.session_state.get("user_role", "user")
+    feature_enabled = is_feature_enabled_for_user(
+        "knowledge_status_dashboard",
+        str(user_id),
+        attributes={"role": current_user_role, "email": current_user_email},
+        surface="ui",
+    )
+
+    if not feature_enabled:
+        st.info("This dashboard is being rolled out gradually. Check back soon.")
+        return
+
+    get_feature_flag_manager().mark_flag_used(
+        "knowledge_status_dashboard",
+        user_id=str(user_id),
+        surface="ui",
+    )
+
+    db = SessionLocal()
+    try:
+        summary = get_knowledge_freshness_summary(db, user_id=user_id, case_id=case_id)
+        invalidations = list_knowledge_invalidations(db, user_id=user_id, case_id=case_id, limit=20)
+    finally:
+        db.close()
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Fresh", summary["fresh"])
+    with col2:
+        st.metric("Stale", summary["stale"])
+    with col3:
+        next_run = summary.get("next_recompute_at")
+        st.metric(
+            "Next recompute",
+            next_run.strftime("%d %b %H:%M UTC") if next_run else "queued on demand",
+        )
+
+    latest = summary.get("latest")
+    if latest:
+        st.info(f"Latest invalidation: {latest.reason} at {latest.invalidated_at.strftime('%d %b %Y %H:%M UTC')}")
+    else:
+        st.success("No invalidations recorded for this case yet.")
+
+    if not invalidations:
+        st.caption("Nothing stale right now.")
+        return
+
+    for invalidation in invalidations:
+        stale_badge = "🟠" if invalidation.status != "completed" else "🟢"
+        with st.container(border=True):
+            st.markdown(f"{stale_badge} **{invalidation.scope_type.title()}** · {invalidation.scope_value}")
+            st.caption(f"Reason: {invalidation.reason} · Status: {invalidation.status}")
+            st.caption(
+                f"Invalidated: {invalidation.invalidated_at.strftime('%d %b %Y %H:%M UTC')}"
+                + (
+                    f" · Recompute: {invalidation.scheduled_for.strftime('%d %b %Y %H:%M UTC')}"
+                    if invalidation.scheduled_for
+                    else ""
+                )
+            )
+            details = invalidation.details or {}
+            if details:
+                changed_fields = details.get("changed_fields")
+                if changed_fields:
+                    st.write(f"Changed fields: {', '.join(changed_fields)}")
+                elif details:
+                    st.json(details)
 
 
 def render_case_actions(case: Dict, user_id: int):
@@ -472,7 +645,7 @@ def main():
     if not case_id:
         st.warning("No case selected")
         if st.button("← Back to My Cases"):
-            st.switch_page("pages/1_My_Cases.py")
+            st.switch_page(routes.PAGE_MY_CASES)
         return
 
     # Get case details
@@ -481,13 +654,14 @@ def main():
     if not case_data:
         st.error("Case not found or access denied")
         if st.button("← Back to My Cases"):
-            st.switch_page("pages/1_My_Cases.py")
+            st.switch_page(routes.PAGE_MY_CASES)
         return
 
     case = case_data["case"]
     documents = case_data["documents"]
     deadlines = case_data["deadlines"]
     remedies = case_data.get("remedies")
+    timeline = case_data.get("timeline", [])
 
     # Keep attachments and deadlines in session for uploader convenience
     st.session_state.setdefault("case_attachments", case_data.get("attachments", []))
@@ -525,7 +699,7 @@ def main():
     st.markdown("---")
 
     # Main content - tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📅 Timeline", "📄 Documents", "⏰ Deadlines", "⚖️ Remedies"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📅 Timeline", "📄 Documents", "⏰ Deadlines", "⚖️ Remedies", "📡 Knowledge", "🗒️ Notes", "🧾 Audit"])
 
     with tab1:
         render_timeline_section(timeline)
@@ -539,6 +713,31 @@ def main():
     with tab4:
         render_remedies_section(remedies)
 
+    with tab5:
+        render_knowledge_status_section(case_id, user_id)
+
+    with tab6:
+        render_case_notes_section(case_id, user_id)
+
+    with tab7:
+        st.subheader("🧾 Audit Trail")
+        with SessionLocal() as db:
+            audit_events = list_audit_events(db, case_id=case_id, limit=100)
+
+        if not audit_events:
+            st.info("No audit events recorded for this case yet.")
+        else:
+            audit_rows = []
+            for event in audit_events:
+                audit_rows.append({
+                    "occurred_at": event.occurred_at.isoformat() if event.occurred_at else None,
+                    "actor": event.actor,
+                    "action": event.action,
+                    "resource": event.resource,
+                    "metadata": event.event_metadata or {},
+                })
+            st.dataframe(audit_rows, use_container_width=True, hide_index=True)
+
     st.markdown("---")
 
     # Case actions
@@ -546,29 +745,113 @@ def main():
 
     # Export options
     st.markdown("---")
-    col1, col2 = st.columns(2)
+    st.subheader("📦 Export Builder")
+    from services.export_builder import (
+        build_case_export_artifact,
+        build_case_export_bundle,
+        get_case_export_preview,
+        get_default_export_fields,
+        get_export_field_options,
+    )
+    from services.privacy_redaction import get_default_privacy_profile, get_privacy_profile_options
 
-    with col1:
-        from pdf_exporter import generate_case_pdf
-        pdf_bytes = generate_case_pdf(user_id, case_id)
-        if pdf_bytes:
-            st.download_button(
-                label="📥 Download PDF Summary",
-                data=pdf_bytes,
-                file_name=f"case_summary_{case['case_number']}.pdf",
-                mime="application/pdf",
-                key="download_summary_pdf",
-                use_container_width=True
-            )
+    privacy_profile_options = get_privacy_profile_options()
+    privacy_profile_labels = {item["name"]: item["label"] for item in privacy_profile_options}
+    privacy_profile = st.selectbox(
+        "Privacy profile",
+        options=[item["name"] for item in privacy_profile_options],
+        index=[item["name"] for item in privacy_profile_options].index(get_default_privacy_profile()),
+        format_func=lambda profile_name: privacy_profile_labels.get(profile_name, profile_name.replace("_", " ").title()),
+        key=f"privacy_profile_{case_id}",
+    )
 
-    with col2:
+    export_field_options = get_export_field_options()
+    export_fields = st.multiselect(
+        "Fields to include",
+        options=[item["field_id"] for item in export_field_options],
+        default=get_default_export_fields(),
+        format_func=lambda field_id: next(item["label"] for item in export_field_options if item["field_id"] == field_id),
+        key=f"export_fields_{case_id}",
+    )
+
+    export_formats = st.multiselect(
+        "Output formats",
+        options=["json", "pdf", "docx"],
+        default=["json", "pdf"],
+        key=f"export_formats_{case_id}",
+    )
+
+    user_cases = get_user_cases_summary(user_id)
+    case_options = [item["id"] for item in user_cases]
+    case_labels = {item["id"]: f"{item['case_number']} - {item['title']}" for item in user_cases}
+    selected_case_ids = st.multiselect(
+        "Cases to export",
+        options=case_options,
+        default=[case_id],
+        format_func=lambda case_option: case_labels.get(case_option, str(case_option)),
+        key=f"export_cases_{case_id}",
+    )
+
+    preview_case_id = case_id if case_id in selected_case_ids else (selected_case_ids[0] if selected_case_ids else case_id)
+    preview_payload = get_case_export_preview(
+        user_id=user_id,
+        case_id=preview_case_id,
+        field_ids=export_fields,
+        privacy_profile=privacy_profile,
+    )
+
+    with st.expander("Preview selected fields", expanded=False):
+        if preview_payload:
+            st.json(preview_payload)
+        else:
+            st.info("Select a case you own to preview the export payload.")
+
+    export_col1, export_col2 = st.columns(2)
+    with export_col1:
+        if selected_case_ids and export_formats:
+            if len(selected_case_ids) == 1 and len(export_formats) == 1:
+                export_artifact = build_case_export_artifact(
+                    user_id=user_id,
+                    case_id=selected_case_ids[0],
+                    format=export_formats[0],
+                    field_ids=export_fields,
+                    privacy_profile=privacy_profile,
+                )
+                if export_artifact:
+                    st.download_button(
+                        label=f"Download {export_formats[0].upper()} export",
+                        data=export_artifact.data,
+                        file_name=export_artifact.file_name,
+                        mime=export_artifact.mime_type,
+                        key=f"download_case_export_{case_id}",
+                        use_container_width=True,
+                    )
+            else:
+                export_artifact = build_case_export_bundle(
+                    user_id=user_id,
+                    case_ids=selected_case_ids,
+                    field_ids=export_fields,
+                    formats=export_formats,
+                    privacy_profile=privacy_profile,
+                )
+                if export_artifact:
+                    st.download_button(
+                        label="Download export bundle",
+                        data=export_artifact.data,
+                        file_name=export_artifact.file_name,
+                        mime=export_artifact.mime_type,
+                        key=f"download_case_export_bundle_{case_id}",
+                        use_container_width=True,
+                    )
+
+    with export_col2:
         from pdf_exporter import generate_anonymized_pdf
         from case_manager import generate_anonymized_case_data
-        
-        anon_data = generate_anonymized_case_data(case_id)
+
+        anon_data = generate_anonymized_case_data(case_id, profile_name=privacy_profile)
         if anon_data:
             anon_id = anon_data["anonymized_id"]
-            anon_pdf_bytes = generate_anonymized_pdf(case_id, anon_id, user_id)
+            anon_pdf_bytes = generate_anonymized_pdf(case_id, anon_id, user_id, profile_name=privacy_profile)
             if anon_pdf_bytes:
                 st.download_button(
                     label="🔗 Download Anonymized PDF for Lawyer",
@@ -578,7 +861,7 @@ def main():
                     key="download_anon_pdf",
                     use_container_width=True
                 )
-                
+
                 if st.button("Show Share ID", use_container_width=True):
                     st.success(f"✅ Anonymized ID: `{anon_id}`")
                     st.info("Share this ID with lawyers to show anonymized case details (feature coming soon)")

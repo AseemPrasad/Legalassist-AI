@@ -77,7 +77,7 @@ db = SessionLocal()
 try:
     # ==================== SUMMARY METRICS ====================
     st.subheader("📈 Overall Statistics")
-    
+
     summary = get_dashboard_summary(db)
     
     col1, col2, col3, col4 = st.columns(4)

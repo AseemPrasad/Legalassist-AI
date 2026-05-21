@@ -5,9 +5,14 @@ POST /api/v1/auth/api-key - Create API key
 GET /api/v1/auth/me - Get current user
 """
 from fastapi import APIRouter, HTTPException, status, Depends
-from datetime import datetime, timedelta
-from api.auth import create_access_token, generate_api_key, hash_api_key, CurrentUser, get_current_user
+from datetime import datetime, timedelta, timezone
+from sqlalchemy.orm import Session
+from database import get_db
+from db.models import APIKey
+from api.auth import create_access_token, create_api_key_record, CurrentUser, get_current_user
+from database import SessionLocal
 from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
+from api.limiter import RateLimit
 import structlog
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -17,31 +22,40 @@ logger = structlog.get_logger(__name__)
 @router.post(
     "/token",
     response_model=TokenResponse,
-    summary="Get access token"
+    summary="Get access token",
+    dependencies=[Depends(RateLimit(use_auth_defaults=True))]
 )
 async def get_token(
     username: str,
     password: str
 ) -> TokenResponse:
     """
-    Authenticate user and get access token
-    
-    - **username**: User email or username
-    - **password**: User password
-    
-    Returns JWT token valid for 24 hours
+    Authenticate user and get access token.
+
+    Validates credentials against the database.
     """
-    
-    # In production, validate against database
+    from database import get_user_by_email
+
     logger.info("Token request", username=username)
-    
-    token = create_access_token({"sub": "user123", "email": username, "role": "user"})
-    
-    return TokenResponse(
-        access_token=token,
-        token_type="bearer",
-        expires_in=24 * 3600  # 24 hours in seconds
-    )
+
+    db = SessionLocal()
+    try:
+        user = get_user_by_email(db, username)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials"
+            )
+
+        token = create_access_token({"sub": str(user.id), "email": user.email})
+
+        return TokenResponse(
+            access_token=token,
+            token_type="bearer",
+            expires_in=24 * 3600
+        )
+    finally:
+        db.close()
 
 
 @router.post(
@@ -51,7 +65,8 @@ async def get_token(
 )
 async def create_api_key(
     request: APIKeyCreate,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> APIKeyResponse:
     """
     Create new API key for programmatic access
@@ -68,19 +83,19 @@ async def create_api_key(
         key_name=request.name
     )
     
-    key = generate_api_key()
-    key_hash = hash_api_key(key)
-    expires_at = None
-    
-    if request.expires_in_days:
-        expires_at = datetime.utcnow() + timedelta(days=request.expires_in_days)
+    key, api_key_record = create_api_key_record(
+        db=db,
+        name=request.name,
+        expires_in_days=request.expires_in_days,
+        user_id=current_user.user_id
+    )
     
     return APIKeyResponse(
-        id="key_123",
-        name=request.name,
-        key=key,  # Only shown now
-        created_at=datetime.utcnow(),
-        expires_at=expires_at
+        id=api_key_record.key_id,
+        name=api_key_record.name,
+        key=key,  # This is the combined key: key_id.secret
+        created_at=api_key_record.created_at,
+        expires_at=api_key_record.expires_at
     )
 
 
@@ -89,22 +104,26 @@ async def create_api_key(
     summary="List API keys"
 )
 async def list_api_keys(
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> dict:
     """List all API keys for current user"""
     
     logger.info("Listing API keys", user_id=current_user.user_id)
     
+    keys = db.query(APIKey).filter(APIKey.user_id == current_user.user_id).all()
+    
     return {
         "user_id": current_user.user_id,
         "keys": [
             {
-                "id": "key_123",
-                "name": "Production API Key",
-                "created_at": datetime.utcnow().isoformat(),
-                "expires_at": None,
+                "id": k.key_id,
+                "name": k.name,
+                "created_at": k.created_at.isoformat() if k.created_at else None,
+                "expires_at": k.expires_at.isoformat() if k.expires_at else None,
                 "last_used": None
             }
+            for k in keys
         ]
     }
 
@@ -115,7 +134,8 @@ async def list_api_keys(
 )
 async def delete_api_key(
     key_id: str,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> dict:
     """Delete an API key"""
     
@@ -124,6 +144,20 @@ async def delete_api_key(
         user_id=current_user.user_id,
         key_id=key_id
     )
+    
+    key_record = db.query(APIKey).filter(
+        APIKey.key_id == key_id,
+        APIKey.user_id == current_user.user_id
+    ).first()
+    
+    if not key_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API key not found"
+        )
+        
+    db.delete(key_record)
+    db.commit()
     
     return {"status": "deleted", "key_id": key_id}
 
