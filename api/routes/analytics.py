@@ -62,7 +62,7 @@ async def get_cost_breakdown(
         failed_analyses=2,
         average_analysis_time_seconds=12.5,
         top_case_types=[("civil", 34), ("contract", 28), ("labor", 15)],
-        generated_at=datetime.utcnow()
+        generated_at=datetime.now(timezone.utc)
     )
 
 
@@ -101,7 +101,7 @@ async def get_analytics_overview(
             {"feature": "case_search", "usage": 32},
             {"feature": "report_generation", "usage": 12}
         ],
-        "generated_at": datetime.utcnow().isoformat()
+        "generated_at": datetime.now(timezone.utc).isoformat()
     }
 
 
@@ -141,5 +141,5 @@ async def get_usage_metrics(
             "GET /analytics/costs": 234,
             "GET /deadlines/upcoming": 298
         },
-        "generated_at": datetime.utcnow().isoformat()
+        "generated_at": datetime.now(timezone.utc).isoformat()
     }

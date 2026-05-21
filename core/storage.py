@@ -35,10 +35,17 @@ def save_attachment(file_bytes: bytes, original_filename: str) -> Tuple[str, int
 
 
 def get_attachment_path(stored_path: str) -> str:
-    """Return full path for a stored attachment (no security checks)."""
+    """Return safe path for stored attachment, rejecting traversal attempts."""
     if not stored_path:
         return ""
-    p = Path(stored_path)
-    if not p.exists():
+
+    resolved = Path(stored_path).resolve()
+    attachments_dir = Path(ATTACHMENTS_DIR).resolve()
+
+    if ".." in stored_path or resolved.is_relative_to(attachments_dir) is False:
         return ""
-    return str(p)
+
+    if not resolved.exists():
+        return ""
+
+    return str(resolved)

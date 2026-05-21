@@ -1,11 +1,22 @@
+import hashlib
 import logging
-from typing import List, Optional
+import re
+from typing import Dict, List, Optional
 import chromadb
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+from config import Config
 
 LOGGER = logging.getLogger(__name__)
+
+
+def get_judgment_hash(text: str) -> str:
+    """Generate an MD5 hash of judgment text to uniquely identify it."""
+    if not text:
+        return ""
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
 
 class LegalRAG:
     def __init__(self, embedding_model_name: str = "all-MiniLM-L6-v2"):
@@ -18,11 +29,71 @@ class LegalRAG:
             raise
             
         self.vector_store = None
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            separators=["\n\n", "\n", ".", " ", ""]
+        self._stored_text = ""
+        self.section_header_pattern = re.compile(
+            r"^(section\s+\d+[\w().:-]*|article\s+\d+[\w().:-]*|chapter\s+\d+[\w().:-]*|clause\s+\d+[\w().:-]*)",
+            re.IGNORECASE,
         )
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1400,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
+
+    def reset(self) -> None:
+        """Reset the vector store to clear loaded document state."""
+        LOGGER.info("Resetting LegalRAG vector store.")
+        self.vector_store = None
+
+    def _is_section_header(self, line: str) -> bool:
+        """Identify likely legal section headers so related rules stay together."""
+        stripped_line = line.strip()
+        if not stripped_line or len(stripped_line) > 160:
+            return False
+
+        return bool(self.section_header_pattern.match(stripped_line))
+
+    def _split_into_section_chunks(self, text: str) -> List[str]:
+        """Split judgment text on section-like headers before falling back to size-based chunking."""
+        chunks: List[str] = []
+        current_section_lines: List[str] = []
+        max_chunk_size = 1400
+        max_hard_slice_size = 1400
+
+        for line in text.splitlines():
+            if self._is_section_header(line) and current_section_lines:
+                section_text = "\n".join(current_section_lines).strip()
+                if section_text:
+                    chunks.append(section_text)
+                current_section_lines = [line.strip()]
+                continue
+
+            current_section_lines.append(line)
+
+        if current_section_lines:
+            section_text = "\n".join(current_section_lines).strip()
+            if section_text:
+                chunks.append(section_text)
+
+        if len(chunks) <= 1:
+            return self.text_splitter.split_text(text)
+
+        semantic_chunks: List[str] = []
+        for chunk in chunks:
+            if len(chunk) <= max_chunk_size:
+                semantic_chunks.append(chunk)
+            else:
+                split_result = self.text_splitter.split_text(chunk)
+                for sub_chunk in split_result:
+                    if len(sub_chunk) <= max_chunk_size:
+                        semantic_chunks.append(sub_chunk)
+                    else:
+                        for i in range(0, len(sub_chunk), max_hard_slice_size):
+                            hard_slice = sub_chunk[i:i + max_hard_slice_size]
+                            if hard_slice.strip():
+                                semantic_chunks.append(hard_slice)
+
+        return [chunk for chunk in semantic_chunks if chunk.strip()]
 
     def initialize_vector_store(self, text: str) -> bool:
         """Chunk the document and load it into an ephemeral vector store."""
@@ -32,10 +103,11 @@ class LegalRAG:
             
         try:
             LOGGER.info("Chunking document text...")
-            chunks = self.text_splitter.split_text(text)
+            chunks = self._split_into_section_chunks(text)
             LOGGER.info(f"Split document into {len(chunks)} chunks.")
-            
-            # Create vector store in memory using EphemeralClient
+
+            self._stored_text = text
+
             chroma_client = chromadb.EphemeralClient()
             self.vector_store = Chroma.from_texts(
                 texts=chunks,
@@ -49,6 +121,21 @@ class LegalRAG:
             LOGGER.error(f"Error initializing vector store: {e}")
             return False
 
+    def _keyword_fallback_search(self, question: str) -> List[str]:
+        """Keyword-based fallback when semantic search returns no results."""
+        if not self._stored_text:
+            return []
+        keywords = question.lower().split()
+        lines = self._stored_text.split("\n")
+        scored = []
+        for i, line in enumerate(lines):
+            line_lower = line.lower()
+            score = sum(1 for kw in keywords if kw in line_lower and len(kw) > 2)
+            if score > 0:
+                scored.append((score, len(line), line))
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        return [line for _, _, line in scored[:5]]
+
     def query(self, question: str, language: str, openai_client, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
         """
         Query the document and generate an answer using the provided LLM client.
@@ -59,14 +146,20 @@ class LegalRAG:
             
         try:
             LOGGER.info(f"Retrieving context for question: {question}")
-            # Retrieve relevant chunks
             retriever = self.vector_store.as_retriever(search_kwargs={"k": 5})
             relevant_docs = retriever.invoke(question)
-            
+
             if not relevant_docs:
-                return "I couldn't find relevant information in the document to answer your question."
-                
-            context = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs])
+                LOGGER.info("Semantic search returned no results, trying keyword fallback")
+                from core.app_utils import extract_text_from_pdf
+                keyword_results = self._keyword_fallback_search(question)
+                if keyword_results:
+                    context = "\n\n---\n\n".join(keyword_results)
+                    LOGGER.info(f"Keyword fallback found {len(keyword_results)} results")
+                else:
+                    return "I couldn't find relevant information in the document to answer your question."
+            else:
+                context = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs])
             
             # Format chat history for the prompt
             history_str = ""
@@ -103,7 +196,7 @@ ANSWER IN {language} (include citations if possible):
             from core.app_utils import safe_llm_call
             answer, error = safe_llm_call(
                 client=openai_client,
-                model="meta-llama/llama-3.1-8b-instruct",
+                model=Config.DEFAULT_MODEL,
                 messages=[
                     {"role": "system", "content": f"You are a helpful legal researcher. Output only in {language}."},
                     {"role": "user", "content": prompt}

@@ -8,15 +8,19 @@ CHANGE: build_judgment_result_text now returns (plain_text, structured_dict).
 
 import streamlit as st
 import logging
+
+import routes
 import sys
 import os
 from config import Config
+from pages.ui_components import render_header, SESSION_KEYS
 
 # Add parent directory to sys.path to resolve 'core' module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from core.app_utils import (
     get_client,
+    get_default_model,
     extract_text_from_pdf,
     analyze_legal_citations,
     compress_text,
@@ -93,16 +97,15 @@ def render_page():
     # Get client early for translation
     client = get_client()
     
-    current_language = st.session_state.get("judgment_language", "English")
+    current_language = st.session_state.get(SESSION_KEYS["judgment_language"], "English")
     ui = get_localized_ui_text(current_language, client)
 
-    st.title("⚡ LegalEase AI")
-    st.subheader(ui["app_subtitle"])
+    render_header("⚡ LegalEase AI", ui["app_subtitle"])
 
     st.markdown(ui["app_intro"])
     st.markdown("---")
 
-    language = st.selectbox(ui["language_label"], LANGUAGES, key="judgment_language")
+    language = st.selectbox(ui["language_label"], LANGUAGES, key=SESSION_KEYS["judgment_language"])
     ui = get_localized_ui_text(language, client)
     
     input_method = st.radio(
@@ -184,7 +187,7 @@ def render_page():
                     safe_text = compress_text(raw_text)
 
                     prompt = build_prompt(safe_text, language)
-                    model_id = "meta-llama/llama-3.1-8b-instruct"
+                    model_id = get_default_model()
 
                     # Use safe_llm_call for robust error handling and retries
                     summary_raw, error = safe_llm_call(
@@ -217,7 +220,7 @@ def render_page():
                             max_tokens=Config.SUMMARY_MAX_TOKENS,
                             temperature=0.03,
                         )
-                        if len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
+                        if retry_summary and len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
                             summary = retry_summary
 
                     if not summary:
@@ -314,7 +317,7 @@ def render_page():
                         col1, col2, col3 = st.columns(3)
 
                         with col1:
-                            if st.button(ui["view_analytics"], key="view_analytics"):
+                            if st.button(ui["view_analytics"], key="view_analytics_home"):
                                 st.session_state.show_analytics = True
 
                         with col2:
@@ -362,7 +365,7 @@ def render_page():
                         st.markdown("## 💬 Chat with Judgment")
                         st.info("Have specific questions about this document? You can ask our AI assistant.")
                         if st.button("💬 Open Interactive Chat", use_container_width=True):
-                            st.switch_page("pages/4_Chat.py")
+                            st.switch_page(routes.PAGE_CHAT)
 
                 except Exception as e:
                     err = str(e)
