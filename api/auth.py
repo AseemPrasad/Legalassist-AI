@@ -283,9 +283,43 @@ async def get_current_user(
         api_key = x_api_key
 
     if api_key:
+        
+        if "." not in api_key:
+            raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY_FORMAT", message="Invalid API key format")
+
+        key_id, secret = api_key.split(".", 1)
+
         db = SessionLocal()
         try:
-            return _resolve_api_key_user(api_key, db)
+            key_record = db.query(APIKey).filter(
+                APIKey.key_id == key_id
+            ).first()
+
+            if not key_record:
+                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY", message="Invalid API key")
+
+            if not key_record.is_valid():
+                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="API_KEY_EXPIRED", message="API key has expired")
+
+            if not verify_api_key(secret, key_record.key_salt, key_record.key_hash):
+                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY", message="Invalid API key")
+
+            # Check if linked to a database user
+            if key_record.user_id:
+                user = db.query(User).filter(User.id == key_record.user_id).first()
+                if user:
+                    return CurrentUser(
+                        user_id=user.id,
+                        email=user.email,
+                        role="admin" if getattr(user, "is_admin", False) else "user"
+                    )
+
+            # Fallback to default API user
+            return CurrentUser(
+                user_id=0,
+                email="api_user",
+                role="api"
+            )
         finally:
             db.close()
 

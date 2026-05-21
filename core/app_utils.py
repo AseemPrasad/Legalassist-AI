@@ -20,6 +20,7 @@ import re
 import logging
 import os
 import json
+import io
 from pathlib import Path
 from openai import OpenAI
 from pypdf import PdfReader
@@ -99,38 +100,39 @@ def _extract_pages_pypdf(reader: PdfReader) -> str:
     return text.strip()
 
 
-def _validate_encoding_quality(text: str) -> tuple[bool, float]:
-    """
-    Validate extracted text for encoding quality issues.
-    Returns (is_valid, quality_score) where quality_score is 0.0-1.0.
-    Detects: mojibake, replacement chars, malformed unicode sequences.
-    """
-    if not text:
-        return False, 0.0
-    
-    # Check for replacement characters (U+FFFD) indicating encoding failures
-    replacement_char_count = text.count('\ufffd')
-    replacement_ratio = replacement_char_count / len(text)
-    
-    # Check for common mojibake patterns (question marks, boxes, garbled sequences)
-    garbled_patterns = ['???', '', '\x00', '\x1a']
-    garbled_count = sum(text.count(p) for p in garbled_patterns)
-    garbled_ratio = garbled_count / len(text)
-    
-    # Check for excessive non-ASCII control characters
-    control_chars = sum(1 for c in text if ord(c) < 32 and c not in '\n\t\r')
-    control_ratio = control_chars / len(text)
-    
-    # Calculate quality score (1.0 = perfect, 0.0 = corrupted)
-    quality_score = max(0.0, 1.0 - (replacement_ratio * 10) - (garbled_ratio * 5) - (control_ratio * 3))
-    
-    # Also check if text appears mostly non-printable
-    printable_ratio = sum(1 for c in text if c.isprintable() or c in '\n\t\r') / len(text)
-    if printable_ratio < 0.5:
-        quality_score = min(quality_score, 0.3)
-    
-    is_valid = quality_score >= 0.7 and replacement_ratio < 0.05
-    return is_valid, round(quality_score, 2)
+def _is_image_input(uploaded_file) -> bool:
+    name = (getattr(uploaded_file, "name", "") or "").lower()
+    return name.endswith((".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"))
+
+
+def _read_input_bytes(uploaded_file) -> Optional[bytes]:
+    if hasattr(uploaded_file, "seek"):
+        uploaded_file.seek(0)
+    data = uploaded_file.read() if hasattr(uploaded_file, "read") else None
+    if hasattr(uploaded_file, "seek"):
+        uploaded_file.seek(0)
+    return data
+
+
+def _process_image_with_multimodal_processor(image_bytes: bytes, ocr_languages: str, aggressive_ocr: bool) -> str:
+    from core.multimodal_processor import MultiModalProcessor
+
+    processor = MultiModalProcessor()
+    languages = [lang for lang in ocr_languages.split('+') if lang]
+    result = processor.process_document(
+        image_bytes,
+        file_type='image',
+        languages=languages,
+        enable_ocr=True,
+        aggressive_ocr=aggressive_ocr,
+    )
+    if result.get('success') and result.get('text'):
+        logging.info(
+            "Multi-modal image OCR completed. Confidence: %.2f%%",
+            result.get('confidence', 0),
+        )
+        return result['text']
+    raise ValueError(result.get('error') or 'Image OCR failed to extract readable text.')
 
 
 def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
@@ -198,9 +200,26 @@ def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
 
 
 def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages: str = "eng+hin", ocr_dpi: int = 300):
-    """Extract text from PDF. Uses parser extraction first, then optional OCR fallback."""
+    """Extract text from PDFs and image uploads.
+
+    The function still prefers direct PDF text extraction, but it now also
+    handles scanned PDFs and standalone images by routing them through the
+    multi-modal OCR processor when OCR is enabled.
+    """
     text = ""
-    parser_errors: List[Exception] = []
+    if _is_image_input(uploaded_pdf):
+        if not enable_ocr:
+            raise ValueError("Image uploads require OCR. Re-run with OCR enabled.")
+        image_bytes = _read_input_bytes(uploaded_pdf)
+        if not image_bytes:
+            raise ValueError("Unable to read image bytes for OCR.")
+        try:
+            return _process_image_with_multimodal_processor(image_bytes, ocr_languages, aggressive_ocr=True)
+        except ImportError:
+            raise RuntimeError("OCR dependencies are missing. Install pytesseract, pdf2image, Pillow and Tesseract binaries.")
+        except Exception:
+            return _legacy_image_ocr_fallback(image_bytes, ocr_languages)
+
     try:
         with pdfplumber.open(uploaded_pdf) as pdf:
             pages = []
@@ -238,6 +257,74 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
             )
         raise ValueError("No extractable text found. The PDF may be image-only or empty. Re-run with OCR enabled.")
 
+    # Use new multi-modal processor for enhanced OCR
+    try:
+        from core.multimodal_processor import MultiModalProcessor
+        processor = MultiModalProcessor()
+        
+        # Parse language string
+        languages = ocr_languages.split('+')
+        
+        # Read PDF bytes
+        if hasattr(uploaded_pdf, "seek"):
+            uploaded_pdf.seek(0)
+        data = uploaded_pdf.read() if hasattr(uploaded_pdf, "read") else None
+        if hasattr(uploaded_pdf, "seek"):
+            uploaded_pdf.seek(0)
+        if not data:
+            raise ValueError("Unable to read PDF bytes for OCR.")
+        
+        # Process with multi-modal processor
+        result = processor.process_document(
+            data,
+            file_type='scanned_pdf',
+            languages=languages,
+            enable_ocr=True,
+            aggressive_ocr=True
+        )
+        
+        if result['success'] and result['text']:
+            logging.info(f"Multi-modal OCR completed. Confidence: {result.get('confidence', 0):.2f}%")
+            return result['text']
+        else:
+            # Fallback to legacy OCR if multi-modal fails
+            logging.warning("Multi-modal OCR failed, falling back to legacy OCR")
+            return _legacy_ocr_fallback(uploaded_pdf, ocr_languages, ocr_dpi)
+            
+    except ImportError:
+        # Fallback to legacy OCR if multi-modal processor not available
+        logging.info("Multi-modal processor not available, using legacy OCR")
+        return _legacy_ocr_fallback(uploaded_pdf, ocr_languages, ocr_dpi)
+    except Exception as e:
+        logging.error(f"Multi-modal OCR error: {str(e)}, falling back to legacy OCR")
+        return _legacy_ocr_fallback(uploaded_pdf, ocr_languages, ocr_dpi)
+
+
+def _legacy_image_ocr_fallback(image_bytes: bytes, ocr_languages: str) -> str:
+    """Legacy OCR fallback for standalone image uploads."""
+    try:
+        from PIL import Image
+        import pytesseract
+        from pytesseract import Output
+    except Exception as e:
+        raise RuntimeError(
+            f"OCR dependencies are missing ({e}). Install pytesseract, Pillow and Tesseract binaries."
+        ) from e
+
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+    except Exception as e:
+        raise ValueError(f"Unable to decode image for OCR: {e}") from e
+
+    ocr_data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
+    text = _extract_layout_text_from_tesseract_data(ocr_data)
+    if not text:
+        raise ValueError("OCR completed but no readable text was extracted.")
+    return text
+
+
+def _legacy_ocr_fallback(uploaded_pdf, ocr_languages: str, ocr_dpi: int):
+    """Legacy OCR fallback for backward compatibility"""
     try:
         from pdf2image import convert_from_bytes
         import pytesseract
@@ -456,6 +543,11 @@ def output_language_mismatch_detected(output_text, language, min_wrong_chars=6):
         allowed_count == 0 or wrong_count / max(allowed_count, 1) > 0.15
     )
 
+def analyze_legal_citations(text: str, known_references: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Extract and validate legal citations from text."""
+    from core.citation_engine import analyze_legal_citations as _analyze_legal_citations
+
+    return _analyze_legal_citations(text, known_references=known_references)
 
 # ==================== LLM PROMPTS ====================
 

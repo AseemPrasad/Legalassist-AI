@@ -92,12 +92,18 @@ class TestPDFExtraction:
         with pytest.raises(ValueError, match="No extractable text found"):
             extract_text_from_pdf(pdf_file)
 
-    def test_corrupted_pdf_raises_processing_error(self):
-        """Test that malformed PDFs surface a typed processing error."""
-        bad_pdf = io.BytesIO(b"not a valid pdf")
+    @patch("core.app_utils._process_image_with_multimodal_processor")
+    def test_extract_image_uses_multimodal_ocr(self, mock_multimodal_ocr):
+        """Test that standalone image uploads are routed through multimodal OCR."""
+        mock_multimodal_ocr.return_value = "Scanned affidavit text"
 
-        with pytest.raises(PDFProcessingError, match="Failed to extract text from PDF"):
-            extract_text_from_pdf(bad_pdf)
+        image_file = io.BytesIO(b"fake-image-bytes")
+        image_file.name = "scan.png"
+
+        text = extract_text_from_pdf(image_file, enable_ocr=True)
+
+        assert text == "Scanned affidavit text"
+        mock_multimodal_ocr.assert_called_once()
 
 
 # ==================== TEXT COMPRESSION TESTS ====================

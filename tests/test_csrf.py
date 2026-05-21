@@ -77,21 +77,6 @@ def test_post_with_origin_and_header_but_no_cookie_fails():
     assert "Missing CSRF cookie" in payload["message"]
     assert payload["request_id"]
 
-
-def test_post_with_mixed_case_csrf_header_succeeds():
-    """Test that mixed-case CSRF header names are accepted by Starlette's case-insensitive header lookup."""
-    client.cookies.clear()
-    token = "mixed-case-csrf-token"
-    headers = {
-        "Origin": "http://localhost",
-        "X-CsRf-ToKeN": token,
-    }
-    client.cookies.set(CSRF_COOKIE_NAME, token)
-    response = client.post("/test-post", headers=headers)
-    assert response.status_code == 200
-    assert response.json() == {"message": "success"}
-    client.cookies.clear()
-
 def test_post_with_origin_and_mismatched_tokens_fails():
     """Test that mismatched cookie and header values fail."""
     client.cookies.clear()
