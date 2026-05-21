@@ -42,6 +42,8 @@ from core.app_utils import (
     export_draft_to_pdf,
 )
 
+from core.multimodal_processor import MultiModalProcessor
+
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
 
 # FIX: DevTools revealed the winning rule is:
@@ -114,11 +116,36 @@ def render_page():
     is_valid_input = False
     uploaded_file = None
     pasted_text = None
+    enable_ocr = False
+    ocr_languages = "eng+hin"
 
     if input_method == ui["upload_pdf"]:
-        uploaded_file = st.file_uploader(ui["upload_label"], type=["pdf"])
+        uploaded_file = st.file_uploader(
+            ui["upload_label"], 
+            type=["pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp"]
+        )
         if uploaded_file:
             is_valid_input = True
+            
+            # Show OCR options for images and scanned PDFs
+            file_ext = uploaded_file.name.split('.')[-1].lower()
+            if file_ext != 'pdf':
+                st.info("📷 Image file detected. OCR will be used to extract text.")
+                enable_ocr = True
+                if enable_ocr:
+                    ocr_languages = "+".join(st.multiselect(
+                        "Select OCR languages",
+                        ["English", "Hindi", "Bengali", "Urdu"],
+                        default=["English"]
+                    )) or "eng"
+            else:
+                enable_ocr = st.checkbox("Enable OCR for scanned PDFs", value=False)
+                if enable_ocr:
+                    ocr_languages = "+".join(st.multiselect(
+                        "Select OCR languages",
+                        ["English", "Hindi", "Bengali", "Urdu"],
+                        default=["English"]
+                    )) or "eng"
     else:
         pasted_text = st.text_area(
             ui.get("paste_text", "📋 Paste Text"),
@@ -143,7 +170,7 @@ def render_page():
                         return
 
                     if input_method == ui["upload_pdf"]:
-                        raw_text = extract_text_from_pdf(uploaded_file)
+                        raw_text = extract_text_from_pdf(uploaded_file, enable_ocr=enable_ocr, ocr_languages=ocr_languages)
                     else:
                         raw_text = pasted_text
                     

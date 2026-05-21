@@ -476,11 +476,36 @@ def main():
     st.markdown("---")
 
     language = st.selectbox("🌐 Select your language", ["English", "Hindi", "Bengali", "Urdu"])
-    uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
+    uploaded_file = st.file_uploader("📄 Upload Judgment PDF / Image", type=["pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp"])
+    enable_ocr = False
+    ocr_languages = "eng+hin"
     
     # PDF Validation for size and page count
     is_valid_pdf = True
     if uploaded_file:
+        file_ext = uploaded_file.name.split('.')[-1].lower()
+
+        if file_ext != "pdf":
+            st.info("📷 Image file detected. OCR will be used to extract text.")
+            enable_ocr = True
+            ocr_languages = "+".join(
+                st.multiselect(
+                    "Select OCR languages",
+                    ["English", "Hindi", "Bengali", "Urdu"],
+                    default=["English"],
+                )
+            ) or "eng"
+        else:
+            enable_ocr = st.checkbox("Enable OCR for scanned PDFs", value=False)
+            if enable_ocr:
+                ocr_languages = "+".join(
+                    st.multiselect(
+                        "Select OCR languages",
+                        ["English", "Hindi", "Bengali", "Urdu"],
+                        default=["English"],
+                    )
+                ) or "eng"
+
         # Check file size
         MAX_FILE_SIZE_MB = Config.MAX_FILE_SIZE_MB
         WARN_FILE_SIZE_MB = Config.WARN_FILE_SIZE_MB
@@ -533,7 +558,7 @@ def main():
 
                 # Only call LLM if we haven't processed this exact file/content/language combo
                 if st.session_state.get("last_processed") != cache_key:
-                    raw_text = extract_text_from_pdf(uploaded_file)
+                    raw_text = extract_text_from_pdf(uploaded_file, enable_ocr=enable_ocr, ocr_languages=ocr_languages)
                     safe_text = compress_text(raw_text)
 
                     prompt = build_summary_prompt(safe_text, language)
