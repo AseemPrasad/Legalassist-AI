@@ -9,7 +9,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from database import get_db
 from db.models import APIKey
-from api.auth import create_access_token, create_api_key_record, CurrentUser, get_current_user
+from db.models import APIKey
+from api.auth import create_access_token, create_api_key_record, CurrentUser, get_current_user, verify_password
 from database import SessionLocal
 from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
 from api.limiter import RateLimit
@@ -41,7 +42,13 @@ async def get_token(
     db = SessionLocal()
     try:
         user = get_user_by_email(db, username)
-        if not user:
+        if not user or not user.password_hash:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials"
+            )
+            
+        if not verify_password(password, user.password_hash):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials"
