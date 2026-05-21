@@ -35,6 +35,11 @@ except Exception:
     clear_rls_context = None
     _is_postgres = False
 
+try:
+    from api.csrf import validate_csrf as _csrf_validate
+except Exception:
+    _csrf_validate = None
+
 settings = get_settings()
 logger = structlog.get_logger(__name__)
 
@@ -50,6 +55,9 @@ async def add_correlation_id_middleware(request: Request, call_next: Callable):
     response = await call_next(request)
     response.headers["X-Correlation-Id"] = correlation_id
     response.headers["X-Request-Id"] = correlation_id
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
@@ -89,6 +97,18 @@ async def logging_middleware(request: Request, call_next: Callable):
 
     if apply_rls_context and _is_postgres and user_id_attr not in (None, "anonymous", ""):
         request.state.db_rls_user_id = user_id_attr
+
+    if _csrf_validate and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        try:
+            user_id_int = int(user_id_attr) if str(user_id_attr).isdigit() else None
+            if user_id_int:
+                _csrf_validate(request, current_user_id=user_id_int, allowed_hosts=None)
+        except Exception as exc:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=403,
+                content={"detail": getattr(exc, "detail", "CSRF validation failed")},
+            )
 
     response = None
     error_occurred = False
@@ -156,4 +176,85 @@ __all__ = [
     "settings",
 ]
 
+
+def _request_size_limit_for_path(path: str) -> int:
+    if any(path.startswith(prefix) for prefix in UPLOAD_PATH_PREFIXES):
+        return ValidationConfig.MAX_UPLOAD_SIZE
+    if any(path.startswith(prefix) for prefix in ANALYTICS_PATH_PREFIXES):
+        return ValidationConfig.MAX_ANALYTICS_PAYLOAD
+    return ValidationConfig.MAX_JSON_BODY
+
+
+async def request_size_limit_middleware(request: Request, call_next: Callable):
+    """Reject oversized requests before they reach the application layer."""
+
+    if request.url.path in SKIP_PATHS:
+        return await call_next(request)
+    transfer_encoding = request.headers.get("transfer-encoding", "").lower()
+
+    # For upload endpoints, require Content-Length header (no chunked fallback).
+    content_length = request.headers.get("content-length")
+    max_size = _request_size_limit_for_path(request.url.path)
+
+    if any(request.url.path.startswith(p) for p in UPLOAD_PATH_PREFIXES):
+        # Must provide explicit content-length for uploads
+        if content_length is None:
+            return JSONResponse(
+                status_code=status.HTTP_411_LENGTH_REQUIRED,
+                content={
+                    "error_code": "LENGTH_REQUIRED",
+                    "message": "Content-Length header is required for upload endpoints.",
+                },
+            )
+
+    # Reject explicit chunked transfer encoding as ambiguous
+    if "chunked" in transfer_encoding:
+        return JSONResponse(
+            status_code=status.HTTP_411_LENGTH_REQUIRED,
+            content={
+                "error_code": "CHUNKED_ENCODING_NOT_SUPPORTED",
+                "message": "Chunked transfer encoding is not supported. Provide Content-Length header.",
+            },
+        )
+
+    content_length = request.headers.get("content-length")
+    if content_length is None:
+        return JSONResponse(
+            status_code=status.HTTP_411_LENGTH_REQUIRED,
+            content={
+                "error_code": "LENGTH_REQUIRED",
+                "message": "Content-Length header is required for all requests.",
+            },
+        )
+
+    try:
+        content_length_bytes = int(content_length)
+    except (TypeError, ValueError):
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "error_code": "INVALID_CONTENT_LENGTH",
+                "message": "Content-Length must be a valid integer.",
+            },
+        )
+
+    max_size = _request_size_limit_for_path(request.url.path)
+    if content_length_bytes > max_size:
+        logger.warning(
+            "request_size_limit_exceeded",
+            path=request.url.path,
+            content_length=content_length_bytes,
+            max_size=max_size,
+            size_mb=round(content_length_bytes / 1024 / 1024, 2),
+        )
+        return JSONResponse(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            content={
+                "error_code": "PAYLOAD_TOO_LARGE",
+                "message": (
+                    f"Request body too large: {round(content_length_bytes / 1024 / 1024, 2)} MB "
+                    f"(max {round(max_size / 1024 / 1024, 2)} MB)"
+                ),
+            },
+        )
 

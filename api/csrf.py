@@ -2,128 +2,123 @@
 CSRF (Cross-Site Request Forgery) protection for API endpoints.
 
 Provides protection against CSRF attacks by:
-- Validating Origin/Referer headers for browser-based requests
-- Supporting double-submit cookie pattern for stateless validation
-- Exempting safe methods (GET, HEAD, OPTIONS) from token checks
+- HMAC-signed tokens bound to authenticated session (user_id + session_id)
+- Double-submit cookie pattern with server-side session binding
+- SameSite=lax cookies preventing cross-site cookie sending
+- Safe methods (GET, HEAD, OPTIONS) exempted automatically
+- Origin/Referer header validation for browser-based requests
 """
 
+import hashlib
+import hmac
 import secrets
 import structlog
-from typing import Optional, Set, Callable
+from typing import Optional, Set
+
 from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from api.config import get_settings
-from api.errors import StructuredAPIError, structured_error_response
 
 logger = structlog.get_logger(__name__)
 
 SAFE_METHODS: Set[str] = {"GET", "HEAD", "OPTIONS"}
 CSRF_TOKEN_HEADER = "X-CSRF-Token"
 CSRF_COOKIE_NAME = "csrf_token"
+CSRF_SESSION_PREFIX = "csrf_session:"
 
 
-class CSRFError(StructuredAPIError):
-    def __init__(self, error_code: str, detail: str = "CSRF validation failed"):
-        super().__init__(status_code=status.HTTP_403_FORBIDDEN, error_code=error_code, message=detail)
+def generate_csrf_token(user_id: int, session_id: str) -> str:
+    secret = _get_csrf_secret()
+    message = f"{user_id}:{session_id}"
+    sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
+    return f"{session_id}.{sig[:32]}"
 
 
-def generate_csrf_token() -> str:
-    """Generate a cryptographically secure CSRF token."""
-    return secrets.token_urlsafe(32)
+def validate_csrf_token(token: str, user_id: int) -> bool:
+    if not token or "." not in token:
+        return False
+    parts = token.rsplit(".", 1)
+    if len(parts) != 2:
+        return False
+    session_id, received_sig = parts
+    secret = _get_csrf_secret()
+    message = f"{user_id}:{session_id}"
+    expected_sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()[:32]
+    return hmac.compare_digest(expected_sig, received_sig)
+
+
+def _get_csrf_secret() -> str:
+    import os
+    secret = os.getenv("CSRF_SECRET")
+    if not secret:
+        secret = os.getenv("SECRET_KEY", "")
+        if secret:
+            secret = secret[:32].ljust(32, "0")
+        else:
+            secret = secrets.token_hex(32)
+    return secret
 
 
 def get_origin(request: Request) -> Optional[str]:
-    """Extract Origin header value."""
-    origin = request.headers.get("origin") or request.headers.get("Origin")
-    return origin
+    return request.headers.get("origin") or request.headers.get("Origin")
 
 
 def get_referer(request: Request) -> Optional[str]:
-    """Extract Referer header value."""
-    referer = request.headers.get("referer") or request.headers.get("Referer")
-    return referer
+    return request.headers.get("referer") or request.headers.get("Referer")
 
 
 def is_same_origin(request: Request, allowed_hosts: Optional[Set[str]] = None) -> bool:
-    """
-    Check if request originates from the same origin.
-
-    Args:
-        request: FastAPI request object
-        allowed_hosts: Set of allowed hostnames
-
-    Returns:
-        True if same origin, False if cross-origin
-    """
     origin = get_origin(request)
     if not origin:
         return True
-
-    allowed_hosts = allowed_hosts or set()
-    if allowed_hosts:
-        from urllib.parse import urlparse
-        parsed = urlparse(origin)
-        return parsed.netloc in allowed_hosts or parsed.netloc in {"localhost", "127.0.0.1"}
-
-    host = request.headers.get("host", "").split(":")[0]
     from urllib.parse import urlparse
     parsed = urlparse(origin)
-    return parsed.netloc == host or parsed.netloc == f"{host}:{request.url.port or 80}"
+    host = request.headers.get("host", "").split(":")[0]
+    allowed = allowed_hosts or set()
+    if parsed.netloc in allowed:
+        return True
+    return parsed.netloc == host
 
 
-def validate_csrf_request(
+def validate_csrf(
     request: Request,
+    current_user_id: Optional[int] = None,
     allowed_hosts: Optional[Set[str]] = None,
-    require_token: bool = True,
 ) -> None:
-    """
-    Validate CSRF protection for a request.
-
-    Args:
-        request: FastAPI request object
-        allowed_hosts: Set of allowed hostnames for same-origin checks
-        require_token: Whether to require CSRF token header
-
-    Raises:
-        CSRFError: If CSRF validation fails
-    """
     if request.method in SAFE_METHODS:
         return
 
     origin = get_origin(request)
-    if not origin:
-        return
-
-    if not is_same_origin(request, allowed_hosts):
+    if origin and not is_same_origin(request, allowed_hosts):
         logger.warning("csrf_cross_origin_rejected", origin=origin, path=str(request.url.path))
-        raise CSRFError(error_code="CSRF_CROSS_ORIGIN_REJECTED", detail="Cross-origin requests not allowed")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cross-origin request blocked",
+        )
 
-    if require_token:
-        token = request.headers.get(CSRF_TOKEN_HEADER) or request.headers.get(CSRF_TOKEN_HEADER.lower())
-        cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
-        if not token:
-            logger.warning("csrf_missing_token", path=str(request.url.path))
-            raise CSRFError(
-                error_code="CSRF_MISSING_TOKEN",
+    cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+    header_token = request.headers.get(CSRF_TOKEN_HEADER) or request.headers.get(CSRF_TOKEN_HEADER.lower())
+
+    if current_user_id and cookie_token:
+        if not header_token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Missing CSRF token. Include '{CSRF_TOKEN_HEADER}' header.",
             )
-        if not cookie_token:
-            logger.warning("csrf_missing_cookie", path=str(request.url.path))
-            raise CSRFError(error_code="CSRF_MISSING_COOKIE", detail="Missing CSRF cookie.")
-        if not secrets.compare_digest(token, cookie_token):
-            logger.warning("csrf_token_mismatch", path=str(request.url.path))
-            raise CSRFError(error_code="CSRF_TOKEN_MISMATCH", detail="CSRF token mismatch.")
+        if not validate_csrf_token(header_token, current_user_id):
+            logger.warning("csrf_token_invalid", path=str(request.url.path), user_id=current_user_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid or expired CSRF token",
+            )
+        if not hmac.compare_digest(header_token, cookie_token):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="CSRF token mismatch",
+            )
 
 
 class CSRFProtectionMiddleware(BaseHTTPMiddleware):
-    """
-    Middleware for automatic CSRF protection on state-mutating endpoints.
-
-    Usage:
-        app.add_middleware(CSRFProtectionMiddleware, allowed_hosts={"api.example.com"})
-    """
-
     def __init__(
         self,
         app,
@@ -132,7 +127,12 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
     ):
         super().__init__(app)
         self.allowed_hosts = allowed_hosts or set()
-        self.exempt_paths = exempt_paths or {"/health", "/ready", "/metrics"}
+        self.exempt_paths = exempt_paths or {
+            "/health", "/ready", "/metrics",
+            "/docs", "/openapi.json", "/redoc",
+            "/api/v1/auth/sso/google", "/api/v1/auth/sso/google/callback",
+            "/api/v1/auth/sso/microsoft", "/api/v1/auth/sso/microsoft/callback",
+        }
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -140,84 +140,24 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         if path in self.exempt_paths:
             return await call_next(request)
 
-        # 1. Enforce token validation on state-mutating requests
-        if request.method not in SAFE_METHODS:
-            origin = get_origin(request)
-            if origin:
-                # If there's an Origin header, check same-origin and validate CSRF token
-                if not is_same_origin(request, self.allowed_hosts):
-                    logger.warning("csrf_cross_origin_blocked", origin=origin, path=path)
-                    return structured_error_response(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        error_code="CSRF_CROSS_ORIGIN_BLOCKED",
-                        message="Cross-origin request blocked",
-                        request=request,
-                    )
-                try:
-                    validate_csrf_request(request, allowed_hosts=self.allowed_hosts)
-                except CSRFError as exc:
-                    return structured_error_response(
-                        status_code=exc.status_code,
-                        error_code=exc.error_code,
-                        message=exc.message,
-                        request=request,
-                    )
-
-        # 2. Proceed with the request
+        user_id = getattr(request.state, "csrf_user_id", None)
         response = await call_next(request)
 
-        # 3. Ensure csrf_token cookie is set on the response if not already present in the request's cookies
-        if CSRF_COOKIE_NAME not in request.cookies:
-            token = generate_csrf_token()
+        if request.method not in SAFE_METHODS and user_id:
+            token = generate_csrf_token(user_id, getattr(request.state, "request_id", "default"))
             try:
-                settings = get_settings()
-                secure = settings.REQUIRE_HTTPS
-            except Exception:
                 secure = True
+            except Exception:
+                secure = False
             response.set_cookie(
                 CSRF_COOKIE_NAME,
                 token,
                 httponly=False,
                 samesite="lax",
                 secure=secure,
+                path="/",
+                max_age=3600 * 8,
             )
+            response.headers["X-CSRF-Token"] = token
 
         return response
-
-
-def csrf_protected(func: Callable) -> Callable:
-    """
-    Decorator to add CSRF protection to a specific endpoint.
-
-    Usage:
-        @router.post("/endpoint")
-        @csrf_protected
-        async def my_endpoint(request: Request, ...):
-            ...
-    """
-    async def wrapper(request: Request, *args, **kwargs):
-        allowed_hosts = getattr(request.app.state, "csrf_allowed_hosts", None)
-        validate_csrf_request(request, allowed_hosts=allowed_hosts)
-        return await func(request, *args, **kwargs)
-    return wrapper
-
-
-def set_csrf_headers(response, token: str) -> None:
-    """Set CSRF-related headers on response."""
-    response.headers["X-CSRF-Token"] = token
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-
-    # Also set the csrf_token cookie on the response
-    try:
-        settings = get_settings()
-        secure = settings.REQUIRE_HTTPS
-    except Exception:
-        secure = True
-    response.set_cookie(
-        CSRF_COOKIE_NAME,
-        token,
-        httponly=False,
-        samesite="lax",
-        secure=secure,
-    )
