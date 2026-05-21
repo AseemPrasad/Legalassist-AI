@@ -58,8 +58,7 @@ from api.validation import (
 )
 
 # Import routes
-from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, knowledge, audit
-from api.auth import get_current_user_optional
+from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech
 
 settings = get_settings()
 logger = structlog.get_logger(__name__)
@@ -170,13 +169,7 @@ def create_app() -> FastAPI:
     app.include_router(deadlines.router)
     app.include_router(auth.router)
     app.include_router(case_search.router)  # Case search and precedent matching
-    try:
-        from api.sso import router as sso_router
-        app.include_router(sso_router)
-    except Exception:
-        pass
-    app.include_router(knowledge.router)
-    app.include_router(audit.router)
+    app.include_router(speech.router)
     # Model feedback & optimization
     from api.routes import models as models_router
     app.include_router(models_router.router)

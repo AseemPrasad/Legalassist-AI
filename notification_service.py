@@ -11,6 +11,7 @@ from typing import Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import html
+import tenacity
 from config import Config
 
 # Celery integration for asynchronous task execution
@@ -49,6 +50,7 @@ from database import get_notification_template_for_user
 from db.crud.notifications import (
     get_or_create_notification_log,
     update_notification_log_by_keys,
+    has_notification_been_sent,
 )
 from core.template_renderer import render_template, validate_template, TemplateValidationError
 
@@ -84,6 +86,20 @@ class SMSClient:
         else:
             self.client = TwilioClient(self.account_sid, self.auth_token)
 
+    @tenacity.retry(
+        wait=tenacity.wait_exponential(multiplier=1, min=2, max=60),
+        stop=tenacity.stop_after_attempt(5),
+        retry=tenacity.retry_if_exception(lambda e: '503' in str(e) or '429' in str(e)),
+        reraise=True
+    )
+    def _create_message_with_retry(self, to_number: str, message: str):
+        """Internal method to send SMS with tenacity retry for 503/429 errors."""
+        return self.client.messages.create(
+            body=message,
+            from_=self.from_number,
+            to=to_number,
+        )
+
     def send_sms(self, to_number: str, message: str) -> Tuple[bool, Optional[str], Optional[str]]:
         """
         Send SMS message.
@@ -103,14 +119,14 @@ class SMSClient:
                 logger.warning(error_msg)
                 return False, None, error_msg
 
-            message_obj = self.client.messages.create(
-                body=message,
-                from_=self.from_number,
-                to=to_number,
-            )
+            message_obj = self._create_message_with_retry(to_number, message)
             logger.info(f"SMS sent successfully. SID: {message_obj.sid}")
             return True, message_obj.sid, None
 
+        except tenacity.RetryError as re:
+            error_msg = f"Failed to send SMS after max retries due to provider errors: {str(re)}"
+            logger.error(error_msg)
+            return False, None, error_msg
         except Exception as e:
             error_msg = f"Failed to send SMS: {str(e)}"
             logger.error(error_msg)
@@ -129,6 +145,16 @@ class EmailClient:
             self.client = None
         else:
             self.client = SendGridAPIClient(self.api_key)
+
+    @tenacity.retry(
+        wait=tenacity.wait_exponential(multiplier=1, min=2, max=60),
+        stop=tenacity.stop_after_attempt(5),
+        retry=tenacity.retry_if_exception(lambda e: '503' in str(e) or '429' in str(e)),
+        reraise=True
+    )
+    def _send_email_with_retry(self, message):
+        """Internal method to send email with tenacity retry for 503/429 errors."""
+        return self.client.send(message)
 
     def send_email(self, to_email: str, subject: str, html_content: str) -> Tuple[bool, Optional[str], Optional[str]]:
         """
@@ -155,10 +181,14 @@ class EmailClient:
                 subject=subject,
                 html_content=html_content,
             )
-            response = self.client.send(message)
+            response = self._send_email_with_retry(message)
             logger.info(f"Email sent successfully. Status: {response.status_code}")
             return True, response.headers.get("X-Message-ID", "unknown"), None
 
+        except tenacity.RetryError as re:
+            error_msg = f"Failed to send email after max retries due to provider errors: {str(re)}"
+            logger.error(error_msg)
+            return False, None, error_msg
         except Exception as e:
             error_msg = f"Failed to send email: {str(e)}"
             logger.error(error_msg)
@@ -246,10 +276,120 @@ def send_email_task(
             logger.error("Failed to log background notification", error=str(e), deadline_id=deadline_id)
     
     # Handle retries if the email failed and we haven't exceeded the limit.
-    # We only retry for potentially transient errors.
-    if not success and self.request.retries < self.max_retries:
+    # Check for transient errors (503, 429) to use exponential backoff.
+    if not success and error and ('503' in str(error) or '429' in str(error)):
+        if self.request.retries < self.max_retries:
+            backoff_delay = (2 ** self.request.retries) * 60
+            logger.warning(
+                "Email delivery encountered transient error, scheduling retry with exponential backoff", 
+                error=error, 
+                retry_count=self.request.retries + 1,
+                delay_seconds=backoff_delay
+            )
+            raise self.retry(exc=Exception(error), countdown=backoff_delay)
+    elif not success and self.request.retries < self.max_retries:
         logger.warning(
             "Email delivery failed, scheduling retry", 
+            error=error, 
+            retry_count=self.request.retries + 1
+        )
+        raise self.retry(exc=Exception(error))
+    
+    return {
+        "success": success,
+        "message_id": message_id,
+        "error": error,
+        "status": status.value if hasattr(status, 'value') else str(status)
+    }
+
+
+@celery_app.task(
+    bind=True, 
+    name="send_sms_task", 
+    max_retries=5, 
+    default_retry_delay=60,
+    queue="notifications"
+)
+def send_sms_task(
+    self, 
+    to_number: str, 
+    message: str,
+    deadline_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    days_left: Optional[int] = None
+) -> dict:
+    """
+    Celery background task for sending SMS via Twilio.
+    
+    This task offloads the synchronous network call to Twilio to a background 
+    worker. It also implements an exponential backoff retry mechanism for 
+    handling 503 Server Errors from the third-party provider, ensuring high 
+    reliability of critical client communications even during temporary outages.
+    
+    Args:
+        self: The task instance (for retries).
+        to_number (str): Recipient phone number.
+        message (str): The SMS content.
+        deadline_id (int, optional): ID of the deadline for logging.
+        user_id (int, optional): ID of the user for logging.
+        days_left (int, optional): The reminder threshold (e.g., 30, 10, 3, 1).
+        
+    Returns:
+        dict: A summary of the operation results.
+    """
+    from database import db_session, NotificationStatus, NotificationChannel
+    from db.crud.notifications import update_notification_log_by_keys
+    
+    logger.info(
+        "Starting background SMS delivery", 
+        recipient=to_number, 
+        task_id=self.request.id
+    )
+    
+    # Initialize the SMSClient inside the task
+    client = SMSClient()
+    
+    # Execute the actual network request to Twilio
+    success, message_id, error = client.send_sms(to_number, message)
+    
+    # Determine the status for database logging
+    status = NotificationStatus.SENT if success else NotificationStatus.FAILED
+    
+    # If logging metadata was provided, persist the result to the database
+    if deadline_id is not None and user_id is not None and days_left is not None:
+        try:
+            with db_session() as db:
+                update_notification_log_by_keys(
+                    db=db,
+                    deadline_id=deadline_id,
+                    days_before=days_left,
+                    channel=NotificationChannel.SMS,
+                    status=status,
+                    message_id=message_id,
+                    error_message=error,
+                    message_preview=message,
+                )
+                logger.info("Background SMS notification logged successfully", deadline_id=deadline_id)
+        except Exception as e:
+            logger.error("Failed to log background SMS notification", error=str(e), deadline_id=deadline_id)
+    
+    # Retry mechanism for 503 Server Errors using exponential backoff
+    if not success and error and '503' in str(error):
+        if self.request.retries < self.max_retries:
+            # Calculate exponential backoff delay: 2^retry_count * 60 seconds
+            # Example: 1m, 2m, 4m, 8m...
+            backoff_delay = (2 ** self.request.retries) * 60
+            logger.warning(
+                "SMS delivery encountered 503 Server Error, scheduling retry with exponential backoff", 
+                error=error, 
+                retry_count=self.request.retries + 1,
+                delay_seconds=backoff_delay
+            )
+            raise self.retry(exc=Exception(error), countdown=backoff_delay)
+    elif not success and self.request.retries < self.max_retries:
+        # Standard retry for other errors
+        logger.warning(
+            "SMS delivery failed, scheduling retry", 
             error=error, 
             retry_count=self.request.retries + 1
         )
@@ -437,26 +577,44 @@ class NotificationService:
                 error="Already sent",
             )
 
-        success, message_id, error = self.sms_client.send_sms(user_preference.phone_number, message)
-        status = NotificationStatus.SENT if success else NotificationStatus.FAILED
+        # ====================================================================
+        # ASYNCHRONOUS DELIVERY OFFLOAD
+        # ====================================================================
+        # Offload SMS delivery to background task to avoid blocking and to
+        # take advantage of the Celery-based exponential backoff retry for 503 errors.
+        # ====================================================================
+        
+        logger.info(
+            "Offloading SMS delivery to background task", 
+            user_id=deadline.user_id,
+            deadline_id=deadline.id,
+            days_left=days_left
+        )
+        
+        task_result = send_sms_task.delay(
+            to_number=user_preference.phone_number,
+            message=message,
+            deadline_id=deadline.id,
+            user_id=deadline.user_id,
+            days_left=days_left
+        )
 
         update_notification_log_by_keys(
             db=db,
             deadline_id=deadline.id,
             days_before=days_left,
             channel=NotificationChannel.SMS,
-            status=status,
-            message_id=message_id,
-            error_message=error,
+            status=NotificationStatus.PENDING,
+            message_id=f"task_{task_result.id}",
             message_preview=message,
         )
 
         return NotificationResult(
-            success=success,
+            success=True,
             channel=NotificationChannel.SMS,
             recipient=user_preference.phone_number,
-            message_id=message_id,
-            error=error,
+            message_id=f"task_{task_result.id}",
+            error=None,
         )
 
     def send_email_reminder(

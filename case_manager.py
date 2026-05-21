@@ -14,6 +14,19 @@ from pathlib import Path
 
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
+
+# =============================================================================
+# OPTIMISTIC CONCURRENCY CONTROL
+# =============================================================================
+# We have integrated optimistic concurrency control to prevent data loss 
+# when multiple users are concurrently modifying the same legal case.
+# By using a 'version' column with SQLAlchemy's `version_id_col` mapper argument,
+# the database automatically checks the expected version during an UPDATE.
+# If the version does not match, a StaleDataError is raised.
+# This ensures data integrity and forces the second user to refresh their view
+# and merge changes rather than blindly overwriting another user's data.
+# =============================================================================
 
 from database import (
     SessionLocal,
@@ -138,6 +151,69 @@ def create_new_case(
     except Exception as e:
         logger.error(f"Error creating case: {str(e)}")
         return None, False
+    finally:
+        db.close()
+
+
+def update_case_details(
+    user_id: int,
+    case_id: int,
+    expected_version: int,
+    title: Optional[str] = None,
+    case_type: Optional[str] = None,
+    jurisdiction: Optional[str] = None,
+) -> tuple[Optional[Case], Optional[str]]:
+    """
+    Update case details with optimistic concurrency control.
+    Requires the client to provide the expected_version they last saw.
+    Returns (Case, error_message). If error_message is not None, the update failed.
+    """
+    db = SessionLocal()
+    try:
+        case = get_case_by_id(db, case_id)
+        if not case or case.user_id != user_id:
+            return None, "Case not found or unauthorized."
+        
+        if case.version != expected_version:
+            return None, f"Conflict: Case has been updated by another user. Please refresh."
+
+        # If version matches, we can update fields
+        updated = False
+        if title is not None and case.title != title:
+            case.title = title
+            updated = True
+        if case_type is not None and case.case_type != case_type:
+            case.case_type = case_type
+            updated = True
+        if jurisdiction is not None and case.jurisdiction != jurisdiction:
+            case.jurisdiction = jurisdiction
+            updated = True
+            
+        if updated:
+            try:
+                db.commit()
+                db.refresh(case)
+                
+                # Create timeline event
+                _timeline_service.create_event(
+                    db=db,
+                    case_id=case_id,
+                    event_type="case_updated",
+                    description=f"Case details updated",
+                    metadata={"version": case.version},
+                )
+                
+                logger.info(f"Updated case {case_id} successfully (version {case.version})")
+            except StaleDataError:
+                db.rollback()
+                return None, "Conflict: Case has been updated by another user. Please refresh."
+        
+        return case, None
+
+    except Exception as e:
+        logger.error(f"Error updating case: {str(e)}")
+        db.rollback()
+        return None, "Internal error updating case."
     finally:
         db.close()
 
