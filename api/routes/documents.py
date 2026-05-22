@@ -221,6 +221,13 @@ async def upload_document_file(
         file_content = await file.read()
         file_ext = file.filename.split(".")[-1].lower() if file.filename else ""
 
+        # MIME sniff first bytes to catch renamed binaries (e.g. PDF → .txt)
+        try:
+            import magic
+            mime_type = magic.from_buffer(file_content[:2048], mime=True)
+        except (ImportError, Exception):
+            mime_type = None
+
         # Generate IDs
         document_id = str(uuid.uuid4())
 
@@ -229,10 +236,14 @@ async def upload_document_file(
             user_id=current_user.user_id,
             document_id=document_id,
             filename=file.filename,
+            mime_type=mime_type,
         )
 
         # Pass file content: decode text files, keep PDFs as bytes for worker extraction
-        if file_ext in ("txt", "html", "rtf"):
+        is_text = file_ext in ("txt", "html", "rtf") and (
+            mime_type is None or mime_type.startswith("text/")
+        )
+        if is_text:
             text = file_content.decode("utf-8", errors="ignore")
             file_bytes = None
         else:

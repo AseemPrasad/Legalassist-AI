@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Optional, Callable
 
@@ -189,7 +190,16 @@ def resolve_rate_limit_identifier(request: Request) -> str:
     if request.client and request.client.host:
         return f"ip:{request.client.host}"
 
-    return "ip:unknown"
+    # Use X-Forwarded-For as fallback if present (trusted proxy)
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+        if client_ip:
+            return f"ip:{client_ip}"
+
+    # Last resort: unique per-request identifier so unknown clients
+    # do not share a single bucket that can be exhausted by one attacker.
+    return f"anon:{uuid.uuid4().hex}"
 
 
 def _rule_matches(rule_method: str, rule_key: str, rule_type: str, request_method: str, request_path: str) -> bool:

@@ -146,31 +146,18 @@ class Config:
     
     @classmethod
     def get_jwt_secret(cls):
-        """
-        Resolve JWT secret securely.
-        
-        JWT_SECRET must be provided via environment variable or Streamlit secrets.
-        File-based secrets are no longer supported for security.
-        
-        Raises:
-            RuntimeError: If JWT_SECRET is not configured in environment variables.
-        """
-        secret = cls.get_current_jwt_secret()
-        if secret:
-            return secret
-        
-        env_name = cls.APP_ENV.upper()
-        raise RuntimeError(
-            f"JWT_SECRET is not configured for the {env_name} environment. "
-            "For security, secrets must be explicitly provided via the 'JWT_SECRET' "
-            "environment variable. Consider using AWS Secrets Manager or HashiCorp Vault "
-            "for production secret management."
-        )
+        """Return the active JWT signing secret, raising if not configured."""
+        return cls.get_current_jwt_secret()
 
     @classmethod
     def get_current_jwt_secret(cls) -> str:
-        """Return the active JWT signing secret without falling back to placeholders."""
-        return str(_get_val("JWT_SECRET", _get_val("JWT_SECRET_KEY", _get_val("JWT_SECRET_CURRENT", "")))).strip()
+        """Return the active JWT signing secret, raising if not configured."""
+        secret = str(_get_val("JWT_SECRET", _get_val("JWT_SECRET_KEY", _get_val("JWT_SECRET_CURRENT", "")))).strip()
+        if not secret:
+            raise RuntimeError(
+                "JWT_SECRET is not configured. Set the JWT_SECRET environment variable."
+            )
+        return secret
 
     @classmethod
     def get_jwt_secrets(cls) -> list[str]:

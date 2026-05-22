@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Set
+
+from core.timeline_payloads import TimelineEventPayload
 
 
 @dataclass
 class _CaseChannel:
-    connections: Set["asyncio.Queue[str]"] = field(default_factory=set)
+    connections: Set["asyncio.Queue[Dict[str, Any]]"] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -31,21 +32,33 @@ class TimelineRealtimeBus:
                 self._channels[case_id] = _CaseChannel()
             return self._channels[case_id]
 
-    async def subscribe(self, case_id: int) -> asyncio.Queue[str]:
+    async def subscribe(self, case_id: int) -> asyncio.Queue[Dict[str, Any]]:
         channel = await self._get_or_create_channel(case_id)
-        q: asyncio.Queue[str] = asyncio.Queue()
+        q: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
         async with channel.lock:
             channel.connections.add(q)
         return q
 
-    async def unsubscribe(self, case_id: int, q: asyncio.Queue[str]) -> None:
-        channel = await self._get_or_create_channel(case_id)
+    async def unsubscribe(self, case_id: int, q: asyncio.Queue[Dict[str, Any]]) -> None:
+        async with self._global_lock:
+            channel = self._channels.get(case_id)
+            if channel is None:
+                return
         async with channel.lock:
             channel.connections.discard(q)
+            if not channel.connections:
+                async with self._global_lock:
+                    if self._channels.get(case_id) is channel:
+                        del self._channels[case_id]
+
+    async def close(self) -> None:
+        async with self._global_lock:
+            self._channels.clear()
 
     async def publish(self, case_id: int, payload: Dict[str, Any]) -> None:
         channel = await self._get_or_create_channel(case_id)
-        message = json.dumps(payload, default=str)
+        validated_payload = TimelineEventPayload.model_validate(payload)
+        message = validated_payload.model_dump(mode="json")
         async with channel.lock:
             targets = list(channel.connections)
 
@@ -59,3 +72,24 @@ class TimelineRealtimeBus:
 
 
 timeline_realtime_bus = TimelineRealtimeBus()
+
+
+def publish_timeline_event_best_effort(payload: Dict[str, Any]) -> None:
+    """Publish a timeline event without depending on the caller's loop state."""
+    case_id = payload["case_id"]
+    publish_coro = timeline_realtime_bus.publish(case_id=case_id, payload=payload)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None:
+        loop.create_task(publish_coro)
+        return
+
+    fallback_loop = asyncio.new_event_loop()
+    try:
+        fallback_loop.run_until_complete(publish_coro)
+    finally:
+        fallback_loop.close()

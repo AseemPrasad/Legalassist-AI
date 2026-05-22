@@ -20,6 +20,7 @@ import os
 import uuid
 import structlog
 import json
+import re
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import io
@@ -158,6 +159,15 @@ def enqueue_task_with_context(
     return task.apply_async(kwargs=task_kwargs, headers=headers)
 
 
+def _sanitize_header_value(value: Optional[str]) -> Optional[str]:
+    """Strip control characters and non-printable sequences from header values."""
+    if not value:
+        return None
+    cleaned = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", value)
+    cleaned = cleaned.replace("\r", "").replace("\n", "")
+    return cleaned.strip() or None
+
+
 def enqueue_task_from_http_request(
     task, http_request, *, context_user_id: Optional[str] = None, **task_kwargs
 ):
@@ -166,7 +176,7 @@ def enqueue_task_from_http_request(
         http_request.state, "correlation_id", None
     )
     if not request_id:
-        request_id = (
+        request_id = _sanitize_header_value(
             http_request.headers.get("X-Request-Id")
             or http_request.headers.get("X-Correlation-Id")
             or http_request.headers.get("x-request-id")
@@ -176,7 +186,7 @@ def enqueue_task_from_http_request(
     user_id = (
         context_user_id
         or getattr(http_request.state, "user_id", None)
-        or http_request.headers.get("X-User-Id")
+        or _sanitize_header_value(http_request.headers.get("X-User-Id"))
     )
 
     return enqueue_task_with_context(

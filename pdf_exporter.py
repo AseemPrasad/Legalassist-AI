@@ -16,6 +16,19 @@ from db.crud.audit import record_audit_event
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_dt(value) -> Optional[datetime]:
+    """Normalize a datetime value (native datetime or ISO string) to datetime."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 # Constants for PDF styling
 PRIMARY_COLOR = (44, 62, 80)    # Dark Blue
 SECONDARY_COLOR = (52, 152, 219) # Light Blue
@@ -360,11 +373,11 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
         pdf.labeled_value('Jurisdiction', case['jurisdiction'])
         
         # Parse and format date with safety check
-        try:
-            created_at = datetime.fromisoformat(case['created_at'].replace('Z', '+00:00'))
+        created_at = _parse_dt(case.get('created_at'))
+        if created_at:
             pdf.labeled_value('Date Initiated', created_at.strftime('%d %B %Y'))
-        except Exception:
-            pdf.labeled_value('Date Initiated', case['created_at'])
+        else:
+            pdf.labeled_value('Date Initiated', str(case.get('created_at', '')))
         
         # Optional description section
         if case.get('description'):
@@ -432,11 +445,9 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
                 
                 pdf.safe_set_font(pdf.main_font, 'I', 9)
                 pdf.set_text_color(120, 120, 120)
-                try:
-                    up_date = datetime.fromisoformat(doc['uploaded_at'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                    pdf.cell(0, 5, f"   Uploaded: {up_date}", 0, 1)
-                except Exception:
-                    pdf.cell(0, 5, f"   Uploaded: {doc['uploaded_at']}", 0, 1)
+                up_date = _parse_dt(doc.get('uploaded_at'))
+                if up_date:
+                    pdf.cell(0, 5, f"   Uploaded: {up_date.strftime('%d %b %Y')}", 0, 1)
                 
                 if doc.get('summary'):
                     pdf.ln(1)
@@ -463,11 +474,8 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
                 sorted_timeline = timeline
             
             for event in sorted_timeline:
-                try:
-                    ev_date = datetime.fromisoformat(event['event_date'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                except Exception:
-                    ev_date = event['event_date']
-                    
+                ev_dt = _parse_dt(event.get('event_date'))
+                ev_date = ev_dt.strftime('%d %b %Y') if ev_dt else str(event.get('event_date', ''))
                 ev_type = event['event_type'].replace('_', ' ').title()
                 
                 # Date column
@@ -512,11 +520,9 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
                 pdf.ln(2)
                 
                 for d in sorted(pending, key=lambda x: x['deadline_date']):
-                    try:
-                        d_date = datetime.fromisoformat(d['deadline_date'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                    except Exception:
-                        d_date = d['deadline_date']
-                        
+                    d_dt = _parse_dt(d.get('deadline_date'))
+                    d_date = d_dt.strftime('%d %b %Y') if d_dt else str(d.get('deadline_date', ''))
+
                     days = d.get('days_until', 999)
                     
                     # Urgency coloring
@@ -549,10 +555,8 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
                 pdf.cell(0, 8, 'COMPLETED MILESTONES', 0, 1)
                 
                 for d in completed:
-                    try:
-                        d_date = datetime.fromisoformat(d['deadline_date'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                    except Exception:
-                        d_date = d['deadline_date']
+                    d_dt = _parse_dt(d.get('deadline_date'))
+                    d_date = d_dt.strftime('%d %b %Y') if d_dt else str(d.get('deadline_date', ''))
                     
                     pdf.safe_set_font(pdf.main_font, '', 10)
                     pdf.set_text_color(149, 165, 166)

@@ -43,6 +43,12 @@ def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -
     elif "sub" not in to_encode:
         raise ValueError("Token data must include 'sub' or 'user_id' claim")
 
+    if not settings.JWT_SECRET_KEY or not settings.JWT_SECRET_KEY.strip():
+        raise RuntimeError(
+            "JWT_SECRET_KEY is not configured. Set JWT_SECRET (or JWT_SECRET_KEY) "
+            "environment variable before issuing tokens."
+        )
+
     to_encode.setdefault("jti", str(uuid.uuid4()))
     to_encode.setdefault("iat", datetime.now(timezone.utc))
     to_encode.setdefault("iss", settings.JWT_ISSUER)

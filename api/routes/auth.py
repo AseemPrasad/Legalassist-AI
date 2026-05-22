@@ -7,6 +7,7 @@ GET /api/v1/auth/me - Get current user
 from fastapi import APIRouter, HTTPException, status, Depends
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
+from passlib.context import CryptContext
 from database import get_db
 from db.models import APIKey
 from db.models import APIKey
@@ -15,6 +16,8 @@ from database import SessionLocal
 from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
 from api.limiter import RateLimit
 import structlog
+
+_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 logger = structlog.get_logger(__name__)
