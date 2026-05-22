@@ -47,7 +47,13 @@ def validate_csrf_token(token: str, user_id: int) -> bool:
     return hmac.compare_digest(expected_sig, received_sig)
 
 
+_CSRF_SECRET_CACHE: Optional[str] = None
+
+
 def _get_csrf_secret() -> str:
+    global _CSRF_SECRET_CACHE
+    if _CSRF_SECRET_CACHE is not None:
+        return _CSRF_SECRET_CACHE
     import os
     secret = os.getenv("CSRF_SECRET")
     if not secret:
@@ -56,6 +62,7 @@ def _get_csrf_secret() -> str:
             secret = secret[:32].ljust(32, "0")
         else:
             secret = secrets.token_hex(32)
+    _CSRF_SECRET_CACHE = secret
     return secret
 
 
