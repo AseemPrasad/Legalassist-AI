@@ -476,7 +476,7 @@ def create_jwt_token(user_id: int, email: str) -> str:
     # Delegate JWT creation to the canonical API auth implementation
     from api.auth import create_access_token
 
-    data = {"user_id": user_id, "email": email}
+    data = {"sub": str(user_id), "email": email}
     return create_access_token(data)
 
 
