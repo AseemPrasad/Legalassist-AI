@@ -11,6 +11,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sdk.python.client import LegalassistClient
 
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
+
+def _api_call(client_method, *args, **kwargs):
+    """Call a client method and return the result, or show a friendly error on connection failure."""
+    try:
+        return client_method(*args, **kwargs)
+    except Exception as exc:
+        if httpx and isinstance(exc, httpx.ConnectError):
+            st.error(
+                "⚠️ **Backend server is not running.**\n\n"
+                "Please start the backend API server with:\n\n"
+                "```bash\nuvicorn api.main:app --reload --port 8000\n```"
+            )
+        elif httpx and isinstance(exc, httpx.TimeoutException):
+            st.error("⏱️ **Request timed out.** The backend took too long to respond. Please try again.")
+        else:
+            st.error(f"❌ **API request failed.** {exc}")
+        return None
+
 st.set_page_config(
     page_title="Legalassist AI - Web & API",
     page_icon="⚖️",
@@ -65,10 +88,9 @@ if page == "📄 Document Analysis":
         if st.button("🚀 Analyze Document", type="primary"):
             if document_text:
                 with st.spinner("Submitting analysis job..."):
-                    result = client.analyze_document(
-                        text=document_text,
-                        document_type=doc_type
-                    )
+                    result = _api_call(client.analyze_document, text=document_text, document_type=doc_type)
+                    if result is None:
+                        st.stop()
                     
                     st.session_state.job_id = result['job_id']
                     st.success(f"Job submitted! ID: {result['job_id']}")
@@ -83,14 +105,18 @@ if page == "📄 Document Analysis":
             st.info(f"Current Job: {job_id}")
             
             if st.button("🔄 Check Status"):
-                status = client.get_analysis_status(job_id)
+                status = _api_call(client.get_analysis_status, job_id)
+                if status is None:
+                    st.stop()
                 st.write(f"Status: **{status['status']}**")
                 
                 if status['status'] == 'completed':
                     st.success("✅ Analysis complete!")
                     
                     if st.button("📥 Load Results"):
-                        result = client.get_analysis_result(job_id)
+                        result = _api_call(client.get_analysis_result, job_id)
+                        if result is None:
+                            st.stop()
                         st.session_state.analysis_result = result
         else:
             st.info("No active jobs")
@@ -180,11 +206,9 @@ elif page == "🔍 Case Search":
         if st.form_submit_button("🔍 Search Cases", type="primary"):
             if keywords:
                 with st.spinner("Searching cases..."):
-                    results = client.search_cases(
-                        keywords=keywords.split(),
-                        jurisdiction=jurisdiction,
-                        limit=limit
-                    )
+                    results = _api_call(client.search_cases, keywords=keywords.split(), jurisdiction=jurisdiction, limit=limit)
+                    if results is None:
+                        st.stop()
                     
                     st.session_state.search_results = results
                     st.success(f"Found {results['total_results']} cases")
@@ -239,11 +263,9 @@ elif page == "📊 Reports":
         if st.form_submit_button("📄 Generate Report", type="primary"):
             if case_id:
                 with st.spinner("Generating report..."):
-                    result = client.generate_report(
-                        case_id=case_id,
-                        report_type=report_type,
-                        format=report_format
-                    )
+                    result = _api_call(client.generate_report, case_id=case_id, report_type=report_type, format=report_format)
+                    if result is None:
+                        st.stop()
                     
                     st.session_state.report_job_id = result['job_id']
                     st.success(f"Report generation started: {result['job_id']}")
@@ -255,7 +277,9 @@ elif page == "📊 Reports":
         job_id = st.session_state.report_job_id
         
         if st.button("📊 Check Report Status"):
-            status = client.get_report_status(job_id)
+            status = _api_call(client.get_report_status, job_id)
+            if status is None:
+                st.stop()
             st.write(f"Status: **{status['status']}**")
             
             if status['status'] == 'completed' and status.get('download_url'):
@@ -280,7 +304,9 @@ elif page == "⏰ Deadlines":
             st.rerun()
     
     with st.spinner("Loading deadlines..."):
-        deadlines = client.get_upcoming_deadlines(days=days)
+        deadlines = _api_call(client.get_upcoming_deadlines, days=days)
+        if deadlines is None:
+            st.stop()
     
     # Summary cards
     col1, col2, col3, col4 = st.columns(4)
@@ -327,8 +353,10 @@ elif page == "💰 Analytics":
     st.header("API Usage & Costs")
     
     with st.spinner("Loading analytics..."):
-        costs = client.get_cost_breakdown(period="monthly")
-        overview = client.get_analytics_overview()
+        costs = _api_call(client.get_cost_breakdown, period="monthly")
+        overview = _api_call(client.get_analytics_overview)
+        if costs is None or overview is None:
+            st.stop()
     
     # Cost breakdown
     st.subheader("Monthly Costs")
@@ -363,7 +391,9 @@ elif page == "🔐 Account":
     st.header("Account & API Keys")
     
     with st.spinner("Loading account info..."):
-        user = client.get_current_user()
+        user = _api_call(client.get_current_user)
+        if user is None:
+            st.stop()
     
     st.subheader("Profile")
     col1, col2 = st.columns(2)
@@ -384,7 +414,9 @@ elif page == "🔐 Account":
         expires_days = st.number_input("Expires in (days)", min_value=1, max_value=365, value=90)
         
         if st.form_submit_button("🔑 Create API Key"):
-            new_key = client.create_api_key(key_name, expires_days)
+            new_key = _api_call(client.create_api_key, key_name, expires_days)
+            if new_key is None:
+                st.stop()
             st.success("API Key created!")
             st.code(new_key['key'], language="text")
             st.warning("⚠️ Save this key in a secure location. You won't see it again!")
