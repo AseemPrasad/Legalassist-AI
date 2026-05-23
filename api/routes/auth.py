@@ -16,6 +16,7 @@ from database import SessionLocal
 from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
 from api.limiter import RateLimit
 import structlog
+from core.log_redaction import mask_email
 
 _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -40,7 +41,7 @@ async def get_token(
     """
     from database import get_user_by_email
 
-    logger.info("Token request", username=username)
+    logger.info("token_request_received", username=mask_email(username))
 
     db = SessionLocal()
     try:

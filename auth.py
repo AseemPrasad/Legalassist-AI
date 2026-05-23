@@ -12,9 +12,10 @@ from routes import PAGE_LOGIN
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, Any
-import logging
+import structlog
 from config import Config
 from db.crud.audit import record_audit_event
+from core.log_redaction import mask_email, sanitize_log_text
 
 import uuid
 import jwt
@@ -93,7 +94,7 @@ from database import (
     User,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 def _is_debug_or_testing_mode() -> bool:
     """Return True when explicit debug/testing flags are enabled."""
@@ -188,12 +189,16 @@ def send_otp_email(email: str, otp: str) -> bool:
 
         if not api_key or sendgrid is None:
             if _is_debug_or_testing_mode():
-                logger.warning("SendGrid API key not configured or sendgrid package not installed - using masked OTP logging for debug/test mode")
-                logger.debug(f"OTP for {email}: [MASKED]")
+                logger.warning(
+                    "otp_delivery_debug_mode",
+                    recipient=mask_email(email),
+                    transport="sendgrid",
+                )
                 return True  # Simulate success only in explicit debug/testing environments
             logger.error(
-                f"SendGrid API key not configured or sendgrid package not installed — OTP delivery failed for {email}. "
-                "Set SENDGRID_API_KEY and install requirements-notifications.txt to enable email authentication."
+                "otp_delivery_unavailable",
+                recipient=mask_email(email),
+                reason="sendgrid_not_configured",
             )
             return False
 
@@ -226,15 +231,23 @@ def send_otp_email(email: str, otp: str) -> bool:
         )
 
         response = sg.send(message)
-        logger.info(f"OTP email sent to {email}, status code: {response.status_code}")
+        logger.info(
+            "otp_email_sent",
+            recipient=mask_email(email),
+            status_code=response.status_code,
+        )
         return 200 <= response.status_code < 300
 
     except Exception as e:
-        logger.error(f"Failed to send OTP email to {email}: {str(e)}")
+        logger.error(
+            "otp_email_send_failed",
+            recipient=mask_email(email),
+            error=sanitize_log_text(str(e)),
+        )
         if _is_debug_or_testing_mode():
-            logger.debug(f"OTP for {email}: [MASKED]")
+            logger.debug("otp_delivery_debug_mode", recipient=mask_email(email), transport="sendgrid")
         else:
-            logger.warning(f"OTP delivery failed for {email} (check email service config)")
+            logger.warning("otp_delivery_failed", recipient=mask_email(email))
         return False
 
 
@@ -275,15 +288,19 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
             user = get_user_by_email(db, email)
             if not user:
                 create_user(db, email)
-                logger.info(f"New user created: {email}")
+                logger.info("auth_new_user_created", recipient=mask_email(email))
 
             return True, "OTP sent to your email"
         else:
             return False, "Failed to send OTP email. Please try again."
 
     except Exception as e:
-        logger.error(f"Error requesting OTP for {email}: {str(e)}")
-        return False, f"Error: {str(e)}"
+        logger.error(
+            "otp_request_failed",
+            recipient=mask_email(email),
+            error=sanitize_log_text(str(e)),
+        )
+        return False, f"Error: {sanitize_log_text(str(e))}"
     finally:
         db.close()
 
@@ -315,7 +332,11 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
                 locked_until = locked_until.astimezone(timezone.utc)
             
             remaining_time = (locked_until - datetime.now(timezone.utc)).total_seconds() / 60
-            logger.warning(f"OTP verification attempt for {email} blocked - OTP is locked (remaining time: {remaining_time:.1f} minutes)")
+            logger.warning(
+                "otp_verification_blocked",
+                recipient=mask_email(email),
+                remaining_minutes=round(remaining_time, 1),
+            )
             return False, "Too many failed attempts. Please request a new OTP and try again later.", None
 
         # Verify OTP
@@ -332,12 +353,18 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
             db.refresh(otp_record)
             if otp_record.is_locked():
                 logger.warning(
-                    f"OTP for {email} locked after {otp_record.failed_attempts} failed verification attempts"
+                    "otp_locked_after_failed_attempts",
+                    recipient=mask_email(email),
+                    failed_attempts=otp_record.failed_attempts,
                 )
                 return False, "Too many failed attempts. Please request a new OTP and try again later.", None
             
             attempts_remaining = OTP_MAX_FAILED_ATTEMPTS - otp_record.failed_attempts
-            logger.info(f"Failed OTP verification for {email}. Attempts remaining: {attempts_remaining}")
+            logger.info(
+                "otp_verification_failed",
+                recipient=mask_email(email),
+                attempts_remaining=attempts_remaining,
+            )
             return False, "Invalid or expired OTP. Please request a new one.", None
 
         # OTP is valid - reset failed attempts and mark as used
@@ -364,12 +391,16 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
             metadata={"email_domain": user.email.split("@")[-1] if "@" in user.email else None},
         )
 
-        logger.info(f"User logged in successfully: {email} (user_id={user.id})")
+        logger.info("auth_login_success", recipient=mask_email(email), user_id=user.id)
         return True, "Login successful", token
 
     except Exception as e:
-        logger.error(f"Error verifying OTP for {email}: {str(e)}")
-        return False, f"Error: {str(e)}", None
+        logger.error(
+            "otp_verification_failed",
+            recipient=mask_email(email),
+            error=sanitize_log_text(str(e)),
+        )
+        return False, f"Error: {sanitize_log_text(str(e))}", None
     finally:
         db.close()
 
@@ -390,12 +421,12 @@ def verify_password_and_create_token(email: str, password: str) -> Tuple[bool, s
         
         if not user or not user.password_hash:
             # We return generic message to prevent user enumeration
-            logger.warning(f"Failed password login attempt for {email}: User not found or no password set")
+            logger.warning("password_login_failed", recipient=mask_email(email), reason="user_not_found_or_no_password")
             return False, "Invalid email or password.", None
 
         # Verify password using bcrypt (cost=14)
         if not verify_password(password, user.password_hash):
-            logger.warning(f"Failed password login attempt for {email}: Invalid password")
+            logger.warning("password_login_failed", recipient=mask_email(email), reason="invalid_password")
             return False, "Invalid email or password.", None
 
         # Update last login
@@ -413,12 +444,16 @@ def verify_password_and_create_token(email: str, password: str) -> Tuple[bool, s
             metadata={"email_domain": user.email.split("@")[-1] if "@" in user.email else None},
         )
 
-        logger.info(f"User logged in successfully via password: {email} (user_id={user.id})")
+        logger.info("password_login_success", recipient=mask_email(email), user_id=user.id)
         return True, "Login successful", token
 
     except Exception as e:
-        logger.error(f"Error verifying password for {email}: {str(e)}")
-        return False, f"Error: {str(e)}", None
+        logger.error(
+            "password_verification_failed",
+            recipient=mask_email(email),
+            error=sanitize_log_text(str(e)),
+        )
+        return False, f"Error: {sanitize_log_text(str(e))}", None
     finally:
         db.close()
 
@@ -564,10 +599,14 @@ def cleanup_old_data() -> int:
         deleted_otps = cleanup_expired_otps(db)
         deleted_tokens = cleanup_expired_revoked_tokens(db)
         total_deleted = deleted_otps + deleted_tokens
-        logger.info(f"Cleaned up {deleted_otps} expired OTPs and {deleted_tokens} expired revoked tokens")
+        logger.info(
+            "auth_cleanup_complete",
+            expired_otps=deleted_otps,
+            expired_revoked_tokens=deleted_tokens,
+        )
         return total_deleted
     except Exception as e:
-        logger.error(f"Error during cleanup: {str(e)}")
+        logger.error("auth_cleanup_failed", error=sanitize_log_text(str(e)))
         return 0
     finally:
         db.close()
@@ -724,7 +763,7 @@ def logout_user():
     """
     import streamlit as st
 
-    logger.info("Performing global logout and session state purge...")
+    logger.info("auth_logout_started")
     
     # Ensure session state is initialized before we start clearing it
     init_auth_session()
@@ -736,9 +775,9 @@ def logout_user():
     if token:
         try:
             revoke_jwt_token(token)
-            logger.debug("Active JWT token revoked in database.")
+            logger.debug("auth_jwt_revoked")
         except Exception as e:
-            logger.error(f"Failed to revoke token during logout: {str(e)}")
+            logger.error("auth_jwt_revoke_failed", error=sanitize_log_text(str(e)))
             # We continue with session clearing even if revocation fails
             # to prioritize local data privacy.
     
@@ -763,7 +802,7 @@ def logout_user():
             # been removed by another process/thread (unlikely but safe).
             pass
             
-    logger.info(f"Successfully cleared {len(all_keys)} session state keys.")
+    logger.info("auth_session_state_cleared", cleared_keys=len(all_keys))
     
     # NOTE: The caller (e.g., app.py) is responsible for calling st.rerun()
     # to restart the UI flow after this function returns.

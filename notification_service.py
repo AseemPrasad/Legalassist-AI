@@ -64,6 +64,7 @@ from db.crud.notifications import (
     has_notification_been_sent,
 )
 from core.template_renderer import render_template, validate_template, TemplateValidationError
+from core.log_redaction import mask_recipient, sanitize_log_text
 
 # Import debug mode helper
 def _is_debug_or_testing_mode() -> bool:
@@ -123,7 +124,7 @@ class SMSClient:
             if not self.client:
                 # Not configured: run in mock mode ONLY if in debug/testing.
                 if _is_debug_or_testing_mode():
-                    logger.info(f"[MOCK SMS] To: {to_number}, Message: {message}")
+                    logger.info("sms_mocked", recipient=mask_recipient(to_number))
                     return True, f"mock_sms_{datetime.now().timestamp()}", None
                 
                 error_msg = "Twilio credentials not configured. SMS delivery skipped."
@@ -131,16 +132,16 @@ class SMSClient:
                 return False, None, error_msg
 
             message_obj = self._create_message_with_retry(to_number, message)
-            logger.info(f"SMS sent successfully. SID: {message_obj.sid}")
+            logger.info("sms_sent", recipient=mask_recipient(to_number), message_id=message_obj.sid)
             return True, message_obj.sid, None
 
         except tenacity.RetryError as re:
-            error_msg = f"Failed to send SMS after max retries due to provider errors: {str(re)}"
-            logger.error(error_msg)
+            error_msg = f"Failed to send SMS after max retries due to provider errors: {sanitize_log_text(str(re))}"
+            logger.error("sms_send_failed", recipient=mask_recipient(to_number), error=sanitize_log_text(str(re)))
             return False, None, error_msg
         except Exception as e:
-            error_msg = f"Failed to send SMS: {str(e)}"
-            logger.error(error_msg)
+            error_msg = f"Failed to send SMS: {sanitize_log_text(str(e))}"
+            logger.error("sms_send_failed", recipient=mask_recipient(to_number), error=sanitize_log_text(str(e)))
             return False, None, error_msg
 
 
@@ -179,7 +180,7 @@ class EmailClient:
             if not self.client:
                 # Not configured: run in mock mode ONLY if in debug/testing.
                 if _is_debug_or_testing_mode():
-                    logger.info(f"[MOCK EMAIL] To: {to_email}, Subject: {subject}")
+                    logger.info("email_mocked", recipient=mask_recipient(to_email))
                     return True, f"mock_email_{datetime.now().timestamp()}", None
                 
                 error_msg = "SendGrid API key not configured. Email delivery skipped."
@@ -193,16 +194,16 @@ class EmailClient:
                 html_content=html_content,
             )
             response = self._send_email_with_retry(message)
-            logger.info(f"Email sent successfully. Status: {response.status_code}")
+            logger.info("email_sent", recipient=mask_recipient(to_email), status_code=response.status_code)
             return True, response.headers.get("X-Message-ID", "unknown"), None
 
         except tenacity.RetryError as re:
-            error_msg = f"Failed to send email after max retries due to provider errors: {str(re)}"
-            logger.error(error_msg)
+            error_msg = f"Failed to send email after max retries due to provider errors: {sanitize_log_text(str(re))}"
+            logger.error("email_send_failed", recipient=mask_recipient(to_email), error=sanitize_log_text(str(re)))
             return False, None, error_msg
         except Exception as e:
-            error_msg = f"Failed to send email: {str(e)}"
-            logger.error(error_msg)
+            error_msg = f"Failed to send email: {sanitize_log_text(str(e))}"
+            logger.error("email_send_failed", recipient=mask_recipient(to_email), error=sanitize_log_text(str(e)))
             return False, None, error_msg
 
 
@@ -248,12 +249,7 @@ def send_email_task(
     from database import db_session, NotificationStatus, NotificationChannel
     from db.crud.notifications import update_notification_log_by_keys
     
-    logger.info(
-        "Starting background email delivery", 
-        recipient=to_email, 
-        subject=subject,
-        task_id=self.request.id
-    )
+    logger.info("background_email_delivery_started", recipient=mask_recipient(to_email), task_id=self.request.id)
     
     # Initialize the EmailClient. We do this inside the task to ensure 
     # that any environment-specific configuration is picked up correctly 
@@ -282,9 +278,9 @@ def send_email_task(
                     error_message=error,
                     message_preview=html_content,
                 )
-                logger.info("Background notification logged successfully", deadline_id=deadline_id)
+                logger.info("background_notification_logged", deadline_id=deadline_id)
         except Exception as e:
-            logger.error("Failed to log background notification", error=str(e), deadline_id=deadline_id)
+            logger.error("background_notification_log_failed", deadline_id=deadline_id, error=sanitize_log_text(str(e)))
     
     # Handle retries if the email failed and we haven't exceeded the limit.
     # Check for transient errors (503, 429) to use exponential backoff.
@@ -292,18 +288,14 @@ def send_email_task(
         if self.request.retries < self.max_retries:
             backoff_delay = (2 ** self.request.retries) * 60
             logger.warning(
-                "Email delivery encountered transient error, scheduling retry with exponential backoff", 
-                error=error, 
+                "email_delivery_retry_scheduled", 
+                error=sanitize_log_text(error), 
                 retry_count=self.request.retries + 1,
                 delay_seconds=backoff_delay
             )
             raise self.retry(exc=Exception(error), countdown=backoff_delay)
     elif not success and self.request.retries < self.max_retries:
-        logger.warning(
-            "Email delivery failed, scheduling retry", 
-            error=error, 
-            retry_count=self.request.retries + 1
-        )
+        logger.warning("email_delivery_retry_scheduled", error=sanitize_log_text(error), retry_count=self.request.retries + 1)
         raise self.retry(exc=Exception(error))
     
     return {
@@ -351,11 +343,7 @@ def send_sms_task(
     from database import db_session, NotificationStatus, NotificationChannel
     from db.crud.notifications import update_notification_log_by_keys
     
-    logger.info(
-        "Starting background SMS delivery", 
-        recipient=to_number, 
-        task_id=self.request.id
-    )
+    logger.info("background_sms_delivery_started", recipient=mask_recipient(to_number), task_id=self.request.id)
     
     # Initialize the SMSClient inside the task
     client = SMSClient()
@@ -380,9 +368,9 @@ def send_sms_task(
                     error_message=error,
                     message_preview=message,
                 )
-                logger.info("Background SMS notification logged successfully", deadline_id=deadline_id)
+                logger.info("background_sms_notification_logged", deadline_id=deadline_id)
         except Exception as e:
-            logger.error("Failed to log background SMS notification", error=str(e), deadline_id=deadline_id)
+            logger.error("background_sms_notification_log_failed", deadline_id=deadline_id, error=sanitize_log_text(str(e)))
     
     # Retry mechanism for 503 Server Errors using exponential backoff
     if not success and error and '503' in str(error):
@@ -391,19 +379,15 @@ def send_sms_task(
             # Example: 1m, 2m, 4m, 8m...
             backoff_delay = (2 ** self.request.retries) * 60
             logger.warning(
-                "SMS delivery encountered 503 Server Error, scheduling retry with exponential backoff", 
-                error=error, 
+                "sms_delivery_retry_scheduled", 
+                error=sanitize_log_text(error), 
                 retry_count=self.request.retries + 1,
                 delay_seconds=backoff_delay
             )
             raise self.retry(exc=Exception(error), countdown=backoff_delay)
     elif not success and self.request.retries < self.max_retries:
         # Standard retry for other errors
-        logger.warning(
-            "SMS delivery failed, scheduling retry", 
-            error=error, 
-            retry_count=self.request.retries + 1
-        )
+        logger.warning("sms_delivery_retry_scheduled", error=sanitize_log_text(error), retry_count=self.request.retries + 1)
         raise self.retry(exc=Exception(error))
     
     return {

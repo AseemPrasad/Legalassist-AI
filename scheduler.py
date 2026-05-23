@@ -54,7 +54,6 @@ DISTRIBUTED LOCKING PATTERN:
 ================================================================================
 """
 
-import logging
 import signal
 import sys
 import os
@@ -67,6 +66,7 @@ from typing import Optional
 from contextlib import contextmanager
 
 import pytz
+import structlog
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.schedulers.blocking import BlockingScheduler
@@ -104,11 +104,12 @@ from notifications.reminder_engine import (
     is_reminder_time_for_user,
 )
 from notification_service import NotificationService
+from core.log_redaction import mask_recipient, sanitize_log_text, sanitize_log_value
 
 # This module is imported by app.py, which handles logging configuration
 # Logging setup is centralized in app.py to avoid duplicate handlers
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # Global instances
 _scheduler: Optional[BackgroundScheduler] = None
@@ -131,7 +132,7 @@ def _get_redis_client():
         import redis
         return redis.from_url(redis_url, decode_responses=True)
     except Exception as e:
-        logger.warning(f"Could not connect to Redis: {e}")
+        logger.warning("scheduler_redis_unavailable", error=sanitize_log_text(str(e)))
         return None
 
 
@@ -178,9 +179,9 @@ def _shutdown_scheduler_instance(scheduler, *, wait: bool = True):
     try:
         if scheduler.running:
             scheduler.shutdown(wait=wait)
-            logger.info("Scheduler shutdown complete.")
+            logger.info("scheduler_shutdown_complete")
     except Exception as e:
-        logger.error(f"Error during scheduler shutdown: {e}")
+        logger.error("scheduler_shutdown_failed", error=sanitize_log_text(str(e)))
 
 
 # Reminder time logic moved to notifications.reminder_engine.build_reminder_jobs
@@ -248,14 +249,12 @@ def check_and_send_reminders():
     lock_id = f"{_instance_id}:{os.getpid()}"
     with distributed_lock(LOCK_KEY, LOCK_TTL_SECONDS, lock_id) as has_lock:
         if not has_lock:
-            logger.debug("Skipping reminder check - another instance holds the lock")
+            logger.debug("scheduler_reminder_lock_skipped")
             return
 
-        logger.info("Acquired distributed lock for reminder job")
+        logger.info("scheduler_reminder_lock_acquired")
 
-        logger.info("=" * 60)
-        logger.info("Starting deadline reminder check job")
-        logger.info(f"Check time: {datetime.now(timezone.utc)} UTC")
+        logger.info("scheduler_reminder_job_started", check_time=datetime.now(timezone.utc).isoformat())
 
         # Ensure tables exist when running from a fresh DB.
         init_db()
@@ -264,7 +263,7 @@ def check_and_send_reminders():
         try:
             # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
             upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
-            logger.info(f"Found {len(upcoming_deadlines)} upcoming deadlines")
+            logger.info("scheduler_upcoming_deadlines_found", count=len(upcoming_deadlines))
 
             sent_count = 0
 
@@ -284,23 +283,19 @@ def check_and_send_reminders():
             for deadline, days_left in eligible:
                 user_preference = prefs_by_user.get(deadline.user_id)
                 if not user_preference:
-                    logger.warning(f"No preferences found for user {deadline.user_id}. Skipping.")
+                    logger.warning("scheduler_preferences_missing", user_id=deadline.user_id)
                     continue
 
                 # Check if reminders should be sent based on preferences and time
                 if not is_notify_enabled(days_left, user_preference):
-                    logger.debug(f"Notifications disabled for this threshold ({days_left} days) for user {deadline.user_id}")
+                    logger.debug("scheduler_notifications_disabled", user_id=deadline.user_id, days_left=days_left)
                     continue
 
                 if not is_reminder_time_for_user(user_preference.timezone):
-                    logger.debug(
-                        f"Not reminder hour yet in user's timezone",
-                        user_id=deadline.user_id,
-                        user_timezone=user_preference.timezone,
-                    )
+                    logger.debug("scheduler_waiting_for_reminder_window", user_id=deadline.user_id, user_timezone=user_preference.timezone)
                     continue
 
-                logger.info(f"Processing deadline: Case={deadline.case_id}, Days Left={days_left}")
+                logger.info("scheduler_processing_deadline", case_id=deadline.case_id, days_left=days_left)
 
                 # Send reminders using the notification service
                 results = notification_service.send_reminders(db, deadline, user_preference, days_left)
@@ -308,15 +303,23 @@ def check_and_send_reminders():
                 for res in results:
                     if res.success:
                         sent_count += 1
-                        logger.info(f"✓ {res.channel.upper()} sent to {res.recipient}")
+                        logger.info(
+                            "scheduler_notification_sent",
+                            channel=res.channel.value if hasattr(res.channel, "value") else str(res.channel),
+                            recipient=mask_recipient(res.recipient),
+                        )
                     else:
-                        logger.error(f"✗ {res.channel.upper()} failed for {res.recipient}: {res.error}")
+                        logger.error(
+                            "scheduler_notification_failed",
+                            channel=res.channel.value if hasattr(res.channel, "value") else str(res.channel),
+                            recipient=mask_recipient(res.recipient),
+                            error=sanitize_log_text(res.error),
+                        )
 
-            logger.info(f"Deadline reminder check job completed. Total reminders sent: {sent_count}")
-            logger.info("=" * 60)
+            logger.info("scheduler_reminder_job_completed", reminders_sent=sent_count)
 
         except Exception as e:
-            logger.error(f"Error in reminder job: {str(e)}", exc_info=True)
+            logger.error("scheduler_reminder_job_failed", error=sanitize_log_text(str(e)), exc_info=True)
         finally:
             db.close()
 
@@ -335,9 +338,9 @@ def recompute_due_knowledge_invalidations():
         db = SessionLocal()
         try:
             processed = process_due_knowledge_invalidations(db)
-            logger.info("Knowledge recompute job completed", processed=len(processed))
+            logger.info("scheduler_knowledge_recompute_completed", processed=len(processed))
         except Exception as exc:
-            logger.error(f"Error in knowledge recompute job: {exc}", exc_info=True)
+            logger.error("scheduler_knowledge_recompute_failed", error=sanitize_log_text(str(exc)), exc_info=True)
         finally:
             db.close()
 
@@ -378,7 +381,7 @@ def managed_subprocess(command: list[str] | str, **kwargs):
     if isinstance(command, str):
         command = shlex.split(command)
         
-    logger.info(f"Spawning managed subprocess: {command}")
+    logger.info("scheduler_subprocess_spawned", command=sanitize_log_value(command, "command"))
     process = None
     try:
         process = subprocess.Popen(
@@ -390,13 +393,13 @@ def managed_subprocess(command: list[str] | str, **kwargs):
         )
         yield process
     except Exception as e:
-        logger.error(f"Error executing subprocess {command}: {e}")
+        logger.error("scheduler_subprocess_failed", command=sanitize_log_value(command, "command"), error=sanitize_log_text(str(e)))
         raise
     finally:
         if process is not None:
             # Check if process is still running
             if process.poll() is None:
-                logger.warning(f"Subprocess {process.pid} did not exit cleanly. Initiating termination sequence.")
+                logger.warning("scheduler_subprocess_cleanup_required", pid=process.pid)
                 try:
                     # Attempt graceful termination (SIGTERM)
                     process.terminate()
@@ -404,18 +407,18 @@ def managed_subprocess(command: list[str] | str, **kwargs):
                     # Give it a brief moment to exit gracefully
                     try:
                         process.wait(timeout=5.0)
-                        logger.info(f"Subprocess {process.pid} terminated gracefully.")
+                        logger.info("scheduler_subprocess_terminated", pid=process.pid, mode="graceful")
                     except subprocess.TimeoutExpired:
                         # Escalate to SIGKILL if it refuses to die
-                        logger.error(f"Subprocess {process.pid} ignored SIGTERM. Escalating to SIGKILL.")
+                        logger.error("scheduler_subprocess_sigterm_ignored", pid=process.pid)
                         process.kill()
                         process.wait(timeout=2.0)
-                        logger.info(f"Subprocess {process.pid} killed forcefully.")
+                        logger.info("scheduler_subprocess_terminated", pid=process.pid, mode="forced")
                 except ProcessLookupError:
                     # Process might have exited just before we tried to terminate
                     pass
                 except Exception as cleanup_error:
-                    logger.critical(f"Failed to cleanup subprocess {process.pid}: {cleanup_error}")
+                    logger.critical("scheduler_subprocess_cleanup_failed", pid=process.pid, error=sanitize_log_text(str(cleanup_error)))
             else:
                 # Process already exited, but we must read its exit code to prevent zombies
                 process.wait()
@@ -443,10 +446,10 @@ def run_system_maintenance_task():
     lock_id = f"{_instance_id}:{os.getpid()}"
     with distributed_lock("legalassist:maintenance:lock", 300, lock_id) as has_lock:
         if not has_lock:
-            logger.debug("Skipping maintenance task - another instance holds the lock")
+            logger.debug("scheduler_maintenance_lock_skipped")
             return
 
-        logger.info("Starting system maintenance task.")
+        logger.info("scheduler_maintenance_started")
         
         # Example maintenance command (could be a custom bash script or system tool)
         # We'll use a python one-liner for illustration that sleeps to simulate work.
@@ -459,18 +462,18 @@ def run_system_maintenance_task():
                     stdout, stderr = process.communicate(timeout=30)
                     
                     if process.returncode == 0:
-                        logger.info("System maintenance completed successfully.")
+                        logger.info("scheduler_maintenance_completed")
                         if stdout:
-                            logger.debug(f"Maintenance output:\n{stdout.strip()}")
+                            logger.debug("scheduler_maintenance_output", output=sanitize_log_text(stdout.strip()))
                     else:
-                        logger.error(f"System maintenance failed with return code {process.returncode}.")
+                        logger.error("scheduler_maintenance_failed", return_code=process.returncode)
                         if stderr:
-                            logger.error(f"Maintenance errors:\n{stderr.strip()}")
+                            logger.error("scheduler_maintenance_errors", error=sanitize_log_text(stderr.strip()))
                 except subprocess.TimeoutExpired:
-                    logger.error("System maintenance task timed out after 30 seconds.")
+                    logger.error("scheduler_maintenance_timeout")
                     # The managed_subprocess finally block will handle termination
         except Exception as e:
-            logger.error(f"Exception during system maintenance: {e}", exc_info=True)
+            logger.error("scheduler_maintenance_exception", error=sanitize_log_text(str(e)), exc_info=True)
 
 
 def setup_scheduler(scheduler_class):
@@ -514,7 +517,7 @@ def setup_scheduler(scheduler_class):
     """
     
     # Log the initialization attempt to the diagnostic logs
-    logger.info("Initializing scheduler instance with persistent job store...")
+    logger.info("scheduler_initializing")
 
     # 1. DEFINE THE JOB STORE
     # We leverage the existing SQLAlchemy 'engine' from our database module.
@@ -583,13 +586,12 @@ def setup_scheduler(scheduler_class):
             replace_existing=True
         )
         
-        logger.info(f"Successfully configured {scheduler_class.__name__}")
-        logger.info("Job store: SQLAlchemy (Persistent)")
+        logger.info("scheduler_configured", scheduler_class=scheduler_class.__name__, job_store="sqlalchemy")
         
         return scheduler
         
     except Exception as e:
-        logger.critical(f"Failed to initialize scheduler: {str(e)}")
+        logger.critical("scheduler_initialization_failed", error=sanitize_log_text(str(e)))
         # If we can't initialize the persistent scheduler, we should probably
         # raise to prevent the application from running in an inconsistent state.
         raise
@@ -617,9 +619,9 @@ def start_scheduler():
     
     if not _scheduler.running:
         _scheduler.start()
-        logger.info("Background scheduler started (integrated mode)")
+        logger.info("scheduler_started", mode="integrated")
     else:
-        logger.info("Scheduler already running")
+        logger.info("scheduler_already_running")
 
 
 def stop_scheduler():
@@ -627,20 +629,20 @@ def stop_scheduler():
     global _scheduler
     _shutdown_scheduler_instance(_scheduler)
     _scheduler = None
-    logger.info("Background scheduler stopped")
+    logger.info("scheduler_stopped")
 
 
 def trigger_reminder_check_now():
     """
     Manually trigger the reminder check (useful for testing/debugging).
     """
-    logger.info("Manually triggering reminder check...")
+    logger.info("scheduler_manual_reminder_triggered")
     check_and_send_reminders()
 
 
 def trigger_knowledge_recompute_now():
     """Manually trigger the knowledge recompute job (useful for testing/debugging)."""
-    logger.info("Manually triggering knowledge recompute...")
+    logger.info("scheduler_manual_knowledge_recompute_triggered")
     recompute_due_knowledge_invalidations()
 
 
@@ -663,18 +665,15 @@ def run_worker():
     3. SIGNAL HANDLING: Properly handles SIGINT and SIGTERM for graceful 
        shutdown, ensuring database connections are closed correctly.
     """
-    logger.info("=" * 60)
-    logger.info("STARTING LEGALASSIST AI BACKGROUND WORKER")
-    logger.info(f"Process ID: {os.getpid()}")
-    logger.info("=" * 60)
+    logger.info("scheduler_worker_starting", pid=os.getpid())
     
     # Step 1: Ensure the database schema is up to date
     # This is critical if the worker starts before the web app
     try:
         init_db()
-        logger.info("Database initialized successfully.")
+        logger.info("scheduler_database_initialized")
     except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
+        logger.error("scheduler_database_init_failed", error=sanitize_log_text(str(e)))
         sys.exit(1)
     
     # Step 2: Initialize the blocking scheduler with persistence
@@ -685,7 +684,7 @@ def run_worker():
     # This ensures that we don't leave zombie jobs or dangling DB connections
     def signal_handler(sig, frame):
         sig_name = "SIGINT" if sig == signal.SIGINT else "SIGTERM"
-        logger.info(f"Received {sig_name}. Performing graceful shutdown...")
+        logger.info("scheduler_signal_received", signal=sig_name)
 
         _shutdown_scheduler_instance(scheduler)
         sys.exit(0)
@@ -695,20 +694,19 @@ def run_worker():
         signal.signal(signal.SIGINT, signal_handler)
         if hasattr(signal, "SIGTERM"):
             signal.signal(signal.SIGTERM, signal_handler)
-        logger.info("Signal handlers registered.")
+        logger.info("scheduler_signal_handlers_registered")
     except (ValueError, OSError):
-        logger.warning("Could not register signal handlers (not in main thread or unsupported platform).")
+        logger.warning("scheduler_signal_handlers_unavailable")
     
-    logger.info("Worker initialization complete. Entering wait loop.")
-    logger.info("Next job run scheduled at the start of the next hour.")
+    logger.info("scheduler_worker_ready")
     
     try:
         # This will block until the process is terminated
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Worker stopped by user or system.")
+        logger.info("scheduler_worker_stopped")
     except Exception as e:
-        logger.critical(f"Worker encountered a fatal error: {e}", exc_info=True)
+        logger.critical("scheduler_worker_fatal_error", error=sanitize_log_text(str(e)), exc_info=True)
         sys.exit(1)
     finally:
         _shutdown_scheduler_instance(scheduler)
@@ -727,7 +725,7 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
         should_close = True
     
     try:
-        logger.info(f"Running synchronous reminder check (target_days={target_days})")
+        logger.info("scheduler_sync_reminder_check_started", target_days=target_days)
         upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
         prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
         prefs_by_user = {pref.user_id: pref for pref in prefs}
@@ -749,7 +747,7 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
             results = notification_service.send_reminders(db, deadline, candidate.user_preference, days_left)
             sent_count += len([r for r in results if r.success])
 
-        logger.info(f"Synchronous check complete. Reminders sent: {sent_count}")
+        logger.info("scheduler_sync_reminder_check_completed", reminders_sent=sent_count)
         return sent_count
 
     finally:
