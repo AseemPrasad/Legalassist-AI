@@ -841,11 +841,11 @@ def main():
                             st.session_state.show_analytics = True
                     
                     with col2:
-                        if st.button("🎯 Estimate Appeal Chances", key="estimate_chances"):
+                        if st.button("🎯 Estimate Appeal Chances", key="estimate_chances_main"):
                             st.session_state.show_estimator = True
                     
                     with col3:
-                        if st.button("📝 Report Outcome", key="report_outcome"):
+                        if st.button("📝 Report Outcome", key="report_outcome_main"):
                             st.session_state.show_feedback = True
                     
                     # Show analytics if requested
