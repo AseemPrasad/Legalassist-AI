@@ -72,6 +72,7 @@ from services.case_queries import (
     get_case_detail as get_case_detail_service,
     generate_case_summary_text as generate_case_summary_text_service,
 )
+from db.crud.audit import record_immutable_audit_event
 
 logger = logging.getLogger(__name__)
 
@@ -783,6 +784,19 @@ def mark_deadline_completed(user_id: int, deadline_id: int) -> bool:
             event_type="deadline_completed",
             description=f"Marked {deadline.deadline_type} deadline as completed",
             metadata={"deadline_id": deadline_id},
+        )
+
+        record_immutable_audit_event(
+            event_type="deadline.completed",
+            action="completed",
+            actor_user_id=user_id,
+            resource_type="deadline",
+            resource_id=str(deadline_id),
+            outcome="success",
+            case_id=deadline.case_id,
+            metadata={
+                "deadline_type": deadline.deadline_type,
+            },
         )
 
         logger.info(f"Marked deadline {deadline_id} as completed")

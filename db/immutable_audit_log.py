@@ -40,12 +40,14 @@ class ImmutableAuditLog(Base):
     timestamp = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
     event_type = Column(String(100), nullable=False, index=True)
     actor_id = Column(String(100), nullable=True, index=True)
+    actor_user_id = Column(Integer, nullable=True, index=True)
     actor_type = Column(String(50), nullable=True)
     resource_type = Column(String(100), nullable=True, index=True)
     resource_id = Column(String(200), nullable=True, index=True)
     action = Column(String(50), nullable=False, index=True)
+    outcome = Column(String(50), nullable=True, index=True)
     changes = Column(JSON, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    audit_metadata = Column("metadata", JSON, nullable=True)
     ip_address = Column(String(45), nullable=True)
     user_agent = Column(Text, nullable=True)
     prev_hash = Column(String(64), nullable=False)
@@ -61,9 +63,11 @@ def append_audit_entry(
     event_type: str,
     action: str,
     actor_id: str | None = None,
+    actor_user_id: int | None = None,
     actor_type: str | None = None,
     resource_type: str | None = None,
     resource_id: str | None = None,
+    outcome: str | None = None,
     changes: dict | None = None,
     metadata: dict | None = None,
     ip_address: str | None = None,
@@ -79,9 +83,11 @@ def append_audit_entry(
         "event_type": event_type,
         "action": action,
         "actor_id": actor_id,
+        "actor_user_id": actor_user_id,
         "actor_type": actor_type,
         "resource_type": resource_type,
         "resource_id": resource_id,
+        "outcome": outcome,
         "changes": changes,
         "metadata": metadata,
         "ip_address": ip_address,
@@ -96,11 +102,13 @@ def append_audit_entry(
             event_type=event_type,
             action=action,
             actor_id=actor_id,
+            actor_user_id=actor_user_id,
             actor_type=actor_type,
             resource_type=resource_type,
             resource_id=resource_id,
+            outcome=outcome,
             changes=changes,
-            metadata=metadata,
+            audit_metadata=metadata,
             ip_address=ip_address,
             user_agent=user_agent,
             prev_hash=prev_hash,
@@ -116,9 +124,12 @@ def append_audit_entry(
                 "event_type": entry.event_type,
                 "action": entry.action,
                 "actor_id": entry.actor_id,
+                "actor_user_id": entry.actor_user_id,
                 "resource_type": entry.resource_type,
                 "resource_id": entry.resource_id,
+                "outcome": entry.outcome,
                 "changes": entry.changes,
+                "audit_metadata": entry.audit_metadata,
                 "prev_hash": prev_hash,
             },
             prev_hash,
@@ -164,9 +175,12 @@ def verify_audit_chain(start_id: int = 1, end_id: int | None = None) -> dict:
                     "event_type": entry.event_type,
                     "action": entry.action,
                     "actor_id": entry.actor_id,
+                    "actor_user_id": entry.actor_user_id,
                     "resource_type": entry.resource_type,
                     "resource_id": entry.resource_id,
+                    "outcome": entry.outcome,
                     "changes": entry.changes,
+                    "audit_metadata": entry.audit_metadata,
                     "prev_hash": prev_hash,
                 },
                 prev_hash,

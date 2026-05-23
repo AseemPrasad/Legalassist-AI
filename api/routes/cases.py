@@ -21,6 +21,7 @@ from api.auth import get_current_user, CurrentUser
 from api.validation import validate_file_upload, validate_file_upload_streaming, ValidationConfig
 import structlog
 from sqlalchemy import func
+from functools import wraps
 
 from database import (
     CaseRecord,
@@ -34,6 +35,7 @@ from database import (
 )
 from db.case_service import save_case_note_draft, publish_case_note, get_case_note_history
 from db.repositories.case_queries import fetch_latest_documents_per_case
+from db.crud.audit import record_immutable_audit_event
 from services.timeline_service import timeline_service as _timeline_service
 try:
     from celery_app import enqueue_task_from_http_request, process_case_document_upload_task
@@ -56,6 +58,30 @@ def _build_case_summary_payload(case: Case, latest_doc: CaseDocument | None = No
         "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
         "summary": latest_doc.summary if latest_doc else "",
     }
+
+
+def _audit_case_view_route(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        result = await func(*args, **kwargs)
+        case_id = kwargs.get("case_id")
+        current_user = kwargs.get("current_user")
+        if result is not None and case_id is not None and current_user is not None:
+            resource_id = str(case_id)
+            record_immutable_audit_event(
+                event_type="case.viewed",
+                action="viewed",
+                actor_user_id=int(current_user.user_id),
+                resource_type="case",
+                resource_id=resource_id,
+                outcome="success",
+                metadata={
+                    "route": "/api/v1/cases/{case_id}",
+                },
+            )
+        return result
+
+    return wrapper
 
 
 def get_owned_case(case_id: str, current_user: CurrentUser, db: Session) -> Case:
@@ -347,6 +373,7 @@ async def get_case_timeline(
     "/{case_id}",
     summary="Get case details"
 )
+@_audit_case_view_route
 async def get_case_details(
     case_id: str,
     current_user: CurrentUser = Depends(get_current_user),

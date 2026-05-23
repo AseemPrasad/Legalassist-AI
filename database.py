@@ -30,6 +30,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 from config import Config
+from db.models import CaseNote
+from db.case_service import save_case_note_draft
 from db.attachments_service import create_attachment, get_attachments_for_case
 from db.otp_service import (
     _otp_rate_limit_key,

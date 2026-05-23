@@ -2,6 +2,7 @@ from .notifications import NotificationStatus, NotificationChannel, Notification
 from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote, CaseNoteVersion, CaseStatus, DocumentType
 from .auth import User, OTPVerification, APIKey, APIKey
 from .audit import AuditEvent
+from db.immutable_audit_log import ImmutableAuditLog
 from .feedback import UserFeedback
 from .reports import Report, ReportStatus, ReportType, ReportFormat
 from .analytics import (
@@ -40,6 +41,7 @@ __all__ = [
     "OTPVerification",
     "APIKey",
     "AuditEvent",
+    "ImmutableAuditLog",
     "UserFeedback",
     "Report",
     "ReportStatus",

@@ -21,7 +21,7 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from database import Base  # noqa: E402
-from db.models import User, Case, CaseStatus, CaseDocument, DocumentType  # noqa: E402
+from db.models import User, Case, CaseStatus, CaseDocument, DocumentType, CaseDeadline, ImmutableAuditLog  # noqa: E402
 from db.crud.audit import record_audit_event, list_audit_events  # noqa: E402
 from services.case_queries import get_case_detail  # noqa: E402
 from services.case_anonymization import generate_anonymized_case_data  # noqa: E402
@@ -30,6 +30,8 @@ from auth import verify_otp_and_create_token, _hash_otp  # noqa: E402
 from api.auth import CurrentUser  # noqa: E402
 from api.routes.audit import get_case_audit_events
 from api.auth import get_admin_user
+import case_manager  # noqa: E402
+from notification_service import send_email_task, send_sms_task  # noqa: E402
 
 
 @pytest.fixture(scope="function")
@@ -56,6 +58,7 @@ def patch_sessions(test_db, monkeypatch):
 
     monkeypatch.setattr("auth.SessionLocal", lambda: DummySession(test_db))
     monkeypatch.setattr("services.case_anonymization.SessionLocal", lambda: DummySession(test_db))
+    monkeypatch.setattr("db.session.SessionLocal", lambda: DummySession(test_db))
 
     @contextmanager
     def export_session_local():
@@ -199,3 +202,99 @@ def test_case_audit_access_control_enforced(test_db):
 
     allowed = asyncio.run(get_admin_user(CurrentUser(user_id=admin_user.id, email=admin_user.email, role="admin")))
     assert allowed.role == "admin"
+
+
+def _invoke_bound_task(task, fake_self, **kwargs):
+    runner = getattr(task, "__wrapped__", None) or getattr(task, "run", None)
+    assert runner is not None
+    try:
+        return runner(fake_self, **kwargs)
+    except TypeError:
+        return runner(**kwargs)
+
+
+def test_immutable_audit_rows_are_written_for_core_actions(test_db):
+    user, case, _doc = _seed_user_and_case(test_db)
+
+    deadline = CaseDeadline(
+        user_id=user.id,
+        case_id=case.id,
+        case_title=case.title,
+        deadline_date=datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc),
+        deadline_type="appeal",
+    )
+    test_db.add(deadline)
+    test_db.commit()
+    test_db.refresh(deadline)
+
+    detail = get_case_detail(test_db, user_id=user.id, case_id=case.id)
+    assert detail is not None
+
+    assert case_manager.mark_deadline_completed(user.id, deadline.id) is True
+
+    fake_success_self = types.SimpleNamespace(
+        request=types.SimpleNamespace(id="task-success", retries=0),
+        max_retries=0,
+        retry=lambda *args, **kwargs: None,
+    )
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr("notification_service.EmailClient.send_email", lambda self, to_email, subject, html_content: (True, "email-1", None))
+        email_result = _invoke_bound_task(
+            send_email_task,
+            fake_success_self,
+            to_email="user@example.com",
+            subject="Subject",
+            html_content="<p>body</p>",
+            deadline_id=deadline.id,
+            user_id=user.id,
+            days_left=30,
+        )
+        assert email_result["success"] is True
+
+    fake_failure_self = types.SimpleNamespace(
+        request=types.SimpleNamespace(id="task-failure", retries=5),
+        max_retries=5,
+        retry=lambda *args, **kwargs: None,
+    )
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr("notification_service.SMSClient.send_sms", lambda self, to_number, message: (False, None, "provider down"))
+        sms_result = _invoke_bound_task(
+            send_sms_task,
+            fake_failure_self,
+            to_number="+91-9876543210",
+            message="Reminder",
+            deadline_id=deadline.id,
+            user_id=user.id,
+            days_left=30,
+        )
+        assert sms_result["success"] is False
+
+    immutable_events = test_db.query(ImmutableAuditLog).order_by(ImmutableAuditLog.id).all()
+    event_types = [event.event_type for event in immutable_events]
+
+    assert "case.viewed" in event_types
+    assert "deadline.completed" in event_types
+    assert "notification.sent" in event_types
+    assert "notification.failed" in event_types
+
+    case_view = next(event for event in immutable_events if event.event_type == "case.viewed")
+    assert case_view.actor_user_id == user.id
+    assert case_view.resource_type == "case"
+    assert case_view.resource_id == str(case.id)
+    assert case_view.outcome == "success"
+
+    deadline_event = next(event for event in immutable_events if event.event_type == "deadline.completed")
+    assert deadline_event.actor_user_id == user.id
+    assert deadline_event.resource_type == "deadline"
+    assert deadline_event.resource_id == str(deadline.id)
+
+    notification_event = next(event for event in immutable_events if event.event_type == "notification.sent")
+    assert notification_event.actor_user_id == user.id
+    assert notification_event.resource_type == "notification"
+    assert notification_event.outcome == "success"
+
+    failed_notification_event = next(event for event in immutable_events if event.event_type == "notification.failed")
+    assert failed_notification_event.actor_user_id == user.id
+    assert failed_notification_event.outcome == "failure"

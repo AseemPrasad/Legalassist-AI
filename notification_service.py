@@ -63,6 +63,7 @@ from db.crud.notifications import (
     update_notification_log_by_keys,
     has_notification_been_sent,
 )
+from db.crud.audit import record_immutable_audit_event
 from core.template_renderer import render_template, validate_template, TemplateValidationError
 from core.log_redaction import mask_recipient, sanitize_log_text
 
@@ -261,6 +262,23 @@ def send_email_task(
     
     # Determine the status for database logging
     status = NotificationStatus.SENT if success else NotificationStatus.FAILED
+
+    record_immutable_audit_event(
+        event_type="notification.sent" if success else "notification.failed",
+        action="sent" if success else "failed",
+        actor_user_id=user_id,
+        resource_type="notification",
+        resource_id=f"email:{deadline_id}:{user_id}" if deadline_id is not None and user_id is not None else f"email:{self.request.id}",
+        outcome="success" if success else "failure",
+        case_id=None,
+        metadata={
+            "channel": NotificationChannel.EMAIL.value,
+            "deadline_id": deadline_id,
+            "days_left": days_left,
+            "message_id": message_id,
+            "error": error,
+        },
+    )
     
     # If logging metadata was provided, persist the result to the database
     if deadline_id is not None and user_id is not None and days_left is not None:
@@ -353,6 +371,23 @@ def send_sms_task(
     
     # Determine the status for database logging
     status = NotificationStatus.SENT if success else NotificationStatus.FAILED
+
+    record_immutable_audit_event(
+        event_type="notification.sent" if success else "notification.failed",
+        action="sent" if success else "failed",
+        actor_user_id=user_id,
+        resource_type="notification",
+        resource_id=f"sms:{deadline_id}:{user_id}" if deadline_id is not None and user_id is not None else f"sms:{self.request.id}",
+        outcome="success" if success else "failure",
+        case_id=None,
+        metadata={
+            "channel": NotificationChannel.SMS.value,
+            "deadline_id": deadline_id,
+            "days_left": days_left,
+            "message_id": message_id,
+            "error": error,
+        },
+    )
     
     # If logging metadata was provided, persist the result to the database
     if deadline_id is not None and user_id is not None and days_left is not None:

@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from sqlalchemy.orm import Session
 
 from db.models import AuditEvent
+from db.immutable_audit_log import append_audit_entry
 
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PHONE_PATTERN = re.compile(r"(?:(?:\+?\d[\d\s().-]{6,}\d))")
@@ -91,6 +92,41 @@ def record_audit_event(
     db.commit()
     db.refresh(event)
     return event
+
+
+def record_immutable_audit_event(
+    *,
+    event_type: str,
+    action: str,
+    actor_user_id: Optional[int] = None,
+    actor_type: Optional[str] = "user",
+    resource_type: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    outcome: Optional[str] = None,
+    case_id: Optional[int] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> dict:
+    sanitized_metadata = sanitize_audit_metadata(metadata)
+    if case_id is not None:
+        sanitized_metadata.setdefault("case_id", case_id)
+    if outcome is not None:
+        sanitized_metadata.setdefault("outcome", outcome)
+
+    return append_audit_entry(
+        event_type=event_type,
+        action=action,
+        actor_id=f"user:{actor_user_id}" if actor_user_id is not None else None,
+        actor_user_id=actor_user_id,
+        actor_type=actor_type,
+        resource_type=resource_type,
+        resource_id=str(resource_id) if resource_id is not None else None,
+        outcome=outcome,
+        metadata=sanitized_metadata,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
 
 
 def list_audit_events(

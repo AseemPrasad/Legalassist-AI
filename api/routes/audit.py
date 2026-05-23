@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from api.auth import CurrentUser, get_current_user, get_admin_user
 from api.models import AuditEventItem, AuditEventListResponse
-from database import get_db, Case, AuditEvent
+from database import get_db, Case
+from db.models import AuditEvent
 from db.crud.audit import list_audit_events, audit_events_to_csv
 
 router = APIRouter(prefix="/api/v1/audit", tags=["audit"])
