@@ -51,7 +51,9 @@ def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -
         )
 
     to_encode.setdefault("jti", str(uuid.uuid4()))
-    to_encode.setdefault("iat", datetime.now(timezone.utc))
+    issued_at = datetime.now(timezone.utc)
+    to_encode.setdefault("iat", issued_at)
+    to_encode.setdefault("nbf", issued_at)
     to_encode.setdefault("iss", settings.JWT_ISSUER)
     to_encode.setdefault("aud", settings.JWT_AUDIENCE)
     to_encode.setdefault("type", "access")
@@ -59,7 +61,7 @@ def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.now(timezone.utc) + timedelta(hours=settings.JWT_EXPIRATION_HOURS)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_ACCESS_TOKEN_MINUTES)
 
     to_encode.update({"exp": expire})
 
@@ -83,7 +85,7 @@ def verify_token(token: str) -> Dict:
                     algorithms=[settings.JWT_ALGORITHM],
                     issuer=settings.JWT_ISSUER,
                     audience=settings.JWT_AUDIENCE,
-                    options={"require": ["exp", "iat", "iss", "aud", "jti", "type"]},
+                    options={"require": ["exp", "iat", "nbf", "iss", "aud", "jti", "type"], "verify_nbf": True},
                 )
                 break
             except jwt.ExpiredSignatureError as exc:
@@ -144,7 +146,7 @@ def revoke_jwt_token(token: str) -> bool:
                     algorithms=[settings.JWT_ALGORITHM],
                     issuer=settings.JWT_ISSUER,
                     audience=settings.JWT_AUDIENCE,
-                    options={"verify_exp": False, "verify_signature": True, "require": ["exp", "iat", "iss", "aud", "jti", "type"]},
+                    options={"verify_exp": False, "verify_signature": True, "verify_nbf": True, "require": ["exp", "iat", "nbf", "iss", "aud", "jti", "type"]},
                 )
                 break
             except jwt.InvalidTokenError as exc:
