@@ -13,6 +13,7 @@ import jwt
 from fastapi import FastAPI, WebSocket, Query
 from fastapi import Depends
 from api.config import get_settings
+from api.limiter import enforce_rate_limit, RateLimitExceeded
 from core.timeline_payloads import TimelineEventPayload
 from db.models.cases import Case
 from db.session import get_db
@@ -147,6 +148,21 @@ def register_case_timeline_endpoint(app: FastAPI) -> None:
 
         if not _require_owned_case(case_id, user_id, db):
             await websocket.close(code=1008, reason="Forbidden: You do not own this case")
+            return
+
+        identifier = f"user:{user_id}"
+        if websocket.client and websocket.client.host:
+            identifier = f"{identifier}|ip:{websocket.client.host}"
+
+        try:
+            await enforce_rate_limit(
+                identifier=identifier,
+                endpoint=f"WS /ws/cases/{case_id}/timeline",
+                limit=settings.WEBSOCKET_RATE_LIMIT_REQUESTS,
+                window_seconds=settings.WEBSOCKET_RATE_LIMIT_WINDOW,
+            )
+        except RateLimitExceeded as exc:
+            await websocket.close(code=1013, reason=exc.detail["message"])
             return
 
         # Subprotocol handling

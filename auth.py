@@ -304,7 +304,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
         otp_record = get_pending_otp(db, email)
 
         if not otp_record:
-            return False, "OTP expired or not found. Please request a new one.", None
+            return False, "Invalid or expired OTP. Please request a new one.", None
 
         # Check if OTP is locked due to too many failed attempts
         if otp_record.is_locked():
@@ -316,7 +316,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
             
             remaining_time = (locked_until - datetime.now(timezone.utc)).total_seconds() / 60
             logger.warning(f"OTP verification attempt for {email} blocked - OTP is locked (remaining time: {remaining_time:.1f} minutes)")
-            return False, f"Too many failed attempts. Please request a new OTP after {int(remaining_time)} minutes.", None
+            return False, "Too many failed attempts. Please request a new OTP and try again later.", None
 
         # Verify OTP
         if not _verify_otp_hash(otp, otp_record.otp_hash):
@@ -334,11 +334,11 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
                 logger.warning(
                     f"OTP for {email} locked after {otp_record.failed_attempts} failed verification attempts"
                 )
-                return False, f"Too many failed attempts (limit: {OTP_MAX_FAILED_ATTEMPTS}). OTP is now locked. Please request a new OTP.", None
+                return False, "Too many failed attempts. Please request a new OTP and try again later.", None
             
             attempts_remaining = OTP_MAX_FAILED_ATTEMPTS - otp_record.failed_attempts
             logger.info(f"Failed OTP verification for {email}. Attempts remaining: {attempts_remaining}")
-            return False, f"Invalid OTP code. {attempts_remaining} attempts remaining before lockout.", None
+            return False, "Invalid or expired OTP. Please request a new one.", None
 
         # OTP is valid - reset failed attempts and mark as used
         reset_otp_failed_attempts(db, otp_record.id)

@@ -217,3 +217,27 @@ def test_case_timeline_ws_isolates_users_by_case_room(mock_verify_token, client,
     finally:
         websocket_a.close()
         websocket_b.close()
+
+
+@patch("api.websockets.case_timeline._verify_token")
+def test_case_timeline_ws_rate_limited(mock_verify_token, client, test_db, monkeypatch):
+    mock_verify_token.return_value = {"sub": "1"}
+    case = _seed_case(test_db, user_id=1, case_number="2023-CV-00003")
+
+    async def deny(*args, **kwargs):
+        return False
+
+    async def fake_remaining_ttl(*args, **kwargs):
+        return 7
+
+    monkeypatch.setattr("api.limiter.limiter.check_rate_limit", deny)
+    monkeypatch.setattr("api.limiter.limiter.get_remaining_ttl", fake_remaining_ttl)
+
+    with pytest.raises(Exception) as exc_info:
+        with client.websocket_connect(
+            f"/ws/cases/{case.id}/timeline",
+            subprotocols=["access_token", "valid_token"],
+        ) as websocket:
+            websocket.receive_json()
+
+    assert hasattr(exc_info.value, "code") or "1013" in str(exc_info.value)

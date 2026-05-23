@@ -21,11 +21,11 @@ import structlog
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-from api.auth import verify_token
 from api.config import get_settings
 
 settings = get_settings()
 logger = structlog.get_logger(__name__)
+verify_token = None
 
 
 SLIDING_WINDOW_SCRIPT = """
@@ -57,6 +57,8 @@ class RateLimitRule:
 
 RATE_LIMIT_RULES: list[tuple[str, str, str, RateLimitRule]] = [
     ("POST", "/api/v1/auth/token", "exact", RateLimitRule(5, 60)),
+    ("POST", "/api/v1/reports/generate", "exact", RateLimitRule(5, 60)),
+    ("GET", "/api/v1/reports/", "prefix", RateLimitRule(30, 60)),
     ("POST", "/api/v1/analyze/upload", "exact", RateLimitRule(5, 300)),
     ("POST", "/api/v1/analyze/document", "exact", RateLimitRule(10, 300)),
     ("GET", "/api/cases/search/text", "exact", RateLimitRule(30, 60)),
@@ -180,7 +182,11 @@ def resolve_rate_limit_identifier(request: Request) -> str:
         token = authorization.removeprefix("Bearer ").strip()
         if token:
             try:
-                payload = verify_token(token)
+                token_verifier = verify_token
+                if token_verifier is None:
+                    from api.auth import verify_token as token_verifier
+
+                payload = token_verifier(token)
                 user_id = payload.get("sub") or payload.get("user_id")
                 if user_id is not None:
                     return f"user:{user_id}"
@@ -231,6 +237,21 @@ def build_rate_limit_response(retry_after: int, message: str) -> JSONResponse:
         },
         headers={"Retry-After": str(retry_after)},
     )
+
+
+async def enforce_rate_limit(identifier: str, endpoint: str, limit: int, window_seconds: int) -> None:
+    allowed = await limiter.check_rate_limit(
+        identifier=identifier,
+        endpoint=endpoint,
+        limit=limit,
+        window_seconds=window_seconds,
+    )
+    if not allowed:
+        retry_after = await limiter.get_remaining_ttl(identifier, endpoint, window_seconds)
+        raise RateLimitExceeded(
+            retry_after=retry_after,
+            message=f"Too many requests. Limit is {limit} per {window_seconds} seconds.",
+        )
 
 
 def RateLimit(

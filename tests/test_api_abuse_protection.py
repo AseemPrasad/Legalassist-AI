@@ -13,14 +13,17 @@ os.environ.setdefault("APP_ALLOWED_HOSTS", "localhost,127.0.0.1")
 
 import pytest
 from fastapi import status
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
+from fastapi.testclient import TestClient
 
 from api import limiter as limiter_module
 from api.limiter import get_rate_limit_policy, resolve_rate_limit_identifier
 from api.middleware import rate_limit_middleware, request_size_limit_middleware
 from api.middlewares import register_middlewares
 from api.validation import ValidationConfig
+from api.routes.auth import router as auth_router
 
 
 def make_request(path: str = "/api/v1/analyze/document", method: str = "POST", headers: dict | None = None, client_host: str = "127.0.0.1") -> Request:
@@ -63,6 +66,33 @@ async def test_rate_limit_middleware_returns_structured_429(monkeypatch):
     payload = json.loads(response.body)
     assert payload["error_code"] == "RATE_LIMIT_EXCEEDED"
     assert payload["retry_after"] == 17
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_middleware_returns_structured_429_for_reports(monkeypatch):
+    request = make_request(path="/api/v1/reports/generate", method="POST")
+
+    async def call_next(_request):
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr("api.middleware.settings.RATE_LIMIT_ENABLED", True)
+
+    async def deny(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr("api.middleware.limiter.check_rate_limit", deny)
+
+    async def fake_remaining_ttl(*args, **kwargs):
+        return 9
+
+    monkeypatch.setattr("api.middleware.limiter.get_remaining_ttl", fake_remaining_ttl)
+
+    response = await rate_limit_middleware(request, call_next)
+
+    assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+    payload = json.loads(response.body)
+    assert payload["error_code"] == "RATE_LIMIT_EXCEEDED"
+    assert payload["retry_after"] == 9
 
 
 @pytest.mark.asyncio
@@ -151,13 +181,37 @@ def test_get_rate_limit_policy_overrides_sensitive_routes():
     auth_rule, matched = get_rate_limit_policy("/api/v1/auth/token", "POST")
     upload_rule, upload_matched = get_rate_limit_policy("/api/v1/analyze/upload", "POST")
     search_rule, search_matched = get_rate_limit_policy("/api/cases/search/text", "GET")
+    reports_rule, reports_matched = get_rate_limit_policy("/api/v1/reports/generate", "POST")
 
     assert matched is True
     assert upload_matched is True
     assert search_matched is True
+    assert reports_matched is True
     assert auth_rule.requests == 5
     assert upload_rule.requests == 5
     assert search_rule.requests == 30
+    assert reports_rule.requests == 5
+
+
+def test_auth_token_route_returns_429_when_rate_limited(monkeypatch):
+    app = FastAPI()
+    app.include_router(auth_router)
+    client = TestClient(app)
+
+    async def deny(*args, **kwargs):
+        return False
+
+    async def fake_remaining_ttl(*args, **kwargs):
+        return 12
+
+    monkeypatch.setattr("api.limiter.limiter.check_rate_limit", deny)
+    monkeypatch.setattr("api.limiter.limiter.get_remaining_ttl", fake_remaining_ttl)
+
+    response = client.post("/api/v1/auth/token", params={"username": "user@example.com", "password": "secret"})
+
+    assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+    assert response.headers["Retry-After"] == "12"
+    assert response.json()["error_code"] == "RATE_LIMIT_EXCEEDED"
 
 
 def test_register_middlewares_preserves_order(monkeypatch):

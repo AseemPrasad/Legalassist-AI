@@ -54,6 +54,10 @@ class APISettings(BaseSettings):
     AUTH_RATE_LIMIT_REQUESTS: int = 5  # tight limit for login
     AUTH_RATE_LIMIT_WINDOW: int = 60   # per minute
     AUTH_RATE_LIMIT_STRATEGY: str = "fixed-window"  # or 'sliding-window'
+
+    # WebSocket Rate Limiting
+    WEBSOCKET_RATE_LIMIT_REQUESTS: int = 20
+    WEBSOCKET_RATE_LIMIT_WINDOW: int = 60
     
     # Authentication
     AUTH_ENABLED: bool = True
