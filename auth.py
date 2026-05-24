@@ -291,15 +291,15 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
         # Get pending OTP
         otp_record = get_pending_otp(db, email)
 
+        GENERIC_OTP_FAILURE = "Invalid or expired OTP. Please request a new one."
+
         if not otp_record:
-            return False, "Invalid or expired OTP. Please request a new one.", None
+            return False, GENERIC_OTP_FAILURE, None
 
         # Check if OTP is locked due to too many failed attempts
         if otp_record.is_locked():
-            # Safely normalize naive datetimes to UTC
             locked_until = otp_record.locked_until
             if locked_until and locked_until.tzinfo is None:
-                # Treat naive datetime as local server time and convert to UTC
                 locked_until = locked_until.astimezone(timezone.utc)
             
             remaining_time = (locked_until - datetime.now(timezone.utc)).total_seconds() / 60
@@ -308,11 +308,10 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
                 recipient=mask_email(email),
                 remaining_minutes=round(remaining_time, 1),
             )
-            return False, "Too many failed attempts. Please request a new OTP and try again later.", None
+            return False, GENERIC_OTP_FAILURE, None
 
         # Verify OTP
         if not _verify_otp_hash(otp, otp_record.otp_hash):
-            # Record failed attempt and check if lockout is needed
             record_otp_failed_attempt(
                 db, 
                 otp_record.id, 
@@ -320,7 +319,6 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
                 max_failed_attempts=OTP_MAX_FAILED_ATTEMPTS
             )
             
-            # Check if OTP is now locked after this attempt
             db.refresh(otp_record)
             if otp_record.is_locked():
                 logger.warning(
@@ -328,15 +326,12 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
                     recipient=mask_email(email),
                     failed_attempts=otp_record.failed_attempts,
                 )
-                return False, "Too many failed attempts. Please request a new OTP and try again later.", None
             
-            attempts_remaining = OTP_MAX_FAILED_ATTEMPTS - otp_record.failed_attempts
             logger.info(
                 "otp_verification_failed",
                 recipient=mask_email(email),
-                attempts_remaining=attempts_remaining,
             )
-            return False, "Invalid or expired OTP. Please request a new one.", None
+            return False, GENERIC_OTP_FAILURE, None
 
         # OTP is valid - reset failed attempts and mark as used
         reset_otp_failed_attempts(db, otp_record.id)
