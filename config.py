@@ -181,6 +181,11 @@ class Config:
     SENDGRID_FROM_EMAIL = _get_val("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
 
     @classmethod
+    def get_sendgrid_event_webhook_public_key(cls) -> str:
+        """Return the SendGrid event webhook public key, if configured."""
+        return str(_get_val("SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY", _get_val("SENDGRID_WEBHOOK_PUBLIC_KEY", "")) or "")
+
+    @classmethod
     def get_sendgrid_api_key(cls) -> str:
         """Return the SendGrid API key, retrieved on demand to limit exposure."""
         return str(_get_val("SENDGRID_API_KEY", "") or "")

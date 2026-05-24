@@ -197,6 +197,7 @@ class NotificationStatus(str, enum.Enum):
     """Status of sent notifications"""
     PENDING = "pending"
     SENT = "sent"
+    DELIVERED = "delivered"
     FAILED = "failed"
     BOUNCED = "bounced"
     OPENED = "opened"
@@ -294,6 +295,7 @@ class NotificationLog(Base):
     message_preview = Column(Text, nullable=True)
     sent_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
+    failed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     # Relationships

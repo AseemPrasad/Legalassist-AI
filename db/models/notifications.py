@@ -8,6 +8,7 @@ from db.base import Base
 class NotificationStatus(str, enum.Enum):
     PENDING = "pending"
     SENT = "sent"
+    DELIVERED = "delivered"
     FAILED = "failed"
     BOUNCED = "bounced"
     OPENED = "opened"
@@ -72,6 +73,7 @@ class NotificationLog(Base):
     message_preview = Column(Text, nullable=True)
     sent_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
+    failed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     deadline = relationship("CaseDeadline", back_populates="notifications")

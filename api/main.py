@@ -58,7 +58,7 @@ from api.validation import (
 )
 
 # Import routes
-from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech, document_verification, argument_strength, deadline_engine, efiling
+from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech, document_verification, argument_strength, deadline_engine, efiling, notifications as notifications_webhooks
 
 settings = get_settings()
 logger = structlog.get_logger(__name__)
@@ -88,7 +88,7 @@ middleware = [
     Middleware(
         CSRFProtectionMiddleware,
         allowed_hosts=set(settings.ALLOWED_HOSTS),
-        exempt_paths={"/health", "/ready", "/metrics", "/docs", "/openapi.json"}
+        exempt_paths={"/health", "/ready", "/metrics", "/docs", "/openapi.json", "/api/v1/webhooks/twilio", "/api/v1/webhooks/sendgrid"}
     ),
 ]
 
@@ -180,6 +180,7 @@ def create_app() -> FastAPI:
     app.include_router(argument_strength.router)
     app.include_router(deadline_engine.router)
     app.include_router(efiling.router)
+    app.include_router(notifications_webhooks.router)
     # Model feedback & optimization
     from api.routes import models as models_router
     app.include_router(models_router.router)
