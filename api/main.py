@@ -94,6 +94,27 @@ middleware = [
 
 
 # ============================================================================
+# Helpers
+# ============================================================================
+
+def _mask_redis_url(raw: str) -> str:
+    """Redact the password portion of a Redis connection URL for safe logging."""
+    if not raw:
+        return "[none]"
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(raw)
+        if parsed.password:
+            netloc = parsed.netloc.replace(
+                f":{parsed.password}@", ":***@"
+            )
+            return urlunparse(parsed._replace(netloc=netloc))
+    except Exception:
+        pass
+    return raw
+
+
+# ============================================================================
 # FastAPI Application
 # ============================================================================
 
@@ -125,7 +146,7 @@ def create_app() -> FastAPI:
         if settings.RATE_LIMIT_ENABLED:
             logger.info(
                 "Rate limiter enabled",
-                redis_url=settings.REDIS_URL,
+                redis_url=_mask_redis_url(settings.REDIS_URL),
                 requests=settings.RATE_LIMIT_REQUESTS,
                 window=settings.RATE_LIMIT_WINDOW
             )
