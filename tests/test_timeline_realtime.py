@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from core.timeline_payloads import TimelineEventPayload
-from services.timeline_realtime import TimelineRealtimeBus, publish_timeline_event_best_effort
+from services.timeline_realtime import TimelineRealtimeBus, _SubscriberConnection, publish_timeline_event_best_effort
 from pydantic import ValidationError
 
 
@@ -207,6 +207,127 @@ def test_publish_keeps_latest_message_when_queue_is_full():
             assert mock_warning.call_count == 1
             assert mock_warning.call_args.kwargs["policy"] == "drop_oldest_keep_latest"
             assert mock_warning.call_args.kwargs["case_id"] == 7
+
+    asyncio.run(scenario())
+
+
+def test_publish_prunes_closed_subscribers_before_fanout():
+    bus = TimelineRealtimeBus()
+
+    class FakeLiveLoop:
+        def is_closed(self):
+            return False
+
+        def is_running(self):
+            return True
+
+        def call_soon_threadsafe(self, callback):
+            callback()
+
+    async def scenario() -> None:
+        queue = await bus.subscribe(7)
+        channel = await bus._get_or_create_channel(7)
+
+        dead_loop = asyncio.new_event_loop()
+        dead_loop.close()
+        fake_live_loop = FakeLiveLoop()
+
+        async with channel.lock:
+            channel.connections.add(
+                _SubscriberConnection(
+                    queue=asyncio.Queue(maxsize=1),
+                    loop=dead_loop,
+                    thread_id=999,
+                )
+            )
+            channel.connections.add(
+                _SubscriberConnection(
+                    queue=asyncio.Queue(maxsize=1),
+                    loop=fake_live_loop,
+                    thread_id=1000,
+                )
+            )
+
+        with patch("services.timeline_realtime.logger.warning") as mock_warning:
+            await bus.publish(
+                7,
+                {
+                    "schema_version": 2,
+                    "type": "timeline_event",
+                    "case_id": 7,
+                    "event_type": "deadline_created",
+                    "description": "Manual deadline added",
+                    "timestamp": datetime(2026, 5, 22, 10, 30, tzinfo=timezone.utc),
+                    "metadata": {},
+                    "event_id": 555,
+                },
+            )
+
+            payload = await queue.get()
+            validated = TimelineEventPayload.model_validate(payload)
+            assert validated.case_id == 7
+            assert len(channel.connections) == 2
+            assert mock_warning.call_args.kwargs["dead_subscribers"] == 1
+            assert mock_warning.call_args.kwargs["remaining_subscribers"] == 2
+
+        dead_loop.close()
+
+    asyncio.run(scenario())
+
+
+def test_publish_logs_cross_loop_delivery_metadata():
+    bus = TimelineRealtimeBus()
+
+    class FakeLoop:
+        def __init__(self):
+            self.calls = []
+
+        def is_closed(self):
+            return False
+
+        def is_running(self):
+            return True
+
+        def call_soon_threadsafe(self, callback):
+            self.calls.append(callback)
+            callback()
+
+    async def scenario() -> None:
+        channel = await bus._get_or_create_channel(7)
+        target_loop = FakeLoop()
+        queue = asyncio.Queue(maxsize=1)
+
+        async with channel.lock:
+            channel.connections.add(
+                _SubscriberConnection(
+                    queue=queue,
+                    loop=target_loop,
+                    thread_id=12345,
+                )
+            )
+
+        with patch("services.timeline_realtime.logger.debug") as mock_debug:
+            await bus.publish(
+                7,
+                {
+                    "schema_version": 2,
+                    "type": "timeline_event",
+                    "case_id": 7,
+                    "event_type": "deadline_created",
+                    "description": "Manual deadline added",
+                    "timestamp": datetime(2026, 5, 22, 10, 30, tzinfo=timezone.utc),
+                    "metadata": {},
+                    "event_id": 555,
+                },
+            )
+
+            payload = await queue.get()
+            validated = TimelineEventPayload.model_validate(payload)
+            assert validated.case_id == 7
+            assert target_loop.calls
+            assert mock_debug.call_args.kwargs["subscriber_count"] == 1
+            assert mock_debug.call_args.kwargs["target_loop_running"] is True
+            assert mock_debug.call_args.kwargs["target_loop_closed"] is False
 
     asyncio.run(scenario())
 

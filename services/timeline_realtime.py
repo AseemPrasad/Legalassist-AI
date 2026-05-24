@@ -14,9 +14,16 @@ from core.timeline_payloads import TimelineEventPayload
 logger = structlog.get_logger(__name__)
 
 
+@dataclass(frozen=True)
+class _SubscriberConnection:
+    queue: "asyncio.Queue[Dict[str, Any]]"
+    loop: asyncio.AbstractEventLoop
+    thread_id: int
+
+
 @dataclass
 class _CaseChannel:
-    connections: Set[tuple["asyncio.Queue[Dict[str, Any]]", asyncio.AbstractEventLoop]] = field(default_factory=set)
+    connections: Set[_SubscriberConnection] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     dropped_messages: int = 0
 
@@ -101,8 +108,9 @@ class TimelineRealtimeBus:
         channel = await self._get_or_create_channel(case_id)
         q: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=self._queue_maxsize)
         loop = asyncio.get_running_loop()
+        subscriber = _SubscriberConnection(queue=q, loop=loop, thread_id=threading.get_ident())
         async with channel.lock:
-            channel.connections.add((q, loop))
+            channel.connections.add(subscriber)
         return q
 
     async def unsubscribe(self, case_id: int, q: asyncio.Queue[Dict[str, Any]]) -> None:
@@ -111,7 +119,7 @@ class TimelineRealtimeBus:
             if channel is None:
                 return
         async with channel.lock:
-            channel.connections = {subscriber for subscriber in channel.connections if subscriber[0] is not q}
+            channel.connections = {subscriber for subscriber in channel.connections if subscriber.queue is not q}
             if not channel.connections:
                 async with self._global_lock:
                     if self._channels.get(case_id) is channel:
@@ -126,12 +134,27 @@ class TimelineRealtimeBus:
         validated_payload = TimelineEventPayload.model_validate(payload)
         message = validated_payload.model_dump(mode="json")
         current_loop = asyncio.get_running_loop()
+        current_thread_id = threading.get_ident()
         async with channel.lock:
             targets = list(channel.connections)
+            dead_targets = [subscriber for subscriber in targets if subscriber.loop.is_closed()]
+            if dead_targets:
+                channel.connections.difference_update(dead_targets)
+                logger.warning(
+                    "timeline_realtime_dead_subscribers_removed",
+                    case_id=case_id,
+                    dead_subscribers=len(dead_targets),
+                    subscriber_count=len(targets),
+                    remaining_subscribers=len(channel.connections),
+                )
+                targets = [subscriber for subscriber in targets if not subscriber.loop.is_closed()]
 
         # fan-out outside lock
-        for q, loop in targets:
-            deliver = lambda q=q, loop=loop: self._deliver_message(
+        for subscriber in targets:
+            q = subscriber.queue
+            loop = subscriber.loop
+
+            deliver = lambda q=q: self._deliver_message(
                 queue=q,
                 message=message,
                 case_id=case_id,
@@ -142,7 +165,35 @@ class TimelineRealtimeBus:
             if loop is current_loop:
                 deliver()
             else:
-                loop.call_soon_threadsafe(deliver)
+                logger.debug(
+                    "timeline_realtime_cross_loop_delivery",
+                    case_id=case_id,
+                    subscriber_count=len(targets),
+                    target_loop_running=loop.is_running(),
+                    target_loop_closed=loop.is_closed(),
+                    target_thread_id=subscriber.thread_id,
+                    publisher_thread_id=current_thread_id,
+                )
+
+                if loop.is_closed():
+                    continue
+
+                try:
+                    loop.call_soon_threadsafe(deliver)
+                except RuntimeError:
+                    if not loop.is_closed():
+                        raise
+
+                    async with channel.lock:
+                        if subscriber in channel.connections:
+                            channel.connections.remove(subscriber)
+                            logger.warning(
+                                "timeline_realtime_dead_subscriber_removed",
+                                case_id=case_id,
+                                subscriber_count=len(channel.connections),
+                                target_thread_id=subscriber.thread_id,
+                                publisher_thread_id=current_thread_id,
+                            )
 
 
 timeline_queue_maxsize = int(os.getenv("TIMELINE_REALTIME_QUEUE_MAXSIZE", "100"))
