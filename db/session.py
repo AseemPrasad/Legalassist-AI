@@ -50,15 +50,18 @@ def init_db():
     try:
         with engine.begin() as connection:
             connection.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_logs_status ON notification_logs (status)"))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to create notification_logs index", error=str(exc))
 
     if _is_sqlite or _is_postgres:
         try:
             import scripts.apply_immutability as imm
             imm.apply_immutability()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(
+                "Immutable audit log initialization failed — audit trail may not be tamper-proof",
+                error=str(exc),
+            )
 
 
 @contextmanager
