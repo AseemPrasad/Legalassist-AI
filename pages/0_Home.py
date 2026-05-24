@@ -321,11 +321,11 @@ def render_page():
                                 st.session_state.show_analytics = True
 
                         with col2:
-                            if st.button(ui["estimate_chances"], key="estimate_chances"):
+                            if st.button(ui["estimate_chances"], key="estimate_chances_home"):
                                 st.session_state.show_estimator = True
 
                         with col3:
-                            if st.button(ui["report_outcome"], key="report_outcome"):
+                            if st.button(ui["report_outcome"], key="report_outcome_home"):
                                 st.session_state.show_feedback = True
 
                         if st.session_state.get("show_analytics"):
