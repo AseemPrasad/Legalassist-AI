@@ -271,7 +271,7 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
             recipient=mask_email(email),
             error=sanitize_log_text(str(e)),
         )
-        return False, f"Error: {sanitize_log_text(str(e))}"
+        return False, "An unexpected error occurred. Please try again later."
     finally:
         db.close()
 
@@ -371,7 +371,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
             recipient=mask_email(email),
             error=sanitize_log_text(str(e)),
         )
-        return False, f"Error: {sanitize_log_text(str(e))}", None
+        return False, "An unexpected error occurred. Please try again later.", None
     finally:
         db.close()
 
@@ -424,7 +424,7 @@ def verify_password_and_create_token(email: str, password: str) -> Tuple[bool, s
             recipient=mask_email(email),
             error=sanitize_log_text(str(e)),
         )
-        return False, f"Error: {sanitize_log_text(str(e))}", None
+        return False, "An unexpected error occurred. Please try again later.", None
     finally:
         db.close()
 
