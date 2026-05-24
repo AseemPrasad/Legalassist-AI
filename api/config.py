@@ -182,6 +182,14 @@ class APISettings(BaseSettings):
         if is_prod:
             if not self.JWT_SECRET_KEY or self.JWT_SECRET_KEY == "your-secret-key-change-in-production":
                 raise RuntimeError("JWT_SECRET_KEY must be set to a secure value in production")
+        origins = self.CORS_ORIGINS
+        if isinstance(origins, list) and "*" in origins:
+            import logging as _log
+            _log.warning(
+                "CORS configured with wildcard origin '*' and allow_credentials=True. "
+                "This allows any website to make credentialed requests. "
+                "Set explicit origins in production."
+            )
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=True)
 

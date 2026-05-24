@@ -10,6 +10,7 @@ from contextlib import suppress
 from typing import Optional
 
 import jwt
+import structlog
 from fastapi import FastAPI, WebSocket, Query
 from fastapi import Depends
 from api.config import get_settings
@@ -19,6 +20,8 @@ from db.models.cases import Case
 from db.session import get_db
 from services.timeline_realtime import timeline_realtime_bus, TimelineRealtimeBus
 from sqlalchemy.orm import Session
+
+logger = structlog.get_logger(__name__)
 
 
 settings = get_settings()
@@ -57,16 +60,23 @@ def _verify_token(token: str) -> dict:
 
     if payload.get("type") != "access":
         raise InvalidTokenError("Invalid token type")
+
+    jti = payload.get("jti")
+    if jti:
+        from api.jwt_auth import _is_token_revoked_cached
+        if _is_token_revoked_cached(jti):
+            logger.warning("websocket_token_revoked", jti=jti)
+            raise InvalidTokenError("Token has been revoked")
     return payload
 
 
 def parse_auth_from_websocket(websocket: WebSocket, token: Optional[str] = None) -> Optional[str]:
-    """Extract the auth token from either the query parameter or the Sec-WebSocket-Protocol header.
+    """Extract the auth token from the Sec-WebSocket-Protocol header.
 
-    The logic mirrors the original implementation in ``api/main.py``.
+    Falls back to query parameter only if header is absent.
     Returns ``None`` if no token is found.
     """
-    auth_token = token
+    auth_token = None
     requested_protocols = []
 
     if "sec-websocket-protocol" in websocket.headers:
@@ -76,6 +86,9 @@ def parse_auth_from_websocket(websocket: WebSocket, token: Optional[str] = None)
             idx = requested_protocols.index("access_token")
             if idx + 1 < len(requested_protocols):
                 auth_token = requested_protocols[idx + 1]
+
+    if not auth_token:
+        auth_token = token
     return auth_token
 
 

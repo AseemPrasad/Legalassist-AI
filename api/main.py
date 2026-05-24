@@ -347,9 +347,9 @@ if settings.ENABLE_WEBSOCKET:
         """
         WebSocket endpoint for real-time job progress
         
-        Requires authentication via token query parameter or Sec-WebSocket-Protocol header.
+        Requires authentication via Sec-WebSocket-Protocol header or query parameter.
         """
-        auth_token = token
+        auth_token = None
         requested_protocols = []
         
         if "sec-websocket-protocol" in websocket.headers:
@@ -359,6 +359,9 @@ if settings.ENABLE_WEBSOCKET:
                 idx = requested_protocols.index("access_token")
                 if idx + 1 < len(requested_protocols):
                     auth_token = requested_protocols[idx + 1]
+
+        if not auth_token:
+            auth_token = token
 
         if not auth_token:
             await websocket.close(code=4001, reason="Authentication required")

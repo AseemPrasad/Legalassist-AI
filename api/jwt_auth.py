@@ -11,8 +11,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List
 
 import jwt
+import structlog
 from api.config import get_settings
 from database import SessionLocal, is_token_revoked, revoke_token
+
+logger = structlog.get_logger(__name__)
 
 
 class AuthError(Exception):
@@ -28,6 +31,21 @@ class InvalidTokenError(AuthError):
 
 
 settings = get_settings()
+
+_REVOCATION_CACHE: dict[str, bool] = {}
+_REVOCATION_CACHE_TTL: int = 300  # 5 minutes
+
+
+def _is_token_revoked_cached(jti: str) -> bool:
+    now = datetime.now(timezone.utc).timestamp()
+    from database import SessionLocal, is_token_revoked
+    cached = _REVOCATION_CACHE.get(jti)
+    if cached is not None:
+        return cached
+    with SessionLocal() as db:
+        revoked = is_token_revoked(db, jti)
+        _REVOCATION_CACHE[jti] = revoked
+    return revoked
 
 
 def _get_jwt_secrets_to_try() -> List[str]:
@@ -90,7 +108,7 @@ def verify_token(token: str) -> Dict:
                 break
             except jwt.ExpiredSignatureError as exc:
                 last_error = exc
-                raise TokenExpiredError("Token has expired")
+                continue
             except jwt.InvalidIssuerError as exc:
                 last_error = exc
                 raise InvalidTokenError("Invalid token issuer")
@@ -108,9 +126,8 @@ def verify_token(token: str) -> Dict:
 
         jti = payload.get("jti")
         if jti:
-            with SessionLocal() as db:
-                if is_token_revoked(db, jti):
-                    raise InvalidTokenError("Token has been revoked")
+            if _is_token_revoked_cached(jti):
+                raise InvalidTokenError("Token has been revoked")
         return payload
     except jwt.ExpiredSignatureError:
         raise TokenExpiredError("Token has expired")
@@ -171,5 +188,6 @@ def revoke_jwt_token(token: str) -> bool:
             if not is_token_revoked(db, jti):
                 revoke_token(db, jti, expires_at)
         return True
-    except Exception:
+    except Exception as exc:
+        logger.error("revoke_jwt_token_failed", error=str(exc))
         return False

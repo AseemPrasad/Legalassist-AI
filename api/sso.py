@@ -122,8 +122,7 @@ def _build_token_response(user: User, provider: str) -> RedirectResponse:
     token = create_access_token(
         data={"sub": str(user.id), "email": user.email, "role": role, "provider": provider}
     )
-    redirect_url = f"/?token={token}&provider={provider}&role={role}"
-    response = RedirectResponse(url=redirect_url, status_code=302)
+    response = RedirectResponse(url="/", status_code=302)
     response.set_cookie(
         key="access_token",
         value=token,

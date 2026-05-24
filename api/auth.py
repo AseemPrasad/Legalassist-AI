@@ -249,8 +249,11 @@ def _resolve_api_key_user(api_key: str, db: Session) -> CurrentUser:
                 role="admin" if getattr(user, "is_admin", False) else "user",
             )
 
+    # Use a deterministic negative user_id derived from key_id to give each
+    # unlinked API key its own identity for rate limiting and audit logging.
+    derived_id = int.from_bytes(hashlib.sha256(key_id.encode()).digest()[:4], "big", signed=False)
     return CurrentUser(
-        user_id=0,
+        user_id=-derived_id,
         email="api_user",
         role="api",
     )
