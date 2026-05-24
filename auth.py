@@ -153,11 +153,14 @@ def send_otp_email(email: str, otp: str) -> bool:
 
         if not api_key or sendgrid is None:
             if _is_debug_or_testing_mode():
+ 
+
                 logger.warning(
                     "otp_delivery_debug_mode",
                     recipient=mask_email(email),
                     transport="sendgrid",
                 )
+
                 return True  # Simulate success only in explicit debug/testing environments
             logger.error(
                 "otp_delivery_unavailable",
@@ -209,13 +212,16 @@ def send_otp_email(email: str, otp: str) -> bool:
             error=sanitize_log_text(str(e)),
         )
         if _is_debug_or_testing_mode():
- fix/otp-log-leak
+
+    fix/otp-log-leak
             logger.debug("OTP delivery simulated: [MASKED]")
 
             logger.debug("otp_delivery_debug_mode", recipient=mask_email(email), transport="sendgrid")
- main
+
+            logger.debug("otp_delivery_debug_mode", recipient=mask_email(email), transport="sendgrid")
+
         else:
-            logger.warning("otp_delivery_failed", recipient=mask_email(email))
+             logger.warning("otp_delivery_failed", recipient=mask_email(email))
         return False
 
 
