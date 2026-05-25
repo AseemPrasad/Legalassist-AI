@@ -1,3 +1,6 @@
+import os
+import sys
+import types
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -5,6 +8,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-value-12345")
+os.environ.setdefault("APP_ALLOWED_HOSTS", "localhost")
+
+if "report_service" not in sys.modules:
+    report_service_stub = types.ModuleType("report_service")
+    report_service_stub._get_reports_base_dir = lambda: None
+    sys.modules["report_service"] = report_service_stub
 
 from api.auth import CurrentUser, get_current_user
 from api.routes.reports import router, get_db
@@ -68,6 +79,67 @@ def test_generate_report_flow(client, test_db, monkeypatch):
     assert db_report.case_id == "CASE-999"
     assert db_report.job_id == "mock-celery-job-123"
     assert db_report.status == "pending"
+
+
+def test_generate_report_flow_reuses_single_report_id(monkeypatch):
+    """POST /api/v1/reports/generate reuses the same report_id for DB and enqueue flow."""
+    app = FastAPI()
+    app.include_router(router)
+
+    mock_db = MagicMock()
+    app.dependency_overrides[get_db] = lambda: mock_db
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(42, "tester@example.com", "user")
+    client = TestClient(app)
+
+    mock_task = MagicMock()
+    mock_task.id = "mock-celery-job-456"
+    captured_kwargs = {}
+
+    mock_report = MagicMock(spec=Report)
+
+    def fake_enqueue(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return mock_task
+
+    def fake_create_report(*args, **kwargs):
+        mock_report.report_id = kwargs["report_id"]
+        mock_report.user_id = kwargs["user_id"]
+        mock_report.case_id = kwargs["case_id"]
+        mock_report.celery_task_id = kwargs["celery_task_id"]
+        mock_report.report_type = kwargs["report_type"]
+        mock_report.format = kwargs["format"]
+        mock_report.style = kwargs["style"]
+        mock_report.status = "pending"
+        mock_report.created_at = datetime.now(timezone.utc)
+        return mock_report
+
+    monkeypatch.setattr(
+        "api.routes.reports.enqueue_task_from_http_request",
+        fake_enqueue,
+    )
+    monkeypatch.setattr("api.routes.reports.create_report", fake_create_report)
+    monkeypatch.setattr("api.routes.reports.update_report_status", lambda *args, **kwargs: None)
+    mock_db.query.return_value.filter.return_value.first.return_value = mock_report
+
+    payload = {
+        "case_id": "100",
+        "report_type": "comprehensive",
+        "format": "pdf",
+    }
+    response = client.post("/api/v1/reports/generate", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    report_id = data["report_id"]
+    assert captured_kwargs["report_id"] == report_id
+
+    assert mock_report.report_id == report_id
+    assert mock_report.job_id == mock_task.id
+    assert mock_report.celery_task_id == mock_task.id
+
+    generated_file_name = f"{mock_report.case_id}_{mock_report.report_type}_{report_id}.pdf"
+    assert generated_file_name.endswith(f"{report_id}.pdf")
+    assert report_id in generated_file_name
 
 
 def test_get_report_status_not_found(client):
