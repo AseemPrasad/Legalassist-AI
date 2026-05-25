@@ -26,6 +26,7 @@ class _CaseChannel:
     connections: Set[_SubscriberConnection] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     dropped_messages: int = 0
+    dropped_connections: int = 0
 
 
 class TimelineRealtimeBus:
@@ -43,6 +44,7 @@ class TimelineRealtimeBus:
         self._global_lock = asyncio.Lock()
         self._drop_lock = threading.Lock()
         self._dropped_messages_total = 0
+        self._dropped_connections_total = 0
 
     @property
     def queue_maxsize(self) -> int:
@@ -52,6 +54,11 @@ class TimelineRealtimeBus:
     def dropped_messages_total(self) -> int:
         with self._drop_lock:
             return self._dropped_messages_total
+
+    @property
+    def dropped_connections_total(self) -> int:
+        with self._drop_lock:
+            return self._dropped_connections_total
 
     def _record_drop(self, case_id: int, channel: _CaseChannel) -> None:
         with self._drop_lock:
@@ -68,6 +75,29 @@ class TimelineRealtimeBus:
             case_dropped_messages=channel.dropped_messages,
             policy="drop_oldest_keep_latest",
         )
+
+    def _record_connection_drop(self, case_id: int, channel: _CaseChannel, count: int, *, reason: str) -> None:
+        if count <= 0:
+            return
+
+        with self._drop_lock:
+            self._dropped_connections_total += count
+            total_dropped = self._dropped_connections_total
+
+        channel.dropped_connections += count
+        logger.warning(
+            "timeline_realtime_dead_subscribers_removed",
+            case_id=case_id,
+            dropped_connections=count,
+            total_dropped_connections=total_dropped,
+            case_dropped_connections=channel.dropped_connections,
+            remaining_subscribers=len(channel.connections),
+            reason=reason,
+        )
+
+    @staticmethod
+    def _prune_closed_connections(channel: _CaseChannel) -> Set[_SubscriberConnection]:
+        return {subscriber for subscriber in channel.connections if subscriber.loop.is_closed()}
 
     @staticmethod
     def _deliver_message(
@@ -119,7 +149,10 @@ class TimelineRealtimeBus:
             if channel is None:
                 return
         async with channel.lock:
-            channel.connections = {subscriber for subscriber in channel.connections if subscriber.queue is not q}
+            removed = {subscriber for subscriber in channel.connections if subscriber.queue is q or subscriber.loop.is_closed()}
+            if removed:
+                channel.connections.difference_update(removed)
+                self._record_connection_drop(case_id, channel, len(removed), reason="unsubscribe")
             if not channel.connections:
                 async with self._global_lock:
                     if self._channels.get(case_id) is channel:
@@ -140,13 +173,7 @@ class TimelineRealtimeBus:
             dead_targets = [subscriber for subscriber in targets if subscriber.loop.is_closed()]
             if dead_targets:
                 channel.connections.difference_update(dead_targets)
-                logger.warning(
-                    "timeline_realtime_dead_subscribers_removed",
-                    case_id=case_id,
-                    dead_subscribers=len(dead_targets),
-                    subscriber_count=len(targets),
-                    remaining_subscribers=len(channel.connections),
-                )
+                self._record_connection_drop(case_id, channel, len(dead_targets), reason="publish_prune")
                 targets = [subscriber for subscriber in targets if not subscriber.loop.is_closed()]
 
         # fan-out outside lock
@@ -176,6 +203,10 @@ class TimelineRealtimeBus:
                 )
 
                 if loop.is_closed():
+                    async with channel.lock:
+                        if subscriber in channel.connections:
+                            channel.connections.remove(subscriber)
+                            self._record_connection_drop(case_id, channel, 1, reason="publish_closed_loop")
                     continue
 
                 try:
@@ -187,13 +218,7 @@ class TimelineRealtimeBus:
                     async with channel.lock:
                         if subscriber in channel.connections:
                             channel.connections.remove(subscriber)
-                            logger.warning(
-                                "timeline_realtime_dead_subscriber_removed",
-                                case_id=case_id,
-                                subscriber_count=len(channel.connections),
-                                target_thread_id=subscriber.thread_id,
-                                publisher_thread_id=current_thread_id,
-                            )
+                            self._record_connection_drop(case_id, channel, 1, reason="publish_runtime_error")
 
 
 timeline_queue_maxsize = int(os.getenv("TIMELINE_REALTIME_QUEUE_MAXSIZE", "100"))
