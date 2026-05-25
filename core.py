@@ -5,6 +5,7 @@ import re
 import logging
 from pathlib import Path
 from typing import Dict, Optional, List, Union, Any
+from config import Config
 
 # Custom Exception Imports
 from core.exceptions import (
@@ -33,6 +34,17 @@ DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 # PDF DATA EXTRACTION (OCR & PARSING)
 # =============================================================================
 
+def _resolve_safe_pdf_path(pdf_input: Union[str, Path]) -> Path:
+    """Resolve and validate that a PDF path is within the allowed attachments directory."""
+    path = Path(pdf_input)
+    resolved = path.resolve(strict=False)
+    allowed = Path(Config.ATTACHMENTS_DIR).resolve()
+    if not resolved.is_relative_to(allowed):
+        LOGGER.warning("blocked_arbitrary_file_read", path=str(resolved), allowed=str(allowed))
+        raise InputReadingError("File path is not within the allowed attachments directory")
+    return resolved
+
+
 def _read_pdf_bytes(pdf_input: Union[str, Path, object]) -> bytes:
     """
     Safely reads PDF content into a byte stream.
@@ -48,8 +60,11 @@ def _read_pdf_bytes(pdf_input: Union[str, Path, object]) -> bytes:
     """
     if isinstance(pdf_input, (str, Path)):
         try:
-            with open(pdf_input, "rb") as f:
+            resolved = _resolve_safe_pdf_path(pdf_input)
+            with open(resolved, "rb") as f:
                 return f.read()
+        except InputReadingError:
+            raise
         except Exception as e:
             raise InputReadingError(f"Failed to read PDF file at {pdf_input}", e)
 
@@ -178,7 +193,7 @@ def extract_text_with_diagnostics(
     # 1. Try pdfplumber (more robust for complex layouts).
     try:
         if isinstance(pdf_input, (str, Path)):
-            pdfplumber_input = pdf_input
+            pdfplumber_input = _resolve_safe_pdf_path(pdf_input)
         else:
             # _read_pdf_bytes now raises InputReadingError
             raw_bytes = _read_pdf_bytes(pdf_input)
@@ -205,7 +220,8 @@ def extract_text_with_diagnostics(
     # 2. Fallback to pypdf
     try:
         if isinstance(pdf_input, (str, Path)):
-            with open(pdf_input, "rb") as f:
+            resolved = _resolve_safe_pdf_path(pdf_input)
+            with open(resolved, "rb") as f:
                 reader = PdfReader(f)
                 text = _extract_pages_pypdf(reader)
         else:
@@ -240,7 +256,8 @@ def extract_text_with_diagnostics(
     try:
         images = []
         if isinstance(pdf_input, (str, Path)):
-            images = convert_from_path(str(pdf_input), dpi=ocr_dpi)
+            resolved = _resolve_safe_pdf_path(pdf_input)
+            images = convert_from_path(str(resolved), dpi=ocr_dpi)
         else:
             data = _read_pdf_bytes(pdf_input)
             images = convert_from_bytes(data, dpi=ocr_dpi)
