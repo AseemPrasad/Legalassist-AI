@@ -205,7 +205,8 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         csrf_cookie = request.cookies.get(CSRF_COOKIE_NAME)
 
         if request.method in SAFE_METHODS and not csrf_cookie:
-            token = generate_csrf_token(int(user_id) if str(user_id).isdigit() else 0, secrets.token_urlsafe(16))
+            session_id = secrets.token_urlsafe(16)
+            token = generate_csrf_token(int(user_id) if str(user_id).isdigit() else 0, session_id)
             response.set_cookie(
                 CSRF_COOKIE_NAME,
                 token,
@@ -220,15 +221,18 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
 
         if request.method not in SAFE_METHODS and (user_id or access_token):
             resolved_user_id = int(user_id) if str(user_id).isdigit() else None
+            jwt_jti = None
             if resolved_user_id is None and access_token:
                 try:
                     payload = verify_token(access_token)
                     resolved_user_id = int(payload.get("sub"))
+                    jwt_jti = payload.get("jti")
                 except Exception:
                     resolved_user_id = None
 
             if resolved_user_id is not None:
-                token = generate_csrf_token(resolved_user_id, secrets.token_urlsafe(16))
+                session_id = jwt_jti or secrets.token_urlsafe(16)
+                token = generate_csrf_token(resolved_user_id, session_id)
                 response.set_cookie(
                     CSRF_COOKIE_NAME,
                     token,
