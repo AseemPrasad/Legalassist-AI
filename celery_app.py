@@ -16,6 +16,7 @@ Author: Antigravity AI
 Date: 2026-05-12
 """
 
+import hashlib
 import os
 import uuid
 import structlog
@@ -116,6 +117,8 @@ from core.app_utils import (
     compress_text,
 )
 from api.validation import ValidationConfig
+from db.crud.reports import update_report_status
+from db.session import db_session
 from database import Attachment, SessionLocal, get_case_by_id, get_case_document_by_id, update_case_document, create_timeline_event
 
 # ============================================================================
@@ -315,6 +318,43 @@ else:
 # Detailed configuration for Celery behavior, performance, and reliability.
 # This includes serialization settings, time limits, and worker behavior.
 
+REMINDER_DISPATCH_BACKEND = os.getenv("REMINDER_DISPATCH_BACKEND", "apscheduler").strip().lower()
+
+beat_schedule = {
+    "cleanup-old-tasks": {
+        "task": "cleanup_old_tasks",
+        "schedule": 86400.0,
+        "options": {"queue": "maintenance"},
+    },
+    "cleanup-revoked-tokens": {
+        "task": "cleanup_revoked_tokens",
+        "schedule": 21600.0,
+        "options": {"queue": "maintenance"},
+    },
+    "enforce-retention-policies": {
+        "task": "enforce_retention_policies",
+        "schedule": 86400.0,
+        "options": {"queue": "compliance"},
+    },
+    "enforce-data-anonymization": {
+        "task": "enforce_data_anonymization",
+        "schedule": 86400.0,
+        "options": {"queue": "compliance"},
+    },
+    "purge-expired-data": {
+        "task": "purge_expired_data",
+        "schedule": 604800.0,
+        "options": {"queue": "compliance"},
+    },
+}
+
+if REMINDER_DISPATCH_BACKEND == "celery":
+    beat_schedule["send-deadline-reminders"] = {
+        "task": "send_deadline_reminders",
+        "schedule": 3600.0,
+        "options": {"queue": "maintenance"},
+    }
+
 celery_app.conf.update(
     # Data Serialization
     # Using JSON for interoperability and security
@@ -338,38 +378,7 @@ celery_app.conf.update(
     # Max tasks per child prevents memory leaks in long-lived worker processes
     worker_max_tasks_per_child=1000,
     # Beat Schedule Configuration for periodic tasks
-    beat_schedule={
-        "send-deadline-reminders": {
-            "task": "send_deadline_reminders",
-            "schedule": 3600.0,
-            "options": {"queue": "maintenance"},
-        },
-        "cleanup-old-tasks": {
-            "task": "cleanup_old_tasks",
-            "schedule": 86400.0,
-            "options": {"queue": "maintenance"},
-        },
-        "cleanup-revoked-tokens": {
-            "task": "cleanup_revoked_tokens",
-            "schedule": 21600.0,
-            "options": {"queue": "maintenance"},
-        },
-        "enforce-retention-policies": {
-            "task": "enforce_retention_policies",
-            "schedule": 86400.0,
-            "options": {"queue": "compliance"},
-        },
-        "enforce-data-anonymization": {
-            "task": "enforce_data_anonymization",
-            "schedule": 86400.0,
-            "options": {"queue": "compliance"},
-        },
-        "purge-expired-data": {
-            "task": "purge_expired_data",
-            "schedule": 604800.0,
-            "options": {"queue": "compliance"},
-        },
-    },
+    beat_schedule=beat_schedule,
 )
 
 
@@ -830,7 +839,6 @@ def generate_report_task(
     Returns:
         Dict[str, Any]: Metadata about the generated report file.
     """
-    from db.session import db_session
     from db.models.reports import Report
 
     # Update status to processing in DB
@@ -864,13 +872,13 @@ def generate_report_task(
 
     try:
         # Mark task as started in DB
-        db = next(get_db())
-        update_report_status(
-            db,
-            report_id,
-            status="processing",
-            started_at=datetime.utcnow()
-        )
+        with db_session() as db:
+            update_report_status(
+                db,
+                report_id,
+                status="processing",
+                started_at=datetime.utcnow(),
+            )
         
         # Step 1: Data Aggregation
         self.update_state(
@@ -921,15 +929,15 @@ def generate_report_task(
 
         # Update Report record with completion details
         file_path_str = str(generated.file_path)
-        db = next(get_db())
-        update_report_status(
-            db,
-            report_id,
-            status="completed",
-            file_path=file_path_str,
-            file_size_bytes=generated.file_size_bytes,
-            completed_at=datetime.utcnow()
-        )
+        with db_session() as db:
+            update_report_status(
+                db,
+                report_id,
+                status="completed",
+                file_path=file_path_str,
+                file_size_bytes=generated.file_size_bytes,
+                completed_at=datetime.utcnow(),
+            )
 
         # Prepare the result metadata for the frontend
         result = {
@@ -962,14 +970,14 @@ def generate_report_task(
     except Exception as e:
         # Mark report as failed in DB
         try:
-            db = next(get_db())
-            update_report_status(
-                db,
-                report_id,
-                status="failed",
-                error_message=str(e),
-                completed_at=datetime.utcnow()
-            )
+            with db_session() as db:
+                update_report_status(
+                    db,
+                    report_id,
+                    status="failed",
+                    error_message=str(e),
+                    completed_at=datetime.utcnow(),
+                )
         except Exception as db_err:
             logger.error("Failed to update report status on error", report_id=report_id, db_error=str(db_err))
         
@@ -1389,10 +1397,17 @@ def cleanup_old_tasks() -> Dict[str, str]:
     """
     logger.info("Executing periodic maintenance: cleanup_old_tasks")
 
-    # Implementation logic for backend cleanup
-    # This prevents the Redis backend from growing indefinitely
+    backend = getattr(celery_app, "backend", None)
+    cleanup_fn = getattr(backend, "cleanup", None)
+    backend_name = backend.__class__.__name__ if backend else "unknown"
 
-    return {"status": "completed", "action": "cleanup"}
+    if callable(cleanup_fn):
+        cleanup_fn()
+        logger.info("cleanup_old_tasks_completed", backend=backend_name)
+        return {"status": "completed", "action": "cleanup", "backend": backend_name}
+
+    logger.info("cleanup_old_tasks_noop", backend=backend_name, reason="backend_cleanup_not_supported")
+    return {"status": "noop", "action": "cleanup", "backend": backend_name}
 
 
 @celery_app.task(name="send_deadline_reminders")
@@ -1401,12 +1416,11 @@ def send_deadline_reminders() -> Dict[str, int]:
     Periodic task to check for upcoming legal deadlines and notify users.
     """
     logger.info("Executing periodic task: send_deadline_reminders")
+    from scheduler import check_and_send_reminders
 
-    # 1. Fetch upcoming deadlines from database
-    # 2. Identify users to be notified
-    # 3. Trigger send_notification_task for each user
-
-    return {"status": "completed", "reminders_sent": 0}
+    reminders_sent = check_and_send_reminders() or 0
+    logger.info("send_deadline_reminders_completed", reminders_sent=reminders_sent)
+    return {"status": "completed", "reminders_sent": int(reminders_sent)}
 
 
 @celery_app.task(name="cleanup_revoked_tokens", bind=True, max_retries=3)

@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.timeline_payloads import TimelineEventPayload
+from core.timeline_payloads import TimelineEventPayload, TimelineSubscribedPayload
 from db.base import Base
 from db.models.cases import Case, CaseStatus
 from db.session import get_db
@@ -108,12 +108,15 @@ def test_case_timeline_ws_subscribed_and_forwards_event(mock_verify_token, clien
     ).__enter__()
     try:
         first = websocket.receive_json()
-        assert first["type"] == "subscribed"
-        assert first["case_id"] == case_id
+        subscribed = TimelineSubscribedPayload.model_validate(first)
+        assert subscribed.schema_version == TimelineEventPayload.CURRENT_SCHEMA_VERSION
+        assert subscribed.type == "subscribed"
+        assert subscribed.case_id == case_id
 
         # Publish directly into the realtime bus. This avoids DB/session coupling in the websocket test.
         from services.timeline_realtime import timeline_realtime_bus
         timeline_payload = TimelineEventPayload(
+            schema_version=TimelineEventPayload.CURRENT_SCHEMA_VERSION,
             type="timeline_event",
             case_id=case_id,
             event_type="deadline_created",
@@ -132,6 +135,7 @@ def test_case_timeline_ws_subscribed_and_forwards_event(mock_verify_token, clien
         msg = websocket.receive_json()
         validated = TimelineEventPayload.model_validate(msg)
         assert set(validated.model_dump(mode="json")) == {
+            "schema_version",
             "type",
             "case_id",
             "event_type",
@@ -140,6 +144,7 @@ def test_case_timeline_ws_subscribed_and_forwards_event(mock_verify_token, clien
             "metadata",
             "event_id",
         }
+        assert validated.schema_version == TimelineEventPayload.CURRENT_SCHEMA_VERSION
         assert validated.type == "timeline_event"
         assert validated.case_id == case_id
         assert validated.event_type == "deadline_created"
@@ -190,13 +195,14 @@ def test_case_timeline_ws_isolates_users_by_case_room(mock_verify_token, client,
     ).__enter__()
 
     try:
-        assert websocket_a.receive_json() == {"type": "subscribed", "case_id": case_a.id}
-        assert websocket_b.receive_json() == {"type": "subscribed", "case_id": case_b.id}
+        assert TimelineSubscribedPayload.model_validate(websocket_a.receive_json()) == TimelineSubscribedPayload(case_id=case_a.id)
+        assert TimelineSubscribedPayload.model_validate(websocket_b.receive_json()) == TimelineSubscribedPayload(case_id=case_b.id)
 
         async def publish(case_id: int, event_id: int, description: str):
             await timeline_realtime_bus.publish(
                 case_id=case_id,
                 payload=TimelineEventPayload(
+                    schema_version=TimelineEventPayload.CURRENT_SCHEMA_VERSION,
                     type="timeline_event",
                     case_id=case_id,
                     event_type="deadline_created",

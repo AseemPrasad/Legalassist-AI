@@ -110,7 +110,11 @@ def _request_principal(request: Request) -> str:
 
 
 def _idempotency_exempt_path(path: str) -> bool:
-    return path in SKIP_PATHS or path in {"/openapi.json", "/docs", "/redoc"}
+    return (
+        path in SKIP_PATHS
+        or path in {"/openapi.json", "/docs", "/redoc"}
+        or path.startswith("/api/v1/webhooks/")
+    )
 
 
 def _response_headers_for_cache(response: Response) -> dict:
