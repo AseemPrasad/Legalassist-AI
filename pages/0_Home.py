@@ -8,7 +8,6 @@ CHANGE: build_judgment_result_text now returns (plain_text, structured_dict).
 
 import streamlit as st
 import logging
-
 import routes
 import sys
 import os
@@ -41,6 +40,7 @@ from core.app_utils import (
     safe_llm_call,
     generate_legal_draft,
     export_draft_to_pdf,
+    parse_llm_json,
 )
 
 from core.multimodal_processor import MultiModalProcessor
@@ -223,16 +223,35 @@ def render_page():
                         if retry_summary and len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
                             summary = retry_summary
 
-                    if not summary:
-                        st.error(ui["empty_summary"])
-                    else:
-                        remedies = {}
+                        if not summary:
+                            st.error(ui["empty_summary"])
+                        else:
+                            # 1. Parse and UI Confidence
+                            summary_data = parse_llm_json(summary)
+                            summary = summary_data.get("summary", summary)
+                            
+                            st.markdown("### 🔍 Confidence & Transparency")
+                            score = summary_data.get("confidence_score", 0.5)
+                            st.progress(score, text=f"Confidence: {int(score*100)}%")
+                            
+                            with st.expander("AI Explanation"):
+                                st.write(summary_data.get("explanation", "No explanation provided."))
+                            
+                            if summary_data.get("key_entities"):
+                                st.write("Entities:", ", ".join(summary_data["key_entities"]))
 
-                        with st.spinner(ui["remedies_spinner"]):
-                            try:
-                                remedies = get_remedies_advice(raw_text, language, client) or {}
-                            except Exception as e:
-                                st.error(f"{ui['remedies_error']}: {str(e)}")
+                            # 2. Get Remedies
+                            remedies = {}
+                            with st.spinner(ui["remedies_spinner"]):
+                                try:
+                                    remedies = get_remedies_advice(raw_text, language, client) or {}
+                                except Exception as e:
+                                    st.error(f"{ui['remedies_error']}: {str(e)}")
+
+                            # 3. Build Result and Render (ONLY ONCE)
+                            result = build_judgment_result_text(summary, remedies, ui)
+                            render_shareable_result_box(result, ui)
+                            st.success(ui["summary_success"])
 
                         # build_judgment_result_text now returns (plain_text, structured_dict)
                         result = build_judgment_result_text(summary, remedies, ui)
