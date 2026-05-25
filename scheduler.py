@@ -117,6 +117,15 @@ _notification_service_instance: Optional[NotificationService] = None
 _instance_id = str(uuid.uuid4())[:8]
 
 
+def _is_truthy_env(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+ENABLE_MAINTENANCE_TASKS = _is_truthy_env("ENABLE_MAINTENANCE_TASKS")
+MAINTENANCE_TASK_COMMAND = os.getenv("MAINTENANCE_TASK_COMMAND", "").strip()
+
+
 class _LazyNotificationService:
     """Lazy proxy that initializes NotificationService on first attribute access."""
 
@@ -204,6 +213,22 @@ def _shutdown_scheduler_instance(scheduler, *, wait: bool = True):
             logger.info("scheduler_shutdown_complete")
     except Exception as e:
         logger.error("scheduler_shutdown_failed", error=sanitize_log_text(str(e)))
+
+
+def _send_deadline_reminders_safe(db, deadline, user_preference, days_left):
+    """Send reminders for one deadline and isolate notification service failures."""
+    try:
+        return notification_service.send_reminders(db, deadline, user_preference, days_left)
+    except Exception as exc:
+        logger.error(
+            "scheduler_notification_dispatch_failed",
+            deadline_id=getattr(deadline, "id", None),
+            user_id=getattr(deadline, "user_id", None),
+            days_left=days_left,
+            error=sanitize_log_text(str(exc)),
+            exc_info=True,
+        )
+        return []
 
 
 # Reminder time logic moved to notifications.reminder_engine.build_reminder_jobs
@@ -320,7 +345,7 @@ def check_and_send_reminders():
                 logger.info("scheduler_processing_deadline", case_id=deadline.case_id, days_left=days_left)
 
                 # Send reminders using the notification service
-                results = notification_service.send_reminders(db, deadline, user_preference, days_left)
+                results = _send_deadline_reminders_safe(db, deadline, user_preference, days_left)
 
                 for res in results:
                     if res.success:
@@ -344,6 +369,8 @@ def check_and_send_reminders():
             logger.error("scheduler_reminder_job_failed", error=sanitize_log_text(str(e)), exc_info=True)
         finally:
             db.close()
+
+    return sent_count
 
 
 def recompute_due_knowledge_invalidations():
@@ -460,6 +487,9 @@ def run_system_maintenance_task():
     
     A scheduled job that performs OS-level maintenance (e.g., log rotation,
     temporary file cleanup, database vacuuming) using a subprocess.
+
+    This job is opt-in. Set ENABLE_MAINTENANCE_TASKS=1 and provide a real
+    MAINTENANCE_TASK_COMMAND to execute a configured script or command.
     
     This function utilizes the `managed_subprocess` context manager to ensure
     that even if the script hangs or crashes, the child process is reaped
@@ -471,11 +501,16 @@ def run_system_maintenance_task():
             logger.debug("scheduler_maintenance_lock_skipped")
             return
 
+        if not ENABLE_MAINTENANCE_TASKS:
+            logger.info("scheduler_maintenance_disabled")
+            return
+
+        if not MAINTENANCE_TASK_COMMAND:
+            logger.warning("scheduler_maintenance_command_missing")
+            return
+
         logger.info("scheduler_maintenance_started")
-        
-        # Example maintenance command (could be a custom bash script or system tool)
-        # We'll use a python one-liner for illustration that sleeps to simulate work.
-        command = ["python", "-c", "import time; print('Maintenance started'); time.sleep(2); print('Maintenance complete')"]
+        command = shlex.split(MAINTENANCE_TASK_COMMAND)
         
         try:
             with managed_subprocess(command) as process:
@@ -600,13 +635,16 @@ def setup_scheduler(scheduler_class):
             replace_existing=True,
         )
 
-        scheduler.add_job(
-            run_system_maintenance_task,
-            trigger=CronTrigger(hour=3, minute=0),  # 3 AM every day
-            id="system_maintenance_job",
-            name="Daily OS-level System Maintenance",
-            replace_existing=True
-        )
+        if ENABLE_MAINTENANCE_TASKS:
+            scheduler.add_job(
+                run_system_maintenance_task,
+                trigger=CronTrigger(hour=3, minute=0),  # 3 AM every day
+                id="system_maintenance_job",
+                name="Configured System Maintenance",
+                replace_existing=True,
+            )
+        else:
+            logger.info("scheduler_maintenance_job_disabled")
         
         logger.info("scheduler_configured", scheduler_class=scheduler_class.__name__, job_store="sqlalchemy")
         
@@ -766,7 +804,7 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
                 continue
 
             # Send reminders
-            results = notification_service.send_reminders(db, deadline, candidate.user_preference, days_left)
+            results = _send_deadline_reminders_safe(db, deadline, candidate.user_preference, days_left)
             sent_count += len([r for r in results if r.success])
 
         logger.info("scheduler_sync_reminder_check_completed", reminders_sent=sent_count)
