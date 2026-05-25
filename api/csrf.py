@@ -66,9 +66,7 @@ def _get_csrf_secret() -> str:
     secret = os.getenv("CSRF_SECRET")
     if not secret:
         secret = os.getenv("SECRET_KEY", "")
-        if secret:
-            secret = secret[:32]
-        else:
+        if not secret or len(secret) < 16:
             secret = secrets.token_hex(32)
     _CSRF_SECRET_CACHE = secret
     return secret
