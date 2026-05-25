@@ -5,7 +5,7 @@ if os.path.exists(path):
 
 content = """# LegalAssist AI - Streamlit Secrets Configuration
 
-OPENROUTER_API_KEY = "test_key"
+OPENROUTER_API_KEY = ""
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 
