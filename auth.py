@@ -333,9 +333,13 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
             )
             return False, GENERIC_OTP_FAILURE, None
 
-        # OTP is valid - reset failed attempts and mark as used
+        # OTP is valid - reset failed attempts and atomically mark as used
         reset_otp_failed_attempts(db, otp_record.id)
-        mark_otp_as_used(db, otp_record.id)
+        marked = mark_otp_as_used(db, otp_record.id)
+        if not marked:
+            # Another process may have consumed this OTP concurrently.
+            logger.warning("otp_replay_detected", recipient=mask_email(email))
+            return False, GENERIC_OTP_FAILURE, None
 
         # Get or create user
         user = get_user_by_email(db, email)

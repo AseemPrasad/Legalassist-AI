@@ -190,6 +190,9 @@ def revoke_jwt_token(token: str) -> bool:
         with SessionLocal() as db:
             if not is_token_revoked(db, jti):
                 revoke_token(db, jti, expires_at)
+                # Ensure in-memory cache marks this JTI as revoked immediately
+                now = datetime.now(timezone.utc).timestamp()
+                _REVOCATION_CACHE[jti] = (True, now)
         return True
     except Exception as exc:
         logger.error("revoke_jwt_token_failed", error=str(exc))
