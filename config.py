@@ -214,7 +214,19 @@ class Config:
 
     @classmethod
     def is_development(cls):
-        return cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
+        env_dev = cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
+        if not env_dev:
+            return False
+        # Secondary safety check: flag if BASE_URL looks like production
+        base = str(cls.BASE_URL or "").lower()
+        if not any(local in base for local in ("localhost", "127.0.0.1", "0.0.0.0", "::1")):
+            import logging
+            logging.getLogger(__name__).warning(
+                "is_development()=True but BASE_URL=%s suggests a non-local deployment. "
+                "Review APP_ENV / DEBUG / TESTING settings.",
+                base,
+            )
+        return env_dev
 
     @classmethod
     def is_production(cls):
