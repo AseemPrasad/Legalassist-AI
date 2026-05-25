@@ -38,6 +38,7 @@ class TimelineService:
         # Fire-and-forget: timeline_realtime_bus is in-memory, so async scheduling
         # keeps DB write latency low.
         payload = TimelineEventPayload(
+            schema_version=TimelineEventPayload.CURRENT_SCHEMA_VERSION,
             type="timeline_event",
             case_id=case_id,
             event_type=event.event_type,

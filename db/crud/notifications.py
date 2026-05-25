@@ -69,8 +69,45 @@ def update_notification_log_by_keys(
         log.error_message = error_message
     if message_preview is not None:
         log.message_preview = message_preview
-    if status != NotificationStatus.PENDING:
-        log.sent_at = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)
+    if status == NotificationStatus.SENT:
+        log.sent_at = now
+    elif status == NotificationStatus.DELIVERED:
+        log.delivered_at = now
+    elif status == NotificationStatus.FAILED:
+        log.failed_at = now
+    elif status != NotificationStatus.PENDING:
+        log.sent_at = now
+    db.commit()
+    db.refresh(log)
+    return log
+
+
+def update_notification_log_by_message_id(
+    db: Session,
+    message_id: str,
+    status: NotificationStatus,
+    error_message: Optional[str] = None,
+    message_preview: Optional[str] = None,
+) -> Optional[NotificationLog]:
+    log = db.query(NotificationLog).filter(NotificationLog.message_id == message_id).first()
+    if not log:
+        return None
+
+    log.status = status
+    if error_message is not None:
+        log.error_message = error_message
+    if message_preview is not None:
+        log.message_preview = message_preview
+
+    now = dt.datetime.now(dt.timezone.utc)
+    if status == NotificationStatus.DELIVERED:
+        log.delivered_at = now
+    elif status == NotificationStatus.FAILED:
+        log.failed_at = now
+    elif status == NotificationStatus.SENT:
+        log.sent_at = now
+
     db.commit()
     db.refresh(log)
     return log
@@ -143,7 +180,11 @@ def has_notification_been_sent(
         NotificationLog.deadline_id == deadline_id,
         NotificationLog.days_before == days_before,
         NotificationLog.channel == channel,
-        NotificationLog.status.in_([NotificationStatus.SENT, NotificationStatus.OPENED]),
+        NotificationLog.status.in_([
+            NotificationStatus.SENT,
+            NotificationStatus.DELIVERED,
+            NotificationStatus.OPENED,
+        ]),
     ).first() is not None
 
 
@@ -169,7 +210,9 @@ def log_notification(
         message_id=message_id,
         error_message=error_message,
         message_preview=message_preview,
-        sent_at=dt.datetime.now(dt.timezone.utc) if status != NotificationStatus.PENDING else None,
+        sent_at=dt.datetime.now(dt.timezone.utc) if status == NotificationStatus.SENT else None,
+        delivered_at=dt.datetime.now(dt.timezone.utc) if status == NotificationStatus.DELIVERED else None,
+        failed_at=dt.datetime.now(dt.timezone.utc) if status == NotificationStatus.FAILED else None,
     )
     db.add(log)
     db.flush()

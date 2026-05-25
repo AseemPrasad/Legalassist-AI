@@ -146,6 +146,26 @@ def test_list_cases_success(client, test_db):
             assert c["summary"] == ""
 
 
+def test_list_cases_trailing_slash_schema(client, test_db):
+    _seed_cases(test_db)
+
+    response = client.get("/api/v1/cases/")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert set(payload) == {"total", "limit", "offset", "cases"}
+    assert isinstance(payload["cases"], list)
+    assert all(set(case_payload) == {
+        "case_id",
+        "case_number",
+        "title",
+        "parties",
+        "jurisdiction",
+        "status",
+        "summary",
+    } for case_payload in payload["cases"])
+
+
 def test_get_case_details_success(client, test_db):
     case_one, _, _ = _seed_cases(test_db)
     
