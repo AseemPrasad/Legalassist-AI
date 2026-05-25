@@ -69,6 +69,7 @@ class APISettings(BaseSettings):
     JWT_ISSUER: str = os.getenv("JWT_ISSUER", "legalassist.ai")
     JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "legalassist-users")
     API_KEY_HEADER: str = "X-API-Key"
+    CSRF_SECRET: str = ""
     
     @field_validator("JWT_SECRET_KEY")
     @classmethod
@@ -140,6 +141,9 @@ class APISettings(BaseSettings):
             canonical_prev = os.getenv("JWT_SECRET_PREVIOUS") or os.getenv("JWT_SECRET_KEY_PREVIOUS", "")
             if canonical_prev:
                 data["JWT_SECRET_KEY_PREVIOUS"] = canonical_prev
+        # Resolve CSRF_SECRET from env (canonical config source for CSRF signing)
+        if not data.get("CSRF_SECRET"):
+            data["CSRF_SECRET"] = os.getenv("CSRF_SECRET", "")
         # Lazily resolve Redis & Celery URLs from env (fail only when instantiated)
         if not data.get("REDIS_URL"):
             data["REDIS_URL"] = os.getenv("REDIS_URL", "")
@@ -189,6 +193,17 @@ class APISettings(BaseSettings):
                 "CORS configured with wildcard origin '*' and allow_credentials=True. "
                 "This allows any website to make credentialed requests. "
                 "Set explicit origins in production."
+            )
+            if is_prod:
+                raise RuntimeError(msg)
+            _log.warning(msg)
+
+        csrf_secret = self.CSRF_SECRET
+        if not csrf_secret or len(csrf_secret) < 16:
+            msg = (
+                "CSRF_SECRET environment variable must be set to a secure value "
+                "(minimum 16 characters). Without it, CSRF tokens are per-worker "
+                "and cross-worker requests will fail."
             )
             if is_prod:
                 raise RuntimeError(msg)

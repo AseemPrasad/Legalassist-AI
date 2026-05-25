@@ -143,6 +143,7 @@ class Config:
     OTP_MAX_ATTEMPTS = _get_int_env("OTP_MAX_ATTEMPTS", 3)
     OTP_REQUEST_RATE_LIMIT_MAX = _get_int_env("OTP_REQUEST_RATE_LIMIT_MAX", 5)
     OTP_REQUEST_RATE_LIMIT_HOURS = _get_int_env("OTP_REQUEST_RATE_LIMIT_HOURS", 1)
+    CSRF_SECRET = _get_val("CSRF_SECRET", "")
     
     @classmethod
     def get_jwt_secret(cls):
@@ -212,6 +213,14 @@ class Config:
             if cls.REQUIRE_HTTPS:
                 if not str(cls.BASE_URL).lower().startswith("https://"):
                     raise RuntimeError("BASE_URL must use https:// in production")
+
+            csrf_secret = cls.CSRF_SECRET
+            if not csrf_secret or len(csrf_secret) < 16:
+                raise RuntimeError(
+                    "CSRF_SECRET environment variable must be set to a secure value "
+                    "(minimum 16 characters) in production. "
+                    "Without it, CSRF tokens are per-worker and cross-worker requests will fail."
+                )
                 if cls.API_BASE_URL and not str(cls.API_BASE_URL).lower().startswith("https://"):
                     raise RuntimeError("API_BASE_URL must use https:// in production")
 

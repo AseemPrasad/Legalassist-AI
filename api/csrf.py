@@ -11,6 +11,7 @@ Provides protection against CSRF attacks by:
 
 import hashlib
 import hmac
+import os
 import secrets
 import structlog
 from typing import Optional, Set
@@ -57,11 +58,20 @@ def _get_csrf_secret() -> str:
     global _CSRF_SECRET_CACHE
     if _CSRF_SECRET_CACHE is not None:
         return _CSRF_SECRET_CACHE
-    import os
-    secret = os.getenv("CSRF_SECRET")
-    if not secret:
-        secret = os.getenv("SECRET_KEY", "")
+
+    from api.config import get_settings
+    settings = get_settings()
+    secret = settings.CSRF_SECRET
+    if not secret or len(secret) < 16:
+        secret = os.environ.get("SECRET_KEY", "")
         if not secret or len(secret) < 16:
+            is_prod = settings.ENVIRONMENT in ("production", "prod", "live")
+            if is_prod:
+                raise RuntimeError(
+                    "CSRF_SECRET environment variable must be set in production. "
+                    "Auto-generation is not allowed."
+                )
+            logger.warning("csrf_secret_auto_generated", message="CSRF_SECRET not set. Auto-generated per-process secret — cross-worker CSRF will fail in multi-worker deployments.")
             secret = secrets.token_hex(32)
     _CSRF_SECRET_CACHE = secret
     return secret
