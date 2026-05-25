@@ -30,6 +30,11 @@ ACCESS_TOKEN_COOKIE_NAME = "access_token"
 CSRF_SESSION_PREFIX = "csrf_session:"
 
 
+class CSRFError(StructuredAPIError):
+    """CSRF validation error with standardized error response."""
+    pass
+
+
 def generate_csrf_token(user_id: int, session_id: str) -> str:
     secret = _get_csrf_secret()
     message = f"{user_id}:{session_id}"
@@ -147,6 +152,15 @@ def validate_csrf(
 
     if not hmac.compare_digest(header_token, cookie_token):
         raise StructuredAPIError(status_code=status.HTTP_403_FORBIDDEN, error_code="CSRF_TOKEN_MISMATCH", message="CSRF token mismatch")
+
+
+def validate_csrf_request(
+    request: Request,
+    current_user_id: Optional[int] = None,
+    allowed_hosts: Optional[Set[str]] = None,
+) -> None:
+    """Validate CSRF for a given request. Convenience wrapper around validate_csrf."""
+    return validate_csrf(request, current_user_id=current_user_id, allowed_hosts=allowed_hosts)
 
 
 class CSRFProtectionMiddleware(BaseHTTPMiddleware):

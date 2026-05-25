@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from core.time_serialization import to_utc_iso
 
@@ -27,15 +27,46 @@ def _json_safe_value(value: Any) -> Any:
 class TimelineEventPayload(BaseModel):
     """Validated realtime payload for a single timeline event."""
 
-    model_config = ConfigDict(extra="forbid")
+    CURRENT_SCHEMA_VERSION = 2
+    LEGACY_SCHEMA_VERSION = 1
 
-    type: Literal["timeline_event"]
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: int = Field(default=LEGACY_SCHEMA_VERSION, ge=1)
+    type: Literal["timeline_event"] = "timeline_event"
     case_id: int
     event_type: str
-    description: str
+    description: str = ""
     timestamp: datetime
     metadata: Dict[str, Any] = Field(default_factory=dict)
     event_id: int
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_wire_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        normalized = dict(value)
+        if "schema_version" not in normalized:
+            normalized["schema_version"] = normalized.pop("schemaVersion", normalized.pop("version", cls.LEGACY_SCHEMA_VERSION))
+
+        alias_map = {
+            "caseId": "case_id",
+            "eventType": "event_type",
+            "eventId": "event_id",
+            "eventDate": "timestamp",
+            "event_date": "timestamp",
+            "messagePreview": "message_preview",
+        }
+        for old_key, new_key in alias_map.items():
+            if old_key in normalized and new_key not in normalized:
+                normalized[new_key] = normalized.pop(old_key)
+
+        if normalized.get("metadata") is None:
+            normalized["metadata"] = {}
+
+        return normalized
 
     @field_validator("timestamp")
     @classmethod
@@ -47,3 +78,13 @@ class TimelineEventPayload(BaseModel):
     @field_serializer("metadata")
     def serialize_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         return _json_safe_value(metadata)
+
+
+class TimelineSubscribedPayload(BaseModel):
+    """Validated realtime payload for the initial websocket subscription message."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: int = Field(default=TimelineEventPayload.CURRENT_SCHEMA_VERSION, ge=1)
+    type: Literal["subscribed"] = "subscribed"
+    case_id: int
