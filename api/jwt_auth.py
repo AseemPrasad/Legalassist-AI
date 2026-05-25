@@ -32,19 +32,19 @@ class InvalidTokenError(AuthError):
 
 settings = get_settings()
 
-_REVOCATION_CACHE: dict[str, bool] = {}
+_REVOCATION_CACHE: dict[str, tuple[bool, float]] = {}
 _REVOCATION_CACHE_TTL: int = 300  # 5 minutes
 
 
 def _is_token_revoked_cached(jti: str) -> bool:
     now = datetime.now(timezone.utc).timestamp()
-    from database import SessionLocal, is_token_revoked
     cached = _REVOCATION_CACHE.get(jti)
-    if cached is not None:
-        return cached
+    if cached is not None and (now - cached[1]) < _REVOCATION_CACHE_TTL:
+        return cached[0]
+    from database import SessionLocal, is_token_revoked
     with SessionLocal() as db:
         revoked = is_token_revoked(db, jti)
-        _REVOCATION_CACHE[jti] = revoked
+        _REVOCATION_CACHE[jti] = (revoked, now)
     return revoked
 
 
