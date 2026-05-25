@@ -23,6 +23,7 @@ from api.validation import (
     validate_file_upload_streaming,
     ValidationConfig,
 )
+from api.job_registry import register_job_owner
 import structlog
 
 router = APIRouter(prefix="/api/v1/analyze", tags=["document-analysis"])
@@ -90,6 +91,8 @@ async def analyze_document(
         file_url=request.file_url,
         document_type=request.document_type,
     )
+    
+    register_job_owner(task.id, current_user.user_id)
     
     return AnalysisJobResponse(
         job_id=task.id,
@@ -265,6 +268,8 @@ async def upload_document_file(
             file_bytes=file_bytes,
             document_type=document_type,
         )
+        
+        register_job_owner(task.id, current_user.user_id)
         
         return AnalysisJobResponse(
             job_id=task.id,

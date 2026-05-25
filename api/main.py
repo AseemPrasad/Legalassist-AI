@@ -349,6 +349,7 @@ if settings.ENABLE_WEBSOCKET:
     from fastapi import WebSocket, WebSocketDisconnect
     from celery_app import TaskStatus
     from api.auth import AuthError, TokenExpiredError, InvalidTokenError
+    from api.job_registry import get_job_owner
     
     @app.websocket("/ws/progress/{job_id}")
     async def websocket_progress_endpoint(
@@ -397,6 +398,11 @@ if settings.ENABLE_WEBSOCKET:
                 )
             except RateLimitExceeded as exc:
                 await websocket.close(code=1013, reason=exc.detail["message"])
+                return
+
+            owner_id = get_job_owner(job_id)
+            if owner_id is not None and owner_id != int(user_id):
+                await websocket.close(code=4003, reason="Job not found")
                 return
         except (TokenExpiredError, InvalidTokenError, AuthError):
             await websocket.close(code=4001, reason="Invalid or expired token")
