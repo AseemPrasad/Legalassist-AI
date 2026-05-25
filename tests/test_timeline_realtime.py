@@ -22,6 +22,34 @@ def test_unsubscribe_removes_empty_channel():
     asyncio.run(scenario())
 
 
+def test_unsubscribe_prunes_closed_subscribers():
+    bus = TimelineRealtimeBus()
+
+    class ClosedLoop:
+        def is_closed(self):
+            return True
+
+    async def scenario() -> None:
+        queue = await bus.subscribe(42)
+        channel = await bus._get_or_create_channel(42)
+
+        async with channel.lock:
+            channel.connections.add(
+                _SubscriberConnection(
+                    queue=asyncio.Queue(maxsize=1),
+                    loop=ClosedLoop(),
+                    thread_id=999,
+                )
+            )
+
+        await bus.unsubscribe(42, queue)
+
+        assert 42 not in bus._channels
+        assert bus.dropped_connections_total == 2
+
+    asyncio.run(scenario())
+
+
 def test_close_clears_all_channels():
     bus = TimelineRealtimeBus()
 
@@ -266,9 +294,11 @@ def test_publish_prunes_closed_subscribers_before_fanout():
             payload = await queue.get()
             validated = TimelineEventPayload.model_validate(payload)
             assert validated.case_id == 7
-            assert len(channel.connections) == 2
-            assert mock_warning.call_args.kwargs["dead_subscribers"] == 1
-            assert mock_warning.call_args.kwargs["remaining_subscribers"] == 2
+            assert len(channel.connections) == 1
+            assert bus.dropped_connections_total == 1
+            assert channel.dropped_connections == 1
+            assert mock_warning.call_args.kwargs["dropped_connections"] == 1
+            assert mock_warning.call_args.kwargs["reason"] == "publish_prune"
 
         dead_loop.close()
 
