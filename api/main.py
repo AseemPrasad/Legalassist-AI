@@ -176,6 +176,13 @@ def create_app() -> FastAPI:
     async def startup_event():
         """Initialize on startup"""
         initialize_observability_for_environment()
+        # Attempt to instrument FastAPI with OpenTelemetry (if available)
+        try:
+            from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+            FastAPIInstrumentor().instrument_app(app)
+            logger.info("fastapi_instrumented")
+        except Exception:
+            logger.debug("fastapi_instrumentation_unavailable_or_failed")
         logger.info(
             "API Starting",
             version=settings.API_VERSION,
