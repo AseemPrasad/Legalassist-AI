@@ -562,7 +562,7 @@ async def get_case_note_history_endpoint(
 
 
 @router.get(
-    "",
+    "/",
     summary="List user's cases"
 )
 async def list_cases(

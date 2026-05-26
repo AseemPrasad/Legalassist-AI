@@ -5,6 +5,7 @@ Add to app.py and other entry points
 
 import os
 import logging
+from datetime import datetime, timezone
 from observability.instrumentation import (
     initialize_observability,
     log,

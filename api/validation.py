@@ -8,7 +8,6 @@ This module provides comprehensive validation for:
 - Form data validation
 """
 
-import base64
 import ipaddress
 import os
 import socket

@@ -69,7 +69,8 @@ def _require_owned_deadline(deadline_id: str, current_user: CurrentUser, db: Ses
 )
 async def get_upcoming_deadlines(
     days: int = 30,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> UpcomingDeadlinesResponse:
     """
     Get upcoming deadlines for user
@@ -84,53 +85,45 @@ async def get_upcoming_deadlines(
         user_id=current_user.user_id,
         days=days
     )
-    
-    # Mock deadline data
     now = datetime.now(timezone.utc)
-    deadlines = [
-        DeadlineResponse(
-            deadline_id="dl_001",
-            user_id=current_user.user_id,
-            case_id="case_001",
-            title="Motion Response Due",
-            description="Response to plaintiff's motion for summary judgment",
-            due_date=now + timedelta(days=3),
-            days_until_due=3,
-            priority="critical",
-            status="pending",
-            reminder_enabled=True,
-            reminder_days=7,
-            created_at=now
-        ),
-        DeadlineResponse(
-            deadline_id="dl_002",
-            user_id=current_user.user_id,
-            case_id="case_002",
-            title="Filing Deadline",
-            description="Appeal filing deadline",
-            due_date=now + timedelta(days=10),
-            days_until_due=10,
-            priority="high",
-            status="pending",
-            reminder_enabled=True,
-            reminder_days=7,
-            created_at=now
-        ),
-        DeadlineResponse(
-            deadline_id="dl_003",
-            user_id=current_user.user_id,
-            case_id="case_003",
-            title="Document Production",
-            description="Produce documents per discovery order",
-            due_date=now + timedelta(days=21),
-            days_until_due=21,
-            priority="medium",
-            status="pending",
-            reminder_enabled=True,
-            reminder_days=7,
-            created_at=now
-        ),
-    ]
+    target_date = (now + timedelta(days=days)).replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    deadline_rows = (
+        db.query(CaseDeadline, Case)
+        .join(Case, Case.id == CaseDeadline.case_id)
+        .filter(
+            CaseDeadline.user_id == current_user.user_id,
+            CaseDeadline.is_completed.is_(False),
+            CaseDeadline.deadline_date > now,
+            CaseDeadline.deadline_date <= target_date,
+        )
+        .order_by(CaseDeadline.deadline_date.asc())
+        .all()
+    )
+
+    deadlines = []
+    for deadline, case in deadline_rows:
+        due_date = deadline.deadline_date
+        if due_date is not None and due_date.tzinfo is None:
+            due_date = due_date.replace(tzinfo=timezone.utc)
+
+        days_until_due = deadline.days_until_deadline()
+        deadlines.append(
+            DeadlineResponse(
+                deadline_id=str(deadline.id),
+                user_id=str(deadline.user_id),
+                case_id=str(deadline.case_id),
+                title=case.title or case.case_number,
+                description=deadline.description or "",
+                due_date=due_date or now,
+                days_until_due=days_until_due,
+                priority=_deadline_priority(days_until_due),
+                status="pending",
+                reminder_enabled=True,
+                reminder_days=7,
+                created_at=deadline.created_at,
+            )
+        )
     
     critical = sum(1 for d in deadlines if d.priority == "critical")
     high = sum(1 for d in deadlines if d.priority == "high")

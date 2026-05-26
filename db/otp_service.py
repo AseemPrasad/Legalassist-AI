@@ -141,12 +141,21 @@ def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
     ).order_by(OTPVerification.created_at.desc()).first()
 
 
-def mark_otp_as_used(db: Session, otp_id: int) -> None:
-    """Mark an OTP as used"""
-    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
-    if otp:
-        otp.is_used = True
+def mark_otp_as_used(db: Session, otp_id: int) -> bool:
+    """Mark an OTP as used atomically.
+
+    Performs an UPDATE that only succeeds if the OTP is not already used.
+    Returns True when the row was updated (OTP marked used), False otherwise.
+    """
+    updated = db.query(OTPVerification).filter(
+        OTPVerification.id == otp_id,
+        OTPVerification.is_used == False,
+    ).update({"is_used": True})
+    if updated:
         db.commit()
+        return True
+    # nothing changed (already used or missing)
+    return False
 
 
 def cleanup_expired_otps(db: Session) -> int:

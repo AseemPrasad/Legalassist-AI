@@ -133,6 +133,14 @@ def revoke_jwt_token(token: str) -> bool:
 
             if not is_token_revoked(db, jti):
                 revoke_token(db, jti, expires_at)
+                # Mark in-memory revocation cache if jwt_auth cache is available
+                try:
+                    import api.jwt_auth as _jwt_mod
+                    now = datetime.now(timezone.utc).timestamp()
+                    _jwt_mod._REVOCATION_CACHE[jti] = (True, now)
+                except Exception:
+                    # non-fatal; cache may not be present in some test envs
+                    pass
         return True
     except Exception:
         return False

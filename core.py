@@ -2,9 +2,11 @@ import io
 from pypdf import PdfReader
 import pdfplumber
 import re
+import json
 import logging
 from pathlib import Path
 from typing import Dict, Optional, List, Union, Any
+from datetime import datetime
 from config import Config
 
 # Custom Exception Imports
@@ -396,6 +398,20 @@ def compress_text(text: str, limit: int = 6000) -> str:
 
     return head.strip() + "\n\n... [TRUNCATED] ...\n\n" + tail.strip()
 
+
+def parse_llm_json(raw_text: str) -> Dict[str, Any]:
+    try:
+        # Strip markdown code blocks if the AI adds them
+        clean_json = raw_text.replace("```json", "").replace("
+```", "").strip()
+        return json.loads(clean_json)
+    except:
+        return {
+            "summary": raw_text, 
+            "confidence_score": 0.3, 
+            "explanation": "Could not parse metadata. Please verify details manually."
+        }
+
 # -----------------------------
 # Detect English leakage
 # -----------------------------
@@ -410,25 +426,17 @@ def english_leakage_detected(output_text: str, threshold: int = 5) -> bool:
 # -----------------------------
 def build_summary_prompt(safe_text: str, language: str) -> str:
     return f"""
-You are LegalEase AI — an expert judicial-simplification and translation engine.
-
-MISSION:
-Convert the judgment text into a simple, citizen-friendly summary.
-
-INSTRUCTIONS:
-1. Extract ONLY the final judgment outcome.
-2. Remove all legal jargon and case history.
-3. Produce AT LEAST 5 bullet points. More than 5 is allowed if needed.
-4. Write ONLY in {language}. ZERO English allowed if language ≠ English.
-5. Each bullet must be 1–2 very short sentences.
-6. Put every bullet point on its own new line.
-7. No extra headings. No disclaimers.
+You are LegalEase AI. Convert the judgment text into a simple summary.
+OUTPUT FORMAT: You MUST return a valid JSON object ONLY. Do not output anything else.
+{{
+  "summary": "5+ bullet points in {language}",
+  "key_entities": ["List of extracted entities like Acts, Dates, Names"],
+  "confidence_score": 0.0 to 1.0,
+  "explanation": "Explain why this summary is reliable."
+}}
 
 TEXT TO ANALYZE:
 {safe_text}
-
-OUTPUT REQUIRED:
-- Minimum 5 bullet points in {language} only
 """
 
 def build_retry_prompt(safe_text: str, language: str) -> str:
@@ -681,3 +689,28 @@ def parse_remedies_response(response_text: str) -> Dict[str, Any]:
     remedies.update(_compute_remedies_quality_metadata(remedies, text))
 
     return remedies
+
+from datetime import datetime
+
+def parse_timeline(raw_text: str) -> List[Dict[str, str]]:
+    try:
+        clean_json = raw_text.replace("```json", "").replace("```", "").strip()
+        events = json.loads(clean_json)
+        
+        # Helper to convert "12 Jan 2025" or "2025-01-12" into a sortable object
+        def parse_date(date_str):
+            if not date_str or date_str == 'N/A':
+                return datetime(9999, 12, 31)
+            try:
+                # Add common formats your LLM might output
+                for fmt in ("%Y-%m-%d", "%d %b %Y", "%d %B %Y", "%Y/%m/%d"):
+                    try: return datetime.strptime(date_str, fmt)
+                    except: continue
+                return datetime(9999, 12, 31)
+            except:
+                return datetime(9999, 12, 31)
+
+        return sorted(events, key=lambda x: parse_date(x.get('date')))
+    except Exception as e:
+        LOGGER.error(f"Timeline parsing failed: {e}")
+        return []

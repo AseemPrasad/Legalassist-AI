@@ -16,27 +16,14 @@ if PROJECT_ENV_PATH.exists():
 else:
     load_dotenv()
 
-# Detection of the environment should be done only once at startup.
-try:
-    import streamlit as st
-    # Verify st.secrets is accessible
-    _ = st.secrets
-    _HAS_STREAMLIT = True
-except (ImportError, RuntimeError, AttributeError, FileNotFoundError):
-    st = None
-    _HAS_STREAMLIT = False
-
 def _get_val(key, default=None):
-    """
-    Retrieve configuration value from Streamlit secrets or environment variables.
-    Refactored to avoid redundant dynamic imports.
-    """
-    if _HAS_STREAMLIT and st is not None:
-        try:
-            if key in st.secrets:
-                return st.secrets[key]
-        except Exception:
-            pass
+    # Try Streamlit secrets first (if in a Streamlit context)
+    try:
+        import streamlit as st
+        if key in st.secrets:
+            return st.secrets[key]
+    except (ImportError, RuntimeError, AttributeError, FileNotFoundError):
+        pass
     
     # Fallback to environment variables
     return os.getenv(key, default)
@@ -57,7 +44,6 @@ class Config:
     APP_ENV = _get_val("APP_ENV", _get_val("ENVIRONMENT", "development")).lower()
     DEBUG = _get_bool_env("DEBUG", APP_ENV in ("dev", "development", "local"))
     TESTING = _get_bool_env("TESTING", False)
-    REQUIRE_HTTPS = _get_bool_env("REQUIRE_HTTPS", True)
     
     # --- Logging ---
     LOG_LEVEL = _get_val("LOG_LEVEL", "INFO")
@@ -72,9 +58,6 @@ class Config:
     
     # API Key for OpenRouter. Must be provided for the AI features to work.
     OPENROUTER_API_KEY = _get_val("OPENROUTER_API_KEY", "")
-    
-    # API Key for OpenAI.
-    OPENAI_API_KEY = _get_val("OPENAI_API_KEY", "")
     
     # --- AI Request Performance & Reliability ---
     # The maximum number of tokens allowed for judgment summaries.
@@ -109,22 +92,11 @@ class Config:
     MAX_FILE_SIZE_MB = _get_int_env("MAX_FILE_SIZE_MB", 25)
     WARN_FILE_SIZE_MB = _get_int_env("WARN_FILE_SIZE_MB", 10)
     TEXT_COMPRESSION_LIMIT = _get_int_env("TEXT_COMPRESSION_LIMIT", 6000)
-    MAX_DOCUMENT_TEXT_STORAGE_LIMIT = _get_int_env("MAX_DOCUMENT_TEXT_STORAGE_LIMIT", 50000)
     # --- Attachments ---
     # Directory where uploaded attachments are stored (development)
     ATTACHMENTS_DIR = _get_val("ATTACHMENTS_DIR", str(PROJECT_ROOT / "attachments"))
     # Use randomized filenames to avoid collisions and leaking original names
     ATTACHMENTS_RANDOMIZE_FILENAMES = _get_bool_env("ATTACHMENTS_RANDOMIZE_FILENAMES", True)
-    
-    # --- Export Settings ---
-    # Directory where user data exports are saved (local storage)
-    EXPORTS_DIR = _get_val("EXPORTS_DIR", str(PROJECT_ROOT / ".exports"))
-    # Hours before export files expire and can be deleted
-    EXPORT_FILE_EXPIRY_HOURS = _get_int_env("EXPORT_FILE_EXPIRY_HOURS", 24)
-    # Default privacy redaction profile for anonymized exports and reports
-    DEFAULT_PRIVACY_PROFILE = _get_val("DEFAULT_PRIVACY_PROFILE", "personal_identifiers")
-    # Optional JSON override for privacy profile definitions
-    PRIVACY_REDACTION_PROFILES_JSON = _get_val("PRIVACY_REDACTION_PROFILES_JSON", "")
     
     # --- Database Settings ---
     DATABASE_URL = _get_val("DATABASE_URL", "sqlite:///./legalassist.db")
@@ -135,39 +107,41 @@ class Config:
     
     # --- Authentication (JWT & OTP) ---
     JWT_ALGORITHM = "HS256"
-    JWT_ISSUER = _get_val("JWT_ISSUER", "legalassist.ai")
-    JWT_AUDIENCE = _get_val("JWT_AUDIENCE", "legalassist-users")
     JWT_EXPIRY_HOURS = _get_int_env("JWT_EXPIRY_HOURS", 7 * 24)
-    JWT_SECRET_PREVIOUS = _get_val("JWT_SECRET_PREVIOUS", _get_val("JWT_SECRET_KEY_PREVIOUS", _get_val("JWT_SECRET_OLD", "")))
     OTP_EXPIRY_MINUTES = _get_int_env("OTP_EXPIRY_MINUTES", 10)
     OTP_MAX_ATTEMPTS = _get_int_env("OTP_MAX_ATTEMPTS", 3)
-    OTP_REQUEST_RATE_LIMIT_MAX = _get_int_env("OTP_REQUEST_RATE_LIMIT_MAX", 5)
-    OTP_REQUEST_RATE_LIMIT_HOURS = _get_int_env("OTP_REQUEST_RATE_LIMIT_HOURS", 1)
-    CSRF_SECRET = _get_val("CSRF_SECRET", "")
     
     @classmethod
     def get_jwt_secret(cls):
-        """Return the active JWT signing secret, raising if not configured."""
-        return cls.get_current_jwt_secret()
+        """
+        Resolve JWT secret securely.
+        
+        JWT_SECRET must be provided via environment variable or Streamlit secrets.
+        File-based secrets are no longer supported for security.
+        
+        Raises:
+            RuntimeError: If JWT_SECRET is not configured in environment variables.
+        """
+        # Try environment / streamlit secrets first
+        secret = str(_get_val("JWT_SECRET", "")).strip()
+        if secret:
+            return secret
 
-    @classmethod
-    def get_current_jwt_secret(cls) -> str:
-        """Return the active JWT signing secret, raising if not configured."""
-        secret = str(_get_val("JWT_SECRET", _get_val("JWT_SECRET_KEY", _get_val("JWT_SECRET_CURRENT", "")))).strip()
-        if not secret:
-            raise RuntimeError(
-                "JWT_SECRET is not configured. Set the JWT_SECRET environment variable."
-            )
-        return secret
+        # Try central secret manager (Vault or env fallback)
+        try:
+            from utils.secret_manager import get_secret
+            vault_secret = get_secret("jwt_secret")
+            if vault_secret:
+                return str(vault_secret).strip()
+        except Exception:
+            pass
 
-    @classmethod
-    def get_jwt_secrets(cls) -> list[str]:
-        """Return JWT secrets in verification order: current first, then previous."""
-        secrets_to_try = [
-            cls.get_current_jwt_secret(),
-            str(cls.JWT_SECRET_PREVIOUS).strip(),
-        ]
-        return [secret for secret in dict.fromkeys(secrets_to_try) if secret and len(secret) >= 16]
+        env_name = cls.APP_ENV.upper()
+        raise RuntimeError(
+            f"JWT_SECRET is not configured for the {env_name} environment. "
+            "For security, secrets must be explicitly provided via the 'JWT_SECRET' "
+            "environment variable or a configured Vault."
+        )
 
     # --- Notification Settings (SMS) ---
     TWILIO_ACCOUNT_SID = _get_val("TWILIO_ACCOUNT_SID", "")
@@ -176,7 +150,13 @@ class Config:
     @classmethod
     def get_twilio_auth_token(cls) -> str:
         """Return the Twilio auth token, retrieved on demand to limit exposure."""
-        return str(_get_val("TWILIO_AUTH_TOKEN", "") or "")
+        # Prefer centralized secret manager
+        try:
+            from utils.secret_manager import get_secret
+            val = get_secret("twilio_auth_token") or _get_val("TWILIO_AUTH_TOKEN", "")
+            return str(val or "")
+        except Exception:
+            return str(_get_val("TWILIO_AUTH_TOKEN", "") or "")
 
     # --- Notification Settings (Email) ---
     SENDGRID_FROM_EMAIL = _get_val("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
@@ -184,51 +164,19 @@ class Config:
     @classmethod
     def get_sendgrid_api_key(cls) -> str:
         """Return the SendGrid API key, retrieved on demand to limit exposure."""
-        return str(_get_val("SENDGRID_API_KEY", "") or "")
-
-    @classmethod
-    def validate_runtime_security(cls):
-        """Fail fast when production settings are insecure or missing required secrets."""
-        if cls.is_production() and (cls.DEBUG or cls.TESTING):
-            raise RuntimeError("DEBUG and TESTING must be disabled in production")
-
-        if cls.is_production():
-            if cls.DATABASE_URL and cls.DATABASE_URL.startswith("sqlite"):
-                raise RuntimeError(
-                    "SQLite is not allowed in production. "
-                    "Set DATABASE_URL to a production-grade database (PostgreSQL, MySQL, etc.)."
-                )
-
-            required = {
-                "JWT_SECRET": cls.get_current_jwt_secret(),
-                "OPENROUTER_API_KEY": str(cls.OPENROUTER_API_KEY).strip(),
-                "SENDGRID_API_KEY": cls.get_sendgrid_api_key(),
-            }
-            missing = [name for name, value in required.items() if not value]
-            if missing:
-                raise RuntimeError(
-                    "Missing required production secrets: " + ", ".join(sorted(missing))
-                )
-
-            if cls.REQUIRE_HTTPS:
-                if not str(cls.BASE_URL).lower().startswith("https://"):
-                    raise RuntimeError("BASE_URL must use https:// in production")
-
-            csrf_secret = cls.CSRF_SECRET
-            if not csrf_secret or len(csrf_secret) < 16:
-                raise RuntimeError(
-                    "CSRF_SECRET environment variable must be set to a secure value "
-                    "(minimum 16 characters) in production. "
-                    "Without it, CSRF tokens are per-worker and cross-worker requests will fail."
-                )
-                if cls.API_BASE_URL and not str(cls.API_BASE_URL).lower().startswith("https://"):
-                    raise RuntimeError("API_BASE_URL must use https:// in production")
+        try:
+            from utils.secret_manager import get_secret
+            val = get_secret("sendgrid_api_key") or _get_val("SENDGRID_API_KEY", "")
+            return str(val or "")
+        except Exception:
+            return str(_get_val("SENDGRID_API_KEY", "") or "")
 
     # --- Application URLs ---
     BASE_URL = _get_val("BASE_URL", "https://legalassist.ai")
 
     @classmethod
     def is_development(cls):
+<<<<<<< fix/websocket-job-ownership
         env_dev = cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
         if not env_dev:
             return False
@@ -370,3 +318,6 @@ if Config.DEBUG:
     except Exception as e:
         logger.error(f"Failed to dump sanitized configuration: {e}")
 
+=======
+        return cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
+>>>>>>> main

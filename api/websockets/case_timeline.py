@@ -15,7 +15,7 @@ from fastapi import Depends
 from api.config import get_settings
 from api.jwt_auth import verify_token, InvalidTokenError as JWTInvalidTokenError, TokenExpiredError as JWTTokenExpiredError
 from api.limiter import enforce_rate_limit, RateLimitExceeded
-from core.timeline_payloads import TimelineEventPayload
+from core.timeline_payloads import TimelineEventPayload, TimelineSubscribedPayload
 from db.models.cases import Case
 from db.session import get_db
 from services.timeline_realtime import timeline_realtime_bus, TimelineRealtimeBus
@@ -48,7 +48,7 @@ async def forward_timeline_events(websocket: WebSocket, case_id: int, bus: Timel
     Sends an initial ``subscribed`` message, then loops awaiting messages
     from the bus and forwards them as JSON objects.
     """
-    await websocket.send_json({"type": "subscribed", "case_id": case_id})
+    await websocket.send_json(TimelineSubscribedPayload(case_id=case_id).model_dump(mode="json"))
     queue = await bus.subscribe(case_id)
     disconnect_task = asyncio.create_task(websocket.receive())
     try:
