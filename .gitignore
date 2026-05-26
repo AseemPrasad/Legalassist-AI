@@ -31,3 +31,5 @@ requirements.txt
 requirements.in
 /.venv
 .exports/
+
+.jwt_secret

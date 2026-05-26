@@ -673,12 +673,17 @@ def _auto_create_deadlines_from_remedies(
     return _auto_create_deadlines_from_remedies_service(db, user_id, case_id, case_title, remedies, document_id)
 
 
-def get_document_content(document_id: int) -> Optional[str]:
-    """Get full document content by ID"""
+def get_document_content(document_id: int, user_id: int) -> Optional[str]:
+    """Get full document content by ID, verifying user ownership."""
     db = SessionLocal()
     try:
         doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
-        return doc.document_content if doc else None
+        if doc is None:
+            return None
+        if doc.case.user_id != user_id:
+            logger.warning("idor_document_access_denied", document_id=document_id, user_id=user_id, owner_id=doc.case.user_id)
+            return None
+        return doc.document_content
     finally:
         db.close()
 

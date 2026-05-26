@@ -8,14 +8,46 @@ This module provides comprehensive validation for:
 - Form data validation
 """
 
+import ipaddress
 import os
+import socket
 from typing import Optional, Set, Tuple
 from pathlib import Path
+from urllib.parse import urlparse
 from fastapi import HTTPException, status, UploadFile
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# SSRF protection: private / reserved / metadata IP ranges
+_FORBIDDEN_IP_NETWORKS = [
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("224.0.0.0/4"),
+    ipaddress.ip_network("240.0.0.0/4"),
+    ipaddress.ip_network("255.255.255.255/32"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+# Cloud metadata endpoints
+_CLOUD_METADATA_HOSTS = {
+    "169.254.169.254",
+    "metadata.google.internal",
+    "metadata.heptio.com",
+    "100.100.100.200",
+    "fd00:ec2::254",
+}
+
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+_ALLOWED_URL_PORTS = frozenset({80, 443, 8080, 8443})
 
 
 # Magic bytes for trusted file type identification
@@ -62,6 +94,7 @@ class ValidationConfig:
     MAX_BATCH_SIZE: int = 100
     MAX_ANALYTICS_PAYLOAD: int = 100 * 1024 * 1024
     MAX_JSON_BODY: int = 10 * 1024 * 1024
+    MAX_BASE64_DECODED_BYTES: int = 25 * 1024 * 1024  # 25 MB
 
     @classmethod
     def from_settings(cls, settings):
@@ -78,6 +111,20 @@ class ValidationError(HTTPException):
 class PayloadTooLargeError(HTTPException):
     def __init__(self, detail: str):
         super().__init__(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=detail)
+
+
+def decode_base64_safe(data: str, max_decoded_bytes: int = ValidationConfig.MAX_BASE64_DECODED_BYTES) -> bytes:
+    """Decode base64 string with decoded-size validation to prevent memory exhaustion."""
+    # Base64 encodes 3 bytes into 4 characters; estimate max_input_len safely
+    max_input_len = ((max_decoded_bytes + 2) // 3) * 4
+    if len(data) > max_input_len:
+        raise PayloadTooLargeError(
+            f"Base64 payload exceeds maximum decoded size of {max_decoded_bytes // (1024 * 1024)} MB"
+        )
+    try:
+        return base64.b64decode(data)
+    except Exception as exc:
+        raise ValidationError(f"Invalid base64 encoding: {exc}")
 
 
 def validate_magic_bytes(file_content: bytes, expected_extension: str) -> Tuple[bool, str]:
@@ -184,6 +231,58 @@ def validate_json_payload(payload_size: int, max_size: Optional[int] = None) -> 
         raise PayloadTooLargeError(
             detail=f"Request body size ({round(payload_size / 1024 / 1024, 2)} MB) exceeds maximum ({round(max_size / 1024 / 1024, 2)} MB)"
         )
+
+
+def validate_file_url(url: str) -> None:
+    """
+    Validate a user-supplied URL against SSRF attacks.
+    - Only http/https schemes allowed
+    - No private, loopback, link-local, or metadata IPs
+    - Only standard HTTP(S) ports
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        logger.warning("url_parse_failed", url=url, error=str(exc))
+        raise ValidationError(detail="Invalid URL format")
+
+    if parsed.scheme not in _ALLOWED_URL_SCHEMES:
+        logger.warning("url_scheme_denied", scheme=parsed.scheme, url=url)
+        raise ValidationError(detail=f"URL scheme '{parsed.scheme}' is not allowed. Only http/https are permitted.")
+
+    if parsed.port is not None and parsed.port not in _ALLOWED_URL_PORTS:
+        logger.warning("url_port_denied", port=parsed.port, url=url)
+        raise ValidationError(detail=f"URL port {parsed.port} is not allowed.")
+
+    hostname = parsed.hostname or ""
+    if hostname.lower() in _CLOUD_METADATA_HOSTS:
+        logger.warning("url_metadata_host_denied", host=hostname, url=url)
+        raise ValidationError(detail="URL points to a cloud metadata endpoint and is not allowed.")
+
+    # Resolve hostname to IP addresses
+    try:
+        ips = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as exc:
+        logger.warning("url_dns_resolution_failed", host=hostname, error=str(exc))
+        raise ValidationError(detail="Could not resolve the URL hostname.")
+    except OSError:
+        logger.warning("url_dns_resolution_os_error", host=hostname)
+        raise ValidationError(detail="Could not resolve the URL hostname.")
+
+    for addr_info in ips:
+        ip_str = addr_info[4][0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            logger.warning("url_ip_blocked", ip=ip_str, host=hostname, url=url)
+            raise ValidationError(detail=f"URL resolves to a blocked IP range ({ip_str}).")
+
+        for net in _FORBIDDEN_IP_NETWORKS:
+            if ip in net:
+                logger.warning("url_ip_in_forbidden_network", ip=ip_str, network=str(net), host=hostname, url=url)
+                raise ValidationError(detail=f"URL resolves to a blocked IP range ({ip_str}).")
 
 
 def validate_text_input(text: str, max_length: Optional[int] = None) -> None:

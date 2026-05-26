@@ -152,7 +152,7 @@ def send_otp_email(email: str, otp: str) -> bool:
         from_email = os.getenv("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
 
         if not api_key or sendgrid is None:
-            if _is_debug_or_testing_mode():
+            if _is_debug_or_testing_mode() and not Config.is_production():
 
                 logger.warning("SendGrid API key not configured or sendgrid package not installed - using masked OTP logging for debug/test mode")
                 logger.debug("OTP generated: [MASKED]")
@@ -213,7 +213,7 @@ def send_otp_email(email: str, otp: str) -> bool:
             recipient=mask_email(email),
             error=sanitize_log_text(str(e)),
         )
-        if _is_debug_or_testing_mode():
+        if _is_debug_or_testing_mode() and not Config.is_production():
             logger.debug("OTP delivery simulated: [MASKED]")
             logger.debug("otp_delivery_debug_mode", recipient=mask_email(email), transport="sendgrid")
             return True
@@ -255,12 +255,6 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
         email_sent = send_otp_email(email, otp)
 
         if email_sent:
-            # Create user if doesn't exist
-            user = get_user_by_email(db, email)
-            if not user:
-                create_user(db, email)
-                logger.info("auth_new_user_created", recipient=mask_email(email))
-
             return True, "OTP sent to your email"
         else:
             return False, "Failed to send OTP email. Please try again."
@@ -333,9 +327,13 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
             )
             return False, GENERIC_OTP_FAILURE, None
 
-        # OTP is valid - reset failed attempts and mark as used
+        # OTP is valid - reset failed attempts and atomically mark as used
         reset_otp_failed_attempts(db, otp_record.id)
-        mark_otp_as_used(db, otp_record.id)
+        marked = mark_otp_as_used(db, otp_record.id)
+        if not marked:
+            # Another process may have consumed this OTP concurrently.
+            logger.warning("otp_replay_detected", recipient=mask_email(email))
+            return False, GENERIC_OTP_FAILURE, None
 
         # Get or create user
         user = get_user_by_email(db, email)
