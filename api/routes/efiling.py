@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, Dict
 from core.efiling import EfilingClient
+from api.auth import get_current_user, CurrentUser
 
 router = APIRouter(prefix="/api/efiling", tags=["efiling"])
 
@@ -13,7 +14,7 @@ class SubmitRequest(BaseModel):
 
 
 @router.post("/submit")
-async def submit_document(req: SubmitRequest):
+async def submit_document(req: SubmitRequest, current_user: CurrentUser = Depends(get_current_user)):
     try:
         res = EfilingClient.submit(req.court, req.file_base64, metadata=req.metadata or {})
         return res
@@ -22,7 +23,7 @@ async def submit_document(req: SubmitRequest):
 
 
 @router.get("/status/{tracking_id}")
-async def status(tracking_id: str):
+async def status(tracking_id: str, current_user: CurrentUser = Depends(get_current_user)):
     try:
         res = EfilingClient.get_status(tracking_id)
         return res
