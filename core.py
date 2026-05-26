@@ -5,6 +5,7 @@ import re
 import logging
 from pathlib import Path
 from typing import Dict, Optional, List, Union, Any
+from datetime import datetime
 
 # Custom Exception Imports
 from core.exceptions import (
@@ -664,3 +665,28 @@ def parse_remedies_response(response_text: str) -> Dict[str, Any]:
     remedies.update(_compute_remedies_quality_metadata(remedies, text))
 
     return remedies
+
+from datetime import datetime
+
+def parse_timeline(raw_text: str) -> List[Dict[str, str]]:
+    try:
+        clean_json = raw_text.replace("```json", "").replace("```", "").strip()
+        events = json.loads(clean_json)
+        
+        # Helper to convert "12 Jan 2025" or "2025-01-12" into a sortable object
+        def parse_date(date_str):
+            if not date_str or date_str == 'N/A':
+                return datetime(9999, 12, 31)
+            try:
+                # Add common formats your LLM might output
+                for fmt in ("%Y-%m-%d", "%d %b %Y", "%d %B %Y", "%Y/%m/%d"):
+                    try: return datetime.strptime(date_str, fmt)
+                    except: continue
+                return datetime(9999, 12, 31)
+            except:
+                return datetime(9999, 12, 31)
+
+        return sorted(events, key=lambda x: parse_date(x.get('date')))
+    except Exception as e:
+        LOGGER.error(f"Timeline parsing failed: {e}")
+        return []

@@ -41,6 +41,9 @@ from core.app_utils import (
     safe_llm_call,
     generate_legal_draft,
     export_draft_to_pdf,
+    parse_llm_json,
+    parse_timeline,        
+    build_timeline_prompt,
 )
 
 from core.multimodal_processor import MultiModalProcessor
@@ -234,6 +237,20 @@ def render_page():
                             except Exception as e:
                                 st.error(f"{ui['remedies_error']}: {str(e)}")
 
+                            # 4. Timeline Logic (Inserted here)
+                            if "timeline_events" not in st.session_state:
+                                with st.spinner("Extracting timeline..."):
+                                    timeline_prompt = build_timeline_prompt(safe_text)
+                                    timeline_raw, error = safe_llm_call(client, model_id, [{"role": "user", "content": timeline_prompt}], 1000, 0.1)
+                                    st.session_state["timeline_events"] = parse_timeline(timeline_raw) if not error else []
+                            
+                            timeline_events = st.session_state["timeline_events"]
+                            if timeline_events:
+                                st.markdown("### 🗓️ Case Timeline")
+                                for item in timeline_events:
+                                    date_str = item.get('date', 'Date Unspecified')
+                                    st.markdown(f"- **{date_str}**: {item.get('event', '')}")
+
                         # build_judgment_result_text now returns (plain_text, structured_dict)
                         result = build_judgment_result_text(summary, remedies, ui)
 
@@ -261,6 +278,21 @@ def render_page():
                                     st.write(
                                         f"- {item['citation']} ({item['citation_type']}, {item['status']}, confidence {item['confidence']:.2f})"
                                     )
+                            # 1. Generate Timeline
+                            with st.spinner("Extracting timeline..."):
+                                timeline_prompt = build_timeline_prompt(safe_text)
+                                timeline_raw, error = safe_llm_call(client, model_id, [{"role": "user", "content": timeline_prompt}], 1000, 0.1)
+                                
+                                if not error:
+                                    timeline_events = parse_timeline(timeline_raw)
+                                    
+                                    # 2. Render Timeline
+                                    if timeline_events:
+                                        st.markdown("### 🗓️ Case Timeline")
+                                        for item in timeline_events:
+                                            # Use a cleaner UI for dates
+                                            date_str = item['date'] if item['date'] != 'N/A' else "Date Unspecified"
+                                            st.write(f"- **{date_str}**: {item['event']}")
 
                         # ===== DRAFTING SECTION =====
                         st.markdown("---")
