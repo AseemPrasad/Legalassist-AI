@@ -17,6 +17,8 @@ from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
 from api.limiter import RateLimit
 import structlog
 from core.log_redaction import mask_email
+from fastapi import Request
+from api.auth import revoke_jwt_token as api_revoke_jwt
 
 _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -188,3 +190,33 @@ async def get_current_user_info(
         "role": current_user.role,
         "subscription_tier": "pro"
     }
+
+
+
+
+@router.post(
+    "/logout",
+    summary="Logout and revoke current JWT token",
+    dependencies=[Depends(RateLimit(use_auth_defaults=True))]
+)
+async def logout(request: Request) -> dict:
+    """Revoke the JWT presented in Authorization header (if any)."""
+    auth = request.headers.get("Authorization") or request.headers.get("authorization")
+    token = None
+    if auth and auth.lower().startswith("bearer "):
+        token = auth.split(None, 1)[1].strip()
+
+    if not token:
+        # Nothing to revoke, but return success to avoid token probing
+        return {"status": "ok", "revoked": False}
+
+    try:
+        success = api_revoke_jwt(token)
+        if success:
+            logger.info("api_logout_revoked")
+        else:
+            logger.info("api_logout_no_revoke_needed")
+        return {"status": "ok", "revoked": bool(success)}
+    except Exception as e:
+        logger.error("api_logout_failed", error=str(e))
+        return {"status": "error", "revoked": False}

@@ -339,3 +339,95 @@ ANSWER IN {language} (include citations if possible):
         except Exception as e:
             LOGGER.error(f"Error querying RAG engine: {e}")
             return f"An error occurred while trying to answer your question: {str(e)}"
+
+    async def async_query(self, question: str, language: str, openai_client, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
+        """Async version of `query` that uses an async LLM helper to avoid blocking the event loop."""
+        if not self.vector_store:
+            return "Please wait for the document to finish processing before asking questions."
+
+        try:
+            LOGGER.info(f"(async) Retrieving context for question: {question}")
+            retrieved = self.retrieve_with_scores(question, k=5)
+
+            if not retrieved:
+                LOGGER.info("Semantic search returned no results, trying keyword fallback")
+                keyword_results = self._keyword_fallback_search(question)
+                if keyword_results:
+                    context = "\n\n---\n\n".join(keyword_results)
+                    citations = []
+                    LOGGER.info(f"Keyword fallback found {len(keyword_results)} results")
+                else:
+                    return "I couldn't find relevant information in the document to answer your question."
+            else:
+                scores = [r.get("score", 0.0) for r in retrieved]
+                max_score = max(scores) if scores else 0.0
+                if max_score <= 1.0 and max_score >= -1.0:
+                    norm_scores = [max(0.0, min(1.0, (s + 1) / 2 if s < 0.0 else s)) for s in scores]
+                else:
+                    norm_scores = [max(0.0, min(1.0, float(s))) for s in scores]
+
+                confidence = max(norm_scores) if norm_scores else 0.0
+                threshold = float(getattr(Config, "RAG_CONFIDENCE_THRESHOLD", 0.2))
+                LOGGER.info(f"Retrieval confidence: {confidence:.3f} (threshold {threshold})")
+                if confidence < threshold:
+                    return "I cannot find sufficient evidence in the document to answer that question."
+
+                parts = []
+                citations = []
+                for r, s in zip(retrieved, norm_scores):
+                    meta = r.get("metadata", {})
+                    citation = f"[source:{meta.get('source_hash','unknown')}#chunk:{meta.get('chunk_index',0)}]"
+                    excerpt = meta.get("excerpt") or (r.get("content")[:240] + "...")
+                    parts.append(f"{excerpt}\n\nCitation: {citation} (score={s:.3f})")
+                    citations.append(citation)
+
+                context = "\n\n---\n\n".join(parts)
+
+            history_str = ""
+            if chat_history:
+                recent_history = chat_history[-6:]
+                history_str = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in recent_history])
+
+            prompt = f"""
+You are LegalEase AI, an expert judicial researcher. 
+Your goal is to provide accurate, context-grounded answers to user questions about a specific legal document.
+
+STRICT GUIDELINES:
+1. Answer ONLY based on the provided CONTEXT. If the answer is not in the context, say "I cannot find the answer to this in the document."
+2. CITATIONS: Whenever possible, quote specific sentences or phrases from the document to support your answer.
+3. CONVERSATION: Use the RECENT CHAT HISTORY to understand follow-up questions (e.g., "What about the other person?").
+4. LANGUAGE: Provide your final answer ONLY in the {language} language.
+
+RECENT CHAT HISTORY:
+{history_str}
+
+CONEXT FROM DOCUMENT:
+{context}
+
+USER QUESTION:
+{question}
+
+ANSWER IN {language} (include citations if possible):
+"""
+
+            LOGGER.info("(async) Generating response from LLM...")
+            from core.app_utils import safe_llm_call_async
+            answer, error = await safe_llm_call_async(
+                client=openai_client,
+                model=Config.DEFAULT_MODEL,
+                messages=[
+                    {"role": "system", "content": f"You are a helpful legal researcher. Output only in {language}."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=600,
+                temperature=0.1,
+            )
+
+            if error:
+                return f"AI Service Error: {error}"
+
+            return answer
+
+        except Exception as e:
+            LOGGER.error(f"Error querying RAG engine (async): {e}")
+            return f"An error occurred while trying to answer your question: {str(e)}"
