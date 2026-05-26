@@ -93,6 +93,14 @@ def register_case_timeline_endpoint(app: FastAPI) -> None:
         case_id: int,
         db: Session = Depends(get_db),
     ):
+        # Origin validation
+        origin = websocket.headers.get("origin")
+        if origin:
+            allowed = settings.CORS_ORIGINS + [f"https://{h}" for h in settings.ALLOWED_HOSTS] + [f"http://{h}" for h in settings.ALLOWED_HOSTS]
+            if origin not in allowed and "*" not in settings.CORS_ORIGINS:
+                await websocket.close(code=4001, reason="Origin not allowed")
+                return
+
         # Authentication
         auth_token = parse_auth_from_websocket(websocket)
         if not auth_token:
