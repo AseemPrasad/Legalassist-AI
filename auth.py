@@ -4,7 +4,6 @@ Email-based OTP authentication with JWT session management.
 """
 
 import os
-import hmac
 import hashlib
 import secrets
 import time
@@ -128,14 +127,16 @@ OTP_REQUEST_RATE_LIMIT_MAX = int(os.getenv("OTP_REQUEST_RATE_LIMIT_MAX", str(Con
 OTP_REQUEST_RATE_LIMIT_HOURS = int(os.getenv("OTP_REQUEST_RATE_LIMIT_HOURS", str(Config.OTP_REQUEST_RATE_LIMIT_HOURS)))
 
 
-def _hash_otp(otp: str) -> str:
-    """Hash OTP code before storing using HMAC-SHA256 to prevent length extension"""
-    return hmac.new(Config.SECRET_KEY.encode(), otp.encode(), hashlib.sha256).hexdigest()
+OTP_HASH_ITERATIONS = 100000
+
+def _hash_otp(otp: str, email: str) -> str:
+    """Hash OTP code before storage using PBKDF2-HMAC-SHA256 with per-email salt"""
+    return hashlib.pbkdf2_hmac('sha256', otp.encode(), email.encode(), OTP_HASH_ITERATIONS).hex()
 
 
-def _verify_otp_hash(otp: str, otp_hash: str) -> bool:
+def _verify_otp_hash(otp: str, email: str, otp_hash: str) -> bool:
     """Verify OTP against stored hash using constant-time comparison"""
-    return secrets.compare_digest(_hash_otp(otp), otp_hash)
+    return secrets.compare_digest(_hash_otp(otp, email), otp_hash)
 
 
 def generate_otp() -> str:
@@ -241,7 +242,7 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
     db = SessionLocal()
     try:
         otp = generate_otp()
-        otp_hash = _hash_otp(otp)
+        otp_hash = _hash_otp(otp, email)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
         try:
@@ -316,7 +317,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
             return False, GENERIC_OTP_FAILURE, None
 
         # Verify OTP
-        if not _verify_otp_hash(otp, otp_record.otp_hash):
+        if not _verify_otp_hash(otp, email, otp_record.otp_hash):
             record_otp_failed_attempt(
                 db, 
                 otp_record.id, 
