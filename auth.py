@@ -4,6 +4,7 @@ Email-based OTP authentication with JWT session management.
 """
 
 import os
+import hmac
 import hashlib
 import secrets
 import time
@@ -128,8 +129,8 @@ OTP_REQUEST_RATE_LIMIT_HOURS = int(os.getenv("OTP_REQUEST_RATE_LIMIT_HOURS", str
 
 
 def _hash_otp(otp: str) -> str:
-    """Hash OTP code before storing"""
-    return hashlib.sha256(otp.encode()).hexdigest()
+    """Hash OTP code before storing using HMAC-SHA256 to prevent length extension"""
+    return hmac.new(Config.SECRET_KEY.encode(), otp.encode(), hashlib.sha256).hexdigest()
 
 
 def _verify_otp_hash(otp: str, otp_hash: str) -> bool:
