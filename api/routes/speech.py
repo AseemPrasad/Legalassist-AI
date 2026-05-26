@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from core.speech_transcription import TranscriptionEngine
 from api.auth import get_current_user, CurrentUser
+from api.validation import decode_base64_safe
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,9 +19,7 @@ class TranscribeRequest(BaseModel):
 @router.post("/transcribe")
 def transcribe(req: TranscribeRequest, current_user: CurrentUser = Depends(get_current_user)):
     try:
-        import base64
-
-        audio_bytes = base64.b64decode(req.audio_base64)
+        audio_bytes = decode_base64_safe(req.audio_base64)
         engine = TranscriptionEngine()
         text = engine.transcribe_bytes(audio_bytes, language=req.language)
         return {"transcription": text}

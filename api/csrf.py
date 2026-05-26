@@ -11,6 +11,7 @@ Provides protection against CSRF attacks by:
 
 import hashlib
 import hmac
+import os
 import secrets
 import structlog
 from typing import Optional, Set
@@ -62,13 +63,20 @@ def _get_csrf_secret() -> str:
     global _CSRF_SECRET_CACHE
     if _CSRF_SECRET_CACHE is not None:
         return _CSRF_SECRET_CACHE
-    import os
-    secret = os.getenv("CSRF_SECRET")
-    if not secret:
-        secret = os.getenv("SECRET_KEY", "")
-        if secret:
-            secret = secret[:32].ljust(32, "0")
-        else:
+
+    from api.config import get_settings
+    settings = get_settings()
+    secret = settings.CSRF_SECRET
+    if not secret or len(secret) < 16:
+        secret = os.environ.get("SECRET_KEY", "")
+        if not secret or len(secret) < 16:
+            is_prod = settings.ENVIRONMENT in ("production", "prod", "live")
+            if is_prod:
+                raise RuntimeError(
+                    "CSRF_SECRET environment variable must be set in production. "
+                    "Auto-generation is not allowed."
+                )
+            logger.warning("csrf_secret_auto_generated", message="CSRF_SECRET not set. Auto-generated per-process secret — cross-worker CSRF will fail in multi-worker deployments.")
             secret = secrets.token_hex(32)
     _CSRF_SECRET_CACHE = secret
     return secret
@@ -85,7 +93,16 @@ def get_referer(request: Request) -> Optional[str]:
 def is_same_origin(request: Request, allowed_hosts: Optional[Set[str]] = None) -> bool:
     origin = get_origin(request)
     if not origin:
-        return True
+        referer = get_referer(request)
+        if referer:
+            from urllib.parse import urlparse
+            parsed = urlparse(referer)
+            allowed = allowed_hosts or set()
+            host = request.headers.get("host", "").split(":")[0]
+            if parsed.netloc in allowed or parsed.netloc == f"{host}:443":
+                return True
+            return parsed.netloc == f"{host}:443" or parsed.netloc == host
+        return False
     from urllib.parse import urlparse
     parsed = urlparse(origin)
     host = request.headers.get("host", "").split(":")[0]
@@ -196,7 +213,8 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         csrf_cookie = request.cookies.get(CSRF_COOKIE_NAME)
 
         if request.method in SAFE_METHODS and not csrf_cookie:
-            token = generate_csrf_token(int(user_id) if str(user_id).isdigit() else 0, getattr(request.state, "request_id", "bootstrap"))
+            session_id = secrets.token_urlsafe(16)
+            token = generate_csrf_token(int(user_id) if str(user_id).isdigit() else 0, session_id)
             response.set_cookie(
                 CSRF_COOKIE_NAME,
                 token,
@@ -211,15 +229,18 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
 
         if request.method not in SAFE_METHODS and (user_id or access_token):
             resolved_user_id = int(user_id) if str(user_id).isdigit() else None
+            jwt_jti = None
             if resolved_user_id is None and access_token:
                 try:
                     payload = verify_token(access_token)
                     resolved_user_id = int(payload.get("sub"))
+                    jwt_jti = payload.get("jti")
                 except Exception:
                     resolved_user_id = None
 
             if resolved_user_id is not None:
-                token = generate_csrf_token(resolved_user_id, getattr(request.state, "request_id", "default"))
+                session_id = jwt_jti or secrets.token_urlsafe(16)
+                token = generate_csrf_token(resolved_user_id, session_id)
                 response.set_cookie(
                     CSRF_COOKIE_NAME,
                     token,

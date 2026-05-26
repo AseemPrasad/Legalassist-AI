@@ -22,9 +22,10 @@ Environment Variables:
     AUTO_PROVISION_USERS=true  # auto-create users from SSO if not exists
 """
 
+import hashlib
+import hmac
 import logging
 import secrets
-import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -69,22 +70,52 @@ class SSOConfig:
 SSOConfig.from_env()
 
 _oauth = OAuth()
-_state_store: dict[str, dict] = {}
+
+
+def _get_state_secret() -> str:
+    """Return a shared secret for HMAC-signing OAuth state tokens.
+
+    Uses the CSRF secret so that all workers share the same key.
+    """
+    import os
+    secret = os.getenv("CSRF_SECRET") or os.getenv("SECRET_KEY") or ""
+    if not secret:
+        secret = secrets.token_hex(32)
+    return secret
 
 
 def _generate_state(provider: str, redirect_uri: str) -> str:
-    state = secrets.token_urlsafe(32)
-    _state_store[state] = {"provider": provider, "redirect_uri": redirect_uri, "exp": datetime.now(timezone.utc) + timedelta(minutes=10)}
-    return state
+    """Create a stateless HMAC-signed OAuth state token.
+
+    Encodes provider, redirect_uri, and a 10-minute expiry inside the
+    token so no shared storage is needed across workers.
+    """
+    exp = int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp())
+    payload = f"{exp}:{provider}:{redirect_uri}"
+    sig = hmac.new(_get_state_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
+    return f"{payload}:{sig}"
 
 
 def _consume_state(state: str) -> Optional[dict]:
-    entry = _state_store.pop(state, None)
-    if entry is None:
+    """Verify and decode a stateless OAuth state token.
+
+    Returns None if the signature is invalid or the token has expired.
+    """
+    try:
+        parts = state.rsplit(":", 3)
+        if len(parts) != 4:
+            return None
+        exp_str, provider, redirect_uri, sig = parts
+        exp = int(exp_str)
+        if datetime.now(timezone.utc).timestamp() > exp:
+            return None
+        payload = f"{exp_str}:{provider}:{redirect_uri}"
+        expected_sig = hmac.new(_get_state_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
+        if not hmac.compare_digest(expected_sig, sig):
+            return None
+        return {"provider": provider, "redirect_uri": redirect_uri, "exp": datetime.fromtimestamp(exp, tz=timezone.utc)}
+    except (ValueError, IndexError):
         return None
-    if datetime.now(timezone.utc) > entry["exp"]:
-        return None
-    return entry
 
 
 def _get_or_create_user(email: str, name: str, provider: str, provider_id: str) -> User:
@@ -118,12 +149,14 @@ def _get_or_create_user(email: str, name: str, provider: str, provider_id: str) 
 
 
 def _build_token_response(user: User, provider: str) -> RedirectResponse:
+    from api.config import get_settings
+    _sso_settings = get_settings()
     role = user.role.value if user.role else "client"
     token = create_access_token(
         data={"sub": str(user.id), "email": user.email, "role": role, "provider": provider}
     )
-    redirect_url = f"/?token={token}&provider={provider}&role={role}"
-    response = RedirectResponse(url=redirect_url, status_code=302)
+    token_max_age = _sso_settings.JWT_ACCESS_TOKEN_MINUTES * 60
+    response = RedirectResponse(url="/", status_code=302)
     response.set_cookie(
         key="access_token",
         value=token,
@@ -131,7 +164,7 @@ def _build_token_response(user: User, provider: str) -> RedirectResponse:
         secure=True,
         samesite="lax",
         path="/",
-        max_age=3600 * 24 * 7,
+        max_age=token_max_age,
     )
     csrf_token = generate_csrf_token(user.id, secrets.token_urlsafe(16))
     response.set_cookie(
@@ -141,7 +174,7 @@ def _build_token_response(user: User, provider: str) -> RedirectResponse:
         secure=True,
         samesite="lax",
         path="/",
-        max_age=3600 * 24 * 7,
+        max_age=token_max_age,
     )
     return response
 
@@ -190,7 +223,7 @@ async def sso_google(request: Request):
 async def sso_google_callback(request: Request, code: str = Query(...), state: str = Query(...)):
     """Handle Google OAuth callback."""
     ctx = _consume_state(state)
-    if ctx is None:
+    if ctx is None or ctx.get("provider") != "google":
         raise HTTPException(status_code=400, detail="Invalid or expired SSO state")
 
     client = _configure_google()
@@ -232,7 +265,7 @@ async def sso_microsoft(request: Request):
 async def sso_microsoft_callback(request: Request, code: str = Query(...), state: str = Query(...)):
     """Handle Microsoft Entra ID OAuth callback."""
     ctx = _consume_state(state)
-    if ctx is None:
+    if ctx is None or ctx.get("provider") != "microsoft":
         raise HTTPException(status_code=400, detail="Invalid or expired SSO state")
 
     client = _configure_microsoft()

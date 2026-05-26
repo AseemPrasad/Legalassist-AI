@@ -73,20 +73,6 @@ async def generate_report(
         report_type=request.report_type
     )
 
-    report_id = str(uuid.uuid4())
-
-    # Create the report record in the database
-    db_report = Report(
-        report_id=report_id,
-        user_id=current_user.user_id,
-        case_id=request.case_id,
-        report_type=request.report_type,
-        format=request.format,
-        status="pending",
-    )
-    db.add(db_report)
-    db.commit()
-    
     # Step 1: Create and persist Report record BEFORE enqueueing task
     # This ensures we have report_id and can track the task reliably
     report_id = str(uuid.uuid4())
@@ -348,24 +334,6 @@ async def list_reports(
         offset=offset,
         status=status_filter
     )
-    
-    report_dicts = [
-        {
-            "report_id": r.report_id,
-            "case_id": r.case_id,
-            "status": r.status.value,
-            "report_type": r.report_type.value,
-            "format": r.format.value,
-            "file_size_bytes": r.file_size_bytes,
-            "created_at": r.created_at.isoformat(),
-            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
-        }
-        for r in reports
-    ]
-    
-    query = db.query(Report).filter(Report.user_id == current_user.user_id)
-    total = query.count()
-    reports = query.order_by(Report.created_at.desc()).offset(offset).limit(limit).all()
 
     reports_data = []
     for r in reports:
@@ -394,7 +362,7 @@ async def list_reports(
             "created_at": r.created_at,
             "completed_at": r.completed_at
         })
-        
+
     return {
         "total": total,
         "limit": limit,

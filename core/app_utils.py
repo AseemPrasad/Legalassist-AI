@@ -207,6 +207,26 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
     multi-modal OCR processor when OCR is enabled.
     """
     text = ""
+    parser_errors: List[str] = []
+
+    # Read input bytes early and perform lightweight safety checks
+    data = _read_input_bytes(uploaded_pdf)
+    if data is None:
+        raise ValueError("Unable to read uploaded file bytes.")
+
+    # File size protection
+    max_bytes = int(getattr(Config, 'MAX_FILE_SIZE_MB', 25)) * 1024 * 1024
+    if len(data) > max_bytes:
+        raise PDFProcessingError(f"PDF exceeds allowed size of {max_bytes} bytes.")
+
+    # Reject obvious malicious tokens (JavaScript, Launch actions, embedded files)
+    suspicious_signatures = [b'/JavaScript', b'/JS', b'/Launch', b'/EmbeddedFiles', b'/RichMedia', b'/OpenAction', b'/AA']
+    for sig in suspicious_signatures:
+        if sig in data:
+            parser_errors.append(f"Suspicious PDF token detected: {sig.decode('latin1')}")
+            # For safety, refuse to process PDFs containing active content
+            raise PDFProcessingError("PDF contains active or embedded content (JavaScript/Launch/EmbeddedFiles). Processing aborted.")
+
     if _is_image_input(uploaded_pdf):
         if not enable_ocr:
             raise ValueError("Image uploads require OCR. Re-run with OCR enabled.")
@@ -221,10 +241,19 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
             return _legacy_image_ocr_fallback(image_bytes, ocr_languages)
 
     try:
-        with pdfplumber.open(uploaded_pdf) as pdf:
+        import io as _io
+        with pdfplumber.open(_io.BytesIO(data)) as pdf:
             pages = []
-            for page in pdf.pages:
-                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+            max_pages = int(getattr(Config, 'PDF_MAX_PAGES', 2000))
+            for i, page in enumerate(pdf.pages):
+                if i >= max_pages:
+                    parser_errors.append(f"PDF page limit reached: {max_pages}")
+                    break
+                try:
+                    page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                except Exception as e:
+                    parser_errors.append(f"pdfplumber page extraction error page={i}: {e}")
+                    continue
                 if page_text:
                     pages.append(page_text)
             text = "\n".join(pages).strip()
@@ -233,27 +262,38 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
                 is_valid, quality = _validate_encoding_quality(text)
                 if is_valid:
                     return text
-    except Exception:
-        pass
+    except Exception as e:
+        parser_errors.append(f"pdfplumber open error: {e}")
 
     try:
-        if hasattr(uploaded_pdf, "seek"):
-            uploaded_pdf.seek(0)
-        reader = PdfReader(uploaded_pdf)
+        import io as _io
+        reader = PdfReader(_io.BytesIO(data), strict=False)
+        # Check for encryption
+        try:
+            if getattr(reader, 'is_encrypted', False):
+                # Try simple decryption
+                try:
+                    reader.decrypt("")
+                except Exception:
+                    parser_errors.append("Encrypted PDF cannot be processed.")
+                    raise PDFProcessingError("Encrypted PDF not supported.")
+        except Exception:
+            # continue; some pypdf versions may not expose is_encrypted
+            pass
+
         text = _extract_pages_pypdf(reader)
         if text:
-            # Validate encoding quality before returning
             is_valid, quality = _validate_encoding_quality(text)
             if is_valid:
                 return text
-    except Exception:
-        pass
+    except Exception as e:
+        parser_errors.append(f"pypdf read error: {e}")
 
     if not enable_ocr:
         if parser_errors:
             raise PDFProcessingError(
                 "Failed to extract text from PDF using pdfplumber and pypdf.",
-                parser_errors[-1],
+                "; ".join(parser_errors),
             )
         raise ValueError("No extractable text found. The PDF may be image-only or empty. Re-run with OCR enabled.")
 
@@ -1337,6 +1377,84 @@ def safe_llm_call(
                     continue
     
     # If all retry attempts failed, return the last error encountered
+    return None, f"An unexpected error occurred after {retries} attempts: {last_error}"
+
+
+async def safe_llm_call_async(
+    client: OpenAI,
+    model: str,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+    timeout: Optional[float] = None,
+    retries: Optional[int] = None
+) -> Tuple[Optional[str], Optional[str]]:
+    """Async wrapper around `safe_llm_call` that offloads blocking client calls to a thread.
+
+    This keeps asyncio event loops responsive while still leveraging the same
+    retry and error-handling semantics as the synchronous helper.
+    """
+    import asyncio as _asyncio
+    import time as _time
+    import openai as _openai
+
+    if timeout is None:
+        timeout = Config.AI_REQUEST_TIMEOUT
+    if retries is None:
+        retries = Config.AI_MAX_RETRIES
+
+    last_error = None
+
+    for attempt in range(retries):
+        try:
+            # Offload the blocking client call to a thread
+            def _call():
+                return client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=timeout,
+                )
+
+            response = await _asyncio.to_thread(_call)
+            if hasattr(response, 'choices') and response.choices:
+                return response.choices[0].message.content.strip(), None
+            return None, "Empty response from LLM"
+        except _openai.AuthenticationError:
+            return None, "Authentication failed. Please check your API key in the configuration."
+        except _openai.RateLimitError:
+            if attempt < retries - 1:
+                wait_time = Config.AI_RETRY_BACKOFF_BASE ** attempt
+                logging.warning(f"Rate limit hit. Retrying in {wait_time}s... (Attempt {attempt + 1}/{retries})")
+                await _asyncio.sleep(wait_time)
+                continue
+            return None, "Rate limit exceeded. Please try again in a few minutes."
+        except _openai.APITimeoutError:
+            if attempt < retries - 1:
+                logging.warning(f"Request timed out. Retrying... (Attempt {attempt + 1}/{retries})")
+                continue
+            return None, "The request timed out. The AI server might be busy or your connection is slow."
+        except _openai.APIConnectionError:
+            if attempt < retries - 1:
+                logging.warning(f"Connection error. Retrying... (Attempt {attempt + 1}/{retries})")
+                await _asyncio.sleep(1)
+                continue
+            return None, "Could not connect to the AI server. Please check your internet connection."
+        except _openai.APIStatusError as e:
+            if e.status_code == 402:
+                return None, "AI Service Error: Out of credits. Please top up your provider account."
+            if attempt < retries - 1:
+                await _asyncio.sleep(1)
+                continue
+            return None, f"AI Service Error (HTTP {e.status_code}): {str(e)}"
+        except Exception as e:
+            last_error = str(e)
+            logging.exception(f"Unexpected async LLM API Error (Attempt {attempt + 1}): {str(e)}")
+            if attempt < retries - 1:
+                await _asyncio.sleep(0.5)
+                continue
+
     return None, f"An unexpected error occurred after {retries} attempts: {last_error}"
 
 

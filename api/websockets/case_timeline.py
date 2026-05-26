@@ -10,7 +10,8 @@ from contextlib import suppress
 from typing import Optional
 
 import jwt
-from fastapi import FastAPI, WebSocket, Query
+import structlog
+from fastapi import FastAPI, WebSocket
 from fastapi import Depends
 from api.config import get_settings
 from api.limiter import enforce_rate_limit, RateLimitExceeded
@@ -19,6 +20,8 @@ from db.models.cases import Case
 from db.session import get_db
 from services.timeline_realtime import timeline_realtime_bus, TimelineRealtimeBus
 from sqlalchemy.orm import Session
+
+logger = structlog.get_logger(__name__)
 
 
 settings = get_settings()
@@ -37,46 +40,58 @@ class AuthError(Exception):
 
 
 def _verify_token(token: str) -> dict:
-    try:
-        payload = jwt.decode(
-            token,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM],
-            issuer=settings.JWT_ISSUER,
-            audience=settings.JWT_AUDIENCE,
-            options={"require": ["exp", "iat", "nbf", "iss", "aud", "jti", "type"], "verify_nbf": True},
-        )
-    except jwt.ExpiredSignatureError as exc:
-        raise TokenExpiredError("Token has expired") from exc
-    except jwt.InvalidIssuerError as exc:
-        raise InvalidTokenError("Invalid token issuer") from exc
-    except jwt.InvalidAudienceError as exc:
-        raise InvalidTokenError("Invalid token audience") from exc
-    except jwt.InvalidTokenError as exc:
-        raise InvalidTokenError("Invalid token") from exc
+    secrets_to_try = [settings.JWT_SECRET_KEY, settings.JWT_SECRET_KEY_PREVIOUS]
+    secrets_to_try = [s for s in secrets_to_try if s and len(s.strip()) >= 16]
+
+    payload = None
+    last_error = None
+    for secret in secrets_to_try:
+        try:
+            payload = jwt.decode(
+                token,
+                secret,
+                algorithms=[settings.JWT_ALGORITHM],
+                issuer=settings.JWT_ISSUER,
+                audience=settings.JWT_AUDIENCE,
+                options={"require": ["exp", "iat", "nbf", "iss", "aud", "jti", "type"], "verify_nbf": True},
+            )
+            break
+        except jwt.ExpiredSignatureError as exc:
+            last_error = exc
+        except jwt.InvalidTokenError as exc:
+            last_error = exc
+            continue
+
+    if payload is None:
+        if isinstance(last_error, jwt.ExpiredSignatureError):
+            raise TokenExpiredError("Token has expired") from last_error
+        raise InvalidTokenError(str(last_error) if last_error else "Invalid token")
 
     if payload.get("type") != "access":
         raise InvalidTokenError("Invalid token type")
+
+    jti = payload.get("jti")
+    if jti:
+        from api.jwt_auth import _is_token_revoked_cached
+        if _is_token_revoked_cached(jti):
+            logger.warning("websocket_token_revoked", jti=jti)
+            raise InvalidTokenError("Token has been revoked")
     return payload
 
 
-def parse_auth_from_websocket(websocket: WebSocket, token: Optional[str] = None) -> Optional[str]:
-    """Extract the auth token from either the query parameter or the Sec-WebSocket-Protocol header.
+def parse_auth_from_websocket(websocket: WebSocket) -> Optional[str]:
+    """Extract the auth token from the Sec-WebSocket-Protocol header.
 
-    The logic mirrors the original implementation in ``api/main.py``.
     Returns ``None`` if no token is found.
     """
-    auth_token = token
-    requested_protocols = []
-
     if "sec-websocket-protocol" in websocket.headers:
         header_val = websocket.headers["sec-websocket-protocol"]
         requested_protocols = [p.strip() for p in header_val.split(",")]
         if "access_token" in requested_protocols:
             idx = requested_protocols.index("access_token")
             if idx + 1 < len(requested_protocols):
-                auth_token = requested_protocols[idx + 1]
-    return auth_token
+                return requested_protocols[idx + 1]
+    return None
 
 
 async def forward_timeline_events(websocket: WebSocket, case_id: int, bus: TimelineRealtimeBus) -> None:
@@ -128,11 +143,10 @@ def register_case_timeline_endpoint(app: FastAPI) -> None:
     async def websocket_case_timeline_endpoint(
         websocket: WebSocket,
         case_id: int,
-        token: Optional[str] = Query(None),
         db: Session = Depends(get_db),
     ):
         # Authentication
-        auth_token = parse_auth_from_websocket(websocket, token)
+        auth_token = parse_auth_from_websocket(websocket)
         if not auth_token:
             await websocket.close(code=4001, reason="Authentication required")
             return

@@ -1,7 +1,7 @@
-import base64
 import uuid
 from typing import Dict, Optional
 from datetime import datetime, timezone
+from api.validation import decode_base64_safe
 
 # Simple in-memory store for submissions (POC)
 _SUBMISSIONS: Dict[str, Dict] = {}
@@ -34,7 +34,7 @@ class EfilingClient:
             raise ValueError(f"Unsupported court: {court}")
 
         try:
-            file_bytes = base64.b64decode(file_b64)
+            file_bytes = decode_base64_safe(file_b64)
         except Exception:
             raise ValueError("file must be base64 encoded")
 

@@ -130,6 +130,14 @@ def revoke_jwt_token(token: str) -> bool:
 
             if not is_token_revoked(db, jti):
                 revoke_token(db, jti, expires_at)
+                # Mark in-memory revocation cache if jwt_auth cache is available
+                try:
+                    import api.jwt_auth as _jwt_mod
+                    now = datetime.now(timezone.utc).timestamp()
+                    _jwt_mod._REVOCATION_CACHE[jti] = (True, now)
+                except Exception:
+                    # non-fatal; cache may not be present in some test envs
+                    pass
         return True
     except Exception:
         return False
@@ -249,9 +257,13 @@ def _resolve_api_key_user(api_key: str, db: Session) -> CurrentUser:
                 role="admin" if getattr(user, "is_admin", False) else "user",
             )
 
+    # Use a deterministic negative user_id derived from key_id to give each
+    # unlinked API key its own identity for rate limiting and audit logging.
+    # 8 bytes provides a 64-bit space, virtually eliminating collision risk.
+    derived_id = int.from_bytes(hashlib.sha256(key_id.encode()).digest()[:8], "big", signed=False)
     return CurrentUser(
-        user_id=0,
-        email="api_user",
+        user_id=-derived_id,
+        email=f"api_key_{key_id[:8]}",
         role="api",
     )
 
