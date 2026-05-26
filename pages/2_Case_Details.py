@@ -2,15 +2,34 @@
 Case Detail Page - LegalAssist AI.
 View case timeline, documents, deadlines, and remedies.
 """
+import sys
+import os
+# Add parent directory to sys.path to resolve 'core' and other top-level modules
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import streamlit as st
+import routes
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 
 from auth import require_auth, redirect_to_login, get_current_user_id
-from case_manager import get_case_detail, upload_case_document, mark_deadline_completed, mark_deadline_incomplete, add_manual_deadline, mark_case_appealed, mark_case_closed, mark_case_active, generate_case_summary_text, add_case_comment, update_case_presence
-from case_manager import upload_case_attachment
+from case_manager import (
+    get_case_detail,
+    upload_case_document,
+    mark_deadline_completed,
+    mark_deadline_incomplete,
+    add_manual_deadline,
+    mark_case_appealed,
+    mark_case_closed,
+    mark_case_active,
+    generate_case_summary_text,
+    add_case_comment,
+    update_case_presence,
+    upload_case_attachment,
+    get_user_cases_summary,
+)
 from core import extract_text_from_pdf
+from api.feature_flags import is_feature_enabled_for_user, get_feature_flag_manager
 from db.crud.knowledge import get_knowledge_freshness_summary, list_knowledge_invalidations
 from db.crud.audit import list_audit_events
 from database import DocumentType, CaseStatus, SessionLocal, UserPreference
@@ -686,6 +705,7 @@ def main():
     remedies = case_data.get("remedies")
     comments = case_data.get("comments", [])
     presence = case_data.get("presence", [])
+    timeline = case_data.get("timeline", [])
 
     update_case_presence(user_id, case_id, active_view="case_details")
 

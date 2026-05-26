@@ -56,6 +56,7 @@ from database import (
     get_attachments_for_case,
     save_case_note_draft,
 )
+from db.case_service import get_case_note, publish_case_note, get_case_note_history
 from services.timeline_service import timeline_service as _timeline_service
 from services.deadlines_auto_creator import (
     _extract_days_from_text as _extract_days_from_text_service,
