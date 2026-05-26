@@ -218,7 +218,7 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
             response.set_cookie(
                 CSRF_COOKIE_NAME,
                 token,
-                httponly=False,
+                httponly=True,
                 samesite="lax",
                 secure=True,
                 path="/",
@@ -244,7 +244,7 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
                 response.set_cookie(
                     CSRF_COOKIE_NAME,
                     token,
-                    httponly=False,
+                    httponly=True,
                     samesite="lax",
                     secure=True,
                     path="/",
