@@ -8,13 +8,14 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
-from database import get_db
+
 from db.models import APIKey
 from db.models import APIKey
 from api.auth import create_access_token, create_api_key_record, CurrentUser, get_current_user, verify_password
 from database import SessionLocal
 from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
 from api.limiter import RateLimit
+from api.dependencies import get_db_rls
 import structlog
 from core.log_redaction import mask_email
 from fastapi import Request
@@ -79,7 +80,7 @@ async def get_token(
 async def create_api_key(
     request: APIKeyCreate,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_rls)
 ) -> APIKeyResponse:
     """
     Create new API key for programmatic access
@@ -118,7 +119,7 @@ async def create_api_key(
 )
 async def list_api_keys(
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_rls)
 ) -> dict:
     """List all API keys for current user"""
     
@@ -148,7 +149,7 @@ async def list_api_keys(
 async def delete_api_key(
     key_id: str,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_rls)
 ) -> dict:
     """Delete an API key"""
     

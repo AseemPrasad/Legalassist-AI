@@ -17,7 +17,7 @@ from api.jwt_auth import verify_token, InvalidTokenError as JWTInvalidTokenError
 from api.limiter import enforce_rate_limit, RateLimitExceeded
 from core.timeline_payloads import TimelineEventPayload, TimelineSubscribedPayload
 from db.models.cases import Case
-from db.session import get_db
+from db.session import get_db, apply_rls_context, clear_rls_context, _is_postgres
 from services.timeline_realtime import timeline_realtime_bus, TimelineRealtimeBus
 from sqlalchemy.orm import Session
 
@@ -119,6 +119,14 @@ def register_case_timeline_endpoint(app: FastAPI) -> None:
         if not _require_owned_case(case_id, user_id, db):
             await websocket.close(code=1008, reason="Forbidden: You do not own this case")
             return
+
+        # Apply RLS context so all DB queries in this WebSocket session are
+        # scoped to the authenticated user at the database level.
+        if _is_postgres:
+            try:
+                apply_rls_context(db, int(user_id))
+            except (TypeError, ValueError):
+                pass
 
         identifier = f"user:{user_id}"
         if websocket.client and websocket.client.host:
