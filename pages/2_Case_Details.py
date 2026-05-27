@@ -11,6 +11,7 @@ import streamlit as st
 import routes
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
+import requests
 
 from auth import require_auth, redirect_to_login, get_current_user_id
 from case_manager import (
@@ -157,6 +158,32 @@ def render_collaboration_section(case_id: int, user_id: int, comments: list, pre
         st.info("No comments yet. Start the discussion below.")
 
     st.markdown("---")
+
+
+def _get_api_base_url() -> str:
+    return str(st.session_state.get("api_base_url") or Config.API_BASE_URL or "http://localhost:8000").rstrip("/")
+
+
+def _create_anonymized_share_link(case_id: int, scope: str) -> Optional[str]:
+    api_base = _get_api_base_url()
+    token = st.session_state.get("user_token")
+    if not token:
+        st.error("Please sign in again to generate a share link.")
+        return None
+
+    try:
+        response = requests.post(
+            f"{api_base}/api/v1/cases/{case_id}/share-anonymized",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"scope": scope},
+            timeout=float(getattr(Config, "API_REQUEST_TIMEOUT_SECONDS", 5.0)),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload.get("share_url")
+    except requests.RequestException as exc:
+        st.error(f"Failed to create share link: {exc}")
+        return None
 
     with st.form("case_comment_form", clear_on_submit=True):
         reply_options = ["Top-level comment"] + [

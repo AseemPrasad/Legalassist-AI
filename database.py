@@ -178,7 +178,7 @@ from db.models.analytics import (
     CaseEmbedding, CaseIssue, CaseArgument, KnowledgeGraphEdge, PrecedentMatch, RevokedToken,
 )
 from db.models.cases import (
-    CaseStatus, DocumentType, CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote,
+    CaseStatus, DocumentType, CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote, AnonymizedShareToken,
 )
 from db.models.notifications import (
     NotificationStatus, NotificationChannel, UserPreference, NotificationTemplate, NotificationLog,

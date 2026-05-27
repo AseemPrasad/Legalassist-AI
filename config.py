@@ -176,7 +176,6 @@ class Config:
 
     @classmethod
     def is_development(cls):
-<<<<<<< fix/websocket-job-ownership
         env_dev = cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
         if not env_dev:
             return False

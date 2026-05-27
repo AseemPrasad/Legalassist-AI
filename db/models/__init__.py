@@ -1,5 +1,5 @@
 from .notifications import NotificationStatus, NotificationChannel, NotificationLog, NotificationTemplate, UserPreference
-from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote, CaseNoteVersion, CaseStatus, DocumentType
+from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote, CaseNoteVersion, AnonymizedShareToken, CaseStatus, DocumentType
 from .auth import User, OTPVerification, APIKey, APIKey
 from .audit import AuditEvent
 from db.immutable_audit_log import ImmutableAuditLog
@@ -35,6 +35,7 @@ __all__ = [
     "CaseTimeline",
     "CaseNote",
     "CaseNoteVersion",
+    "AnonymizedShareToken",
     "CaseStatus",
     "DocumentType",
     "User",
