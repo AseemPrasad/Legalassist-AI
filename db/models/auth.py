@@ -23,9 +23,11 @@ class User(Base):
     last_login = Column(DateTime(timezone=True), nullable=True)
     is_verified = Column(Boolean, default=True, nullable=False)
     is_admin = Column(Boolean, default=False, nullable=False)
+    sso_provider = Column(String(50), nullable=True, index=True)
+    sso_provider_id = Column(String(255), nullable=True)
 
     cases = relationship("Case", back_populates="user", cascade="all, delete-orphan")
-    preferences = relationship("UserPreference", back_populates="user", cascade="all, delete-orphan")
+    preferences = relationship("db.models.notifications.UserPreference", back_populates="user", cascade="all, delete-orphan")
 
     def to_dict(self) -> dict:
         return {

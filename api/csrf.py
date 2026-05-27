@@ -40,13 +40,16 @@ def generate_csrf_token(user_id: int, session_id: str) -> str:
     secret = _get_csrf_secret()
     message = f"{user_id}:{session_id}"
     sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
-    return f"{session_id}.{sig[:32]}"
+    return f"{CSRF_TOKEN_V2_PREFIX}{session_id}.{sig[:32]}"
 
 
 def validate_csrf_token(token: str, user_id: int) -> bool:
     if not token or "." not in token:
         return False
-    parts = token.rsplit(".", 1)
+    if not token.startswith(CSRF_TOKEN_V2_PREFIX):
+        return False
+    inner = token[len(CSRF_TOKEN_V2_PREFIX):]
+    parts = inner.rsplit(".", 1)
     if len(parts) != 2:
         return False
     session_id, received_sig = parts
@@ -218,7 +221,7 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
             response.set_cookie(
                 CSRF_COOKIE_NAME,
                 token,
-                httponly=False,
+                httponly=True,
                 samesite="lax",
                 secure=True,
                 path="/",
@@ -238,13 +241,12 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
                 except Exception:
                     resolved_user_id = None
 
-            if resolved_user_id is not None:
-                session_id = jwt_jti or secrets.token_urlsafe(16)
-                token = generate_csrf_token(resolved_user_id, session_id)
+            if resolved_user_id is not None and jwt_jti:
+                token = generate_csrf_token(resolved_user_id, jwt_jti)
                 response.set_cookie(
                     CSRF_COOKIE_NAME,
                     token,
-                    httponly=False,
+                    httponly=True,
                     samesite="lax",
                     secure=True,
                     path="/",

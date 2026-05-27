@@ -218,5 +218,5 @@ def revoke_jwt_token(token: str) -> bool:
                 _REVOCATION_CACHE[jti] = (True, now)
         return True
     except Exception as exc:
-        logger.error("revoke_jwt_token_failed", error=str(exc))
+        logger.error("revoke_jwt_token_failed", error=type(exc).__name__)
         return False

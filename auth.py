@@ -127,14 +127,16 @@ OTP_REQUEST_RATE_LIMIT_MAX = int(os.getenv("OTP_REQUEST_RATE_LIMIT_MAX", str(Con
 OTP_REQUEST_RATE_LIMIT_HOURS = int(os.getenv("OTP_REQUEST_RATE_LIMIT_HOURS", str(Config.OTP_REQUEST_RATE_LIMIT_HOURS)))
 
 
-def _hash_otp(otp: str) -> str:
-    """Hash OTP code before storing"""
-    return hashlib.sha256(otp.encode()).hexdigest()
+OTP_HASH_ITERATIONS = 100000
+
+def _hash_otp(otp: str, email: str) -> str:
+    """Hash OTP code before storage using PBKDF2-HMAC-SHA256 with per-email salt"""
+    return hashlib.pbkdf2_hmac('sha256', otp.encode(), email.encode(), OTP_HASH_ITERATIONS).hex()
 
 
-def _verify_otp_hash(otp: str, otp_hash: str) -> bool:
+def _verify_otp_hash(otp: str, email: str, otp_hash: str) -> bool:
     """Verify OTP against stored hash using constant-time comparison"""
-    return secrets.compare_digest(_hash_otp(otp), otp_hash)
+    return secrets.compare_digest(_hash_otp(otp, email), otp_hash)
 
 
 def generate_otp() -> str:
@@ -222,10 +224,16 @@ def send_otp_email(email: str, otp: str) -> bool:
             return False
 
 
+GENERIC_OTP_SENT = "If the email address is valid, you will receive an OTP shortly."
+
 def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, str]:
     """
     Request OTP for email authentication.
     Returns (success, message).
+
+    Security: Always returns the same success message to prevent email enumeration
+    via rate-limit or delivery-failure side channels. Actual outcomes are logged
+    internally for observability.
     """
     # Validate email format
     if not email or not EMAIL_REGEX.match(email):
@@ -233,12 +241,10 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
 
     db = SessionLocal()
     try:
-        # Generate OTP
         otp = generate_otp()
-        otp_hash = _hash_otp(otp)
+        otp_hash = _hash_otp(otp, email)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
-        # Store OTP
         try:
             create_otp_verification(
                 db,
@@ -248,16 +254,22 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
                 max_requests_per_hour=OTP_REQUEST_RATE_LIMIT_MAX,
                 requester_ip=requester_ip,
             )
-        except ValueError as exc:
-            return False, str(exc)
+        except ValueError:
+            logger.info(
+                "otp_request_rate_limited",
+                recipient=mask_email(email),
+            )
+            return True, GENERIC_OTP_SENT
 
-        # Send OTP email
         email_sent = send_otp_email(email, otp)
 
-        if email_sent:
-            return True, "OTP sent to your email"
-        else:
-            return False, "Failed to send OTP email. Please try again."
+        if not email_sent:
+            logger.warning(
+                "otp_email_delivery_failed",
+                recipient=mask_email(email),
+            )
+
+        return True, GENERIC_OTP_SENT
 
     except Exception as e:
         logger.error(
@@ -265,7 +277,7 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
             recipient=mask_email(email),
             error=sanitize_log_text(str(e)),
         )
-        return False, "An unexpected error occurred. Please try again later."
+        return True, GENERIC_OTP_SENT
     finally:
         db.close()
 
@@ -305,7 +317,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
             return False, GENERIC_OTP_FAILURE, None
 
         # Verify OTP
-        if not _verify_otp_hash(otp, otp_record.otp_hash):
+        if not _verify_otp_hash(otp, email, otp_record.otp_hash):
             record_otp_failed_attempt(
                 db, 
                 otp_record.id, 

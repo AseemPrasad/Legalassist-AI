@@ -36,34 +36,26 @@ def generate_audio(text: str, language_name: str) -> bytes:
 def transcribe_audio(audio_bytes: bytes, client=None, language: Optional[str] = None) -> str:
     """
     Transcribe Speech-to-Text audio bytes using OpenAI Whisper API.
-    Returns the transcribed text.
+    Returns the transcribed text, or an empty string on failure.
+
+    Delegates to the unified transcription pipeline in
+    ``core.speech_transcription`` so the Chat UI and REST API share the
+    same implementation.
     """
     if not audio_bytes:
         return ""
-        
+
     if client is None:
         from core.app_utils import get_client
         client = get_client()
-        
+
     if not client:
         logging.error("No API client available for transcription.")
         return ""
-        
+
     try:
-        # Create a file-like object with a name attribute required by OpenAI API
-        file_obj = io.BytesIO(audio_bytes)
-        file_obj.name = "audio.wav"
-        
-        kwargs = {
-            "model": "whisper-1",
-            "file": file_obj,
-            "response_format": "text"
-        }
-        if language:
-            kwargs["language"] = language
-            
-        response = client.audio.transcriptions.create(**kwargs)
-        return response.strip()
+        from core.speech_transcription import transcribe_audio as _transcribe
+        return _transcribe(audio_bytes, language=language, client=client)
     except Exception as e:
         logging.error(f"Error transcribing audio: {e}")
         return ""

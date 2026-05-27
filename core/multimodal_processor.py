@@ -323,22 +323,61 @@ class MultiModalProcessor:
                 'file_type': 'image'
             }
     
-    def _pdf_page_to_image(self, page) -> Optional[np.ndarray]:
-        """Convert PDF page to image for OCR
-        
+    def _pdf_page_to_image(self, page, dpi: int = 300) -> Optional[np.ndarray]:
+        """Convert a single PDF page to a numpy image array for OCR.
+
+        Uses pdf2image (which requires Poppler) to rasterize the page.
+        Falls back gracefully with a logged error if either dependency is
+        missing.
+
         Args:
-            page: PDF page object
-            
+            page: pypdf Page object (used only to obtain the page index and
+                  the parent PdfReader so we can re-render via pdf2image).
+            dpi:  Rasterization resolution.  300 DPI is the OCR sweet-spot.
+
         Returns:
-            Image as numpy array or None
+            Image as a numpy array (BGR, uint8) or None on failure.
         """
         try:
             from pdf2image import convert_from_bytes
-            # This is a simplified approach
-            # In production, you'd use pdf2image directly on the PDF
-            logger.warning("Direct page-to-image conversion not implemented")
-            return None
+            from pdf2image.exceptions import PDFInfoNotInstalledError, PDFPageCountError
         except ImportError:
+            logger.error(
+                "pdf2image is not installed. "
+                "Install it with: pip install pdf2image  "
+                "(Poppler must also be available on PATH)"
+            )
+            return None
+
+        try:
+            # Reconstruct the raw bytes for just this page so we can hand
+            # them to pdf2image without needing the original file handle.
+            import io as _io
+            from pypdf import PdfWriter
+
+            writer = PdfWriter()
+            writer.add_page(page)
+            buf = _io.BytesIO()
+            writer.write(buf)
+            single_page_bytes = buf.getvalue()
+
+            images = convert_from_bytes(single_page_bytes, dpi=dpi)
+            if not images:
+                logger.warning("pdf2image returned no images for page")
+                return None
+
+            pil_image = images[0]
+            return np.array(pil_image)
+
+        except (PDFInfoNotInstalledError, PDFPageCountError) as exc:
+            logger.error(
+                "Poppler is not installed or not on PATH — required for PDF "
+                "rasterization. Install Poppler and ensure it is accessible. "
+                "Error: %s", exc
+            )
+            return None
+        except Exception as exc:
+            logger.error("_pdf_page_to_image failed: %s", exc)
             return None
     
     def extract_handwriting(

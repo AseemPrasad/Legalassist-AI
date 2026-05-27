@@ -56,6 +56,7 @@ from database import (
     get_attachments_for_case,
     save_case_note_draft,
 )
+from db.case_service import get_case_note, publish_case_note, get_case_note_history
 from services.timeline_service import timeline_service as _timeline_service
 from services.deadlines_auto_creator import (
     _extract_days_from_text as _extract_days_from_text_service,
@@ -927,6 +928,17 @@ def _update_case_status(user_id: int, case_id: int, status: CaseStatus) -> bool:
             case_id=case_id,
             event_type="status_changed",
             description=f"Case status changed to {status.value}",
+            metadata={"new_status": status.value},
+        )
+
+        record_immutable_audit_event(
+            event_type="case.status_changed",
+            action="status_change",
+            actor_user_id=user_id,
+            resource_type="case",
+            resource_id=str(case_id),
+            outcome="success",
+            case_id=case_id,
             metadata={"new_status": status.value},
         )
 

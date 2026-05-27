@@ -8,6 +8,7 @@ All entries are append-only with SHA-256 chain hashing for evidentiary integrity
 import datetime as dt
 import hashlib
 import json
+import threading
 
 from sqlalchemy import Column, Integer, String, DateTime, Text, JSON, Index, event
 
@@ -59,6 +60,9 @@ class ImmutableAuditLog(Base):
     )
 
 
+_audit_append_lock = threading.Lock()
+
+
 def append_audit_entry(
     event_type: str,
     action: str,
@@ -94,54 +98,56 @@ def append_audit_entry(
         "user_agent": user_agent,
     }
 
-    with db_session() as db:
-        last = db.query(ImmutableAuditLog).order_by(ImmutableAuditLog.id.desc()).first()
-        prev_hash = last.integrity_hash if last else "GENESIS"
+    db.commit()  # commit any pending outer transaction so the lock-bound read sees fresh state
+    with _audit_append_lock:
+        with db_session() as db:
+            last = db.query(ImmutableAuditLog).order_by(ImmutableAuditLog.id.desc()).first()
+            prev_hash = last.integrity_hash if last else "GENESIS"
 
-        entry = ImmutableAuditLog(
-            event_type=event_type,
-            action=action,
-            actor_id=actor_id,
-            actor_user_id=actor_user_id,
-            actor_type=actor_type,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            outcome=outcome,
-            changes=changes,
-            audit_metadata=metadata,
-            ip_address=ip_address,
-            user_agent=user_agent,
-            prev_hash=prev_hash,
-            integrity_hash="",  # computed below
-        )
-        db.add(entry)
-        db.flush()
+            entry = ImmutableAuditLog(
+                event_type=event_type,
+                action=action,
+                actor_id=actor_id,
+                actor_user_id=actor_user_id,
+                actor_type=actor_type,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                outcome=outcome,
+                changes=changes,
+                audit_metadata=metadata,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                prev_hash=prev_hash,
+                integrity_hash="",  # computed below
+            )
+            db.add(entry)
+            db.flush()
 
-        entry.integrity_hash = _compute_hash(
-            {
+            entry.integrity_hash = _compute_hash(
+                {
+                    "id": entry.id,
+                    "timestamp": entry.timestamp,
+                    "event_type": entry.event_type,
+                    "action": entry.action,
+                    "actor_id": entry.actor_id,
+                    "actor_user_id": entry.actor_user_id,
+                    "resource_type": entry.resource_type,
+                    "resource_id": entry.resource_id,
+                    "outcome": entry.outcome,
+                    "changes": entry.changes,
+                    "audit_metadata": entry.audit_metadata,
+                    "prev_hash": prev_hash,
+                },
+                prev_hash,
+            )
+            db.commit()
+
+            return {
                 "id": entry.id,
                 "timestamp": entry.timestamp,
-                "event_type": entry.event_type,
-                "action": entry.action,
-                "actor_id": entry.actor_id,
-                "actor_user_id": entry.actor_user_id,
-                "resource_type": entry.resource_type,
-                "resource_id": entry.resource_id,
-                "outcome": entry.outcome,
-                "changes": entry.changes,
-                "audit_metadata": entry.audit_metadata,
-                "prev_hash": prev_hash,
-            },
-            prev_hash,
-        )
-        db.commit()
-
-        return {
-            "id": entry.id,
-            "timestamp": entry.timestamp,
-            "integrity_hash": entry.integrity_hash,
-            "prev_hash": entry.prev_hash,
-        }
+                "integrity_hash": entry.integrity_hash,
+                "prev_hash": entry.prev_hash,
+            }
 
 
 def verify_audit_chain(start_id: int = 1, end_id: int | None = None) -> dict:

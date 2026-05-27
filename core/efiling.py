@@ -38,6 +38,9 @@ class EfilingClient:
         except Exception:
             raise ValueError("file must be base64 encoded")
 
+        if len(file_bytes) > 25 * 1024 * 1024:
+            raise ValueError("file size exceeds maximum allowed size of 25 MB")
+
         if not cls.validate_format(file_bytes, metadata.get("filename") if metadata else None):
             raise ValueError("Invalid or unsupported document format")
 

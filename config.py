@@ -176,7 +176,6 @@ class Config:
 
     @classmethod
     def is_development(cls):
-<<<<<<< fix/websocket-job-ownership
         env_dev = cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
         if not env_dev:
             return False
@@ -317,7 +316,3 @@ if Config.DEBUG:
         print(f"DEBUG: LegalAssist AI Config Loaded: {safe_config}")
     except Exception as e:
         logger.error(f"Failed to dump sanitized configuration: {e}")
-
-=======
-        return cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
->>>>>>> main

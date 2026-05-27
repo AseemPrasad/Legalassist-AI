@@ -92,7 +92,7 @@ def load_legal_aid_directory():
             payload = json.load(fp)
         return payload.get("states", {})
     except Exception as e:
-        logging.error(f"Failed to load legal aid directory: {str(e)}")
+        logging.error("Failed to load legal aid directory", error_type=type(e).__name__)
         return {}
 
 
@@ -207,8 +207,8 @@ def render_remedies_section(remedies):
             st.warning(remedies["deadline"])
         
     except Exception as e:
-        st.error(f"Could not render remedies advice: {str(e)}")
-        logging.exception("Remedies rendering failed")
+        st.error("Could not render remedies advice. Please try analyzing the document again.")
+        logging.error("Remedies rendering failed", error_type=type(e).__name__)
 
 
 def render_save_to_case_section(raw_text, summary, remedies):
@@ -820,7 +820,8 @@ def main():
                             )
                         
                     except Exception as e:
-                        st.error(f"{ui['remedies_error']}: {str(e)}")
+                        st.error(f"{ui['remedies_error']}")
+                        logging.error("Remedies generation failed", error_type=type(e).__name__)
                     
                     render_save_to_case_section(raw_text, summary, remedies)
 
@@ -885,35 +886,35 @@ def main():
                     render_localized_legal_help(ui)
 
             except ValueError as e:
-                st.error(f"❌ Extraction Error: {str(e)}")
-                logging.error(f"Text extraction failed: {str(e)}")
+                st.error("❌ Extraction Error: Could not extract text from the document. Please ensure it is a valid PDF.")
+                logging.error("Text extraction failed", error_type=type(e).__name__)
 
             except openai.APIConnectionError as e:
                 st.error("❌ Network Error: Could not connect to the AI service. Please check your internet.")
-                logging.error(f"API Connection error: {str(e)}")
+                logging.error("API Connection error", error_type=type(e).__name__)
 
             except openai.RateLimitError as e:
                 st.error("❌ Rate Limit: Too many requests. Please wait a moment before trying again.")
-                logging.error(f"API Rate limit: {str(e)}")
+                logging.error("API Rate limit reached", error_type=type(e).__name__)
 
             except openai.AuthenticationError as e:
                 st.error("❌ API Key Error: Your OpenRouter/OpenAI key is invalid or not found.")
-                logging.error(f"API Auth error: {str(e)}")
+                logging.error("API Authentication error", error_type=type(e).__name__)
 
             except openai.APIStatusError as e:
                 if e.status_code == 402:
                     st.error("❌ Out of Credits: Please top up your OpenRouter account to continue.")
                 else:
-                    st.error(f"❌ AI Service Error ({e.status_code}): {e.message}")
-                logging.error(f"API Status error: {str(e)}")
+                    st.error(f"❌ AI Service Error ({e.status_code}). Please try again later.")
+                logging.error("API Status error", error_type=type(e).__name__, status_code=e.status_code)
 
             except openai.APIError as e:
-                st.error(f"❌ AI Service Error: {str(e)}")
-                logging.error(f"OpenAI API error: {str(e)}")
+                st.error("❌ AI Service Error: The AI service returned an unexpected response.")
+                logging.error("OpenAI API error", error_type=type(e).__name__)
 
             except Exception as e:
-                st.error(f"❌ Unexpected Error: {str(e)}")
-                logging.exception("An unhandled exception occurred in the main loop")
+                st.error("❌ Unexpected Error: Something went wrong. Please try again.")
+                logging.error("Unhandled exception in main loop", error_type=type(e).__name__)
 
 if __name__ == "__main__":
     main()
