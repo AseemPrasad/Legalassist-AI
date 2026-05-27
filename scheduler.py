@@ -67,6 +67,7 @@ from contextlib import contextmanager
 
 import pytz
 import structlog
+from db.models import SchedulerRun, SchedulerJobStatus
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.schedulers.blocking import BlockingScheduler
@@ -359,8 +360,30 @@ def check_and_send_reminders():
 
             logger.info("scheduler_reminder_job_completed", reminders_sent=sent_count)
 
+            # Persist run metrics
+            run = SchedulerRun(
+                job_name="reminder_job",
+                started_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(timezone.utc),
+                sent_count=sent_count,
+                status=SchedulerJobStatus.SUCCESS,
+                error_code=None,
+            )
+            db.add(run)
+            db.commit()
         except Exception as e:
             logger.error("scheduler_reminder_job_failed", error=sanitize_log_text(str(e)), exc_info=True)
+            # Persist failure metrics
+            run = SchedulerRun(
+                job_name="reminder_job",
+                started_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(timezone.utc),
+                sent_count=sent_count if 'sent_count' in locals() else 0,
+                status=SchedulerJobStatus.FAILED,
+                error_code=str(e),
+            )
+            db.add(run)
+            db.commit()
         finally:
             db.close()
 
@@ -382,8 +405,31 @@ def recompute_due_knowledge_invalidations():
         try:
             processed = process_due_knowledge_invalidations(db)
             logger.info("scheduler_knowledge_recompute_completed", processed=len(processed))
+            
+            # Persist run metrics
+            run = SchedulerRun(
+                job_name="knowledge_job",
+                started_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(timezone.utc),
+                sent_count=len(processed),
+                status=SchedulerJobStatus.SUCCESS,
+                error_code=None,
+            )
+            db.add(run)
+            db.commit()
         except Exception as exc:
             logger.error("scheduler_knowledge_recompute_failed", error=sanitize_log_text(str(exc)), exc_info=True)
+            
+            run = SchedulerRun(
+                job_name="knowledge_job",
+                started_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(timezone.utc),
+                sent_count=0,
+                status=SchedulerJobStatus.FAILED,
+                error_code=str(exc),
+            )
+            db.add(run)
+            db.commit()
         finally:
             db.close()
 
