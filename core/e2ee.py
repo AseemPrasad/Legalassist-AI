@@ -17,6 +17,10 @@ import os
 import secrets
 from dataclasses import dataclass
 from typing import Optional
+import json
+from base64 import b64encode, b64decode
+
+from .kms import KMSProvider, LocalFileKMS
 
 AESGCM_IV_LEN = 12
 AESGCM_TAG_LEN = 16
@@ -127,3 +131,56 @@ def unwrap_file_key(wrapped: str, master_key: str) -> str:
     salt, iv, ciphertext = data[:16], data[16:16 + AESGCM_IV_LEN], data[16 + AESGCM_IV_LEN:]
     key = derive_key(master_key, salt)
     return decrypt_bytes(ciphertext, key, iv).decode("utf-8")
+
+
+# --- KMS / master key utilities -------------------------------------------------
+def generate_master_key() -> str:
+    """Generate a random master key (base64).
+
+    Master keys are used to wrap per-file keys (envelope encryption). These
+    master keys themselves are wrapped by the root KMS provider and stored by
+    the application. This function returns a base64-encoded random 32-byte key.
+    """
+    return b64encode(secrets.token_bytes(KEY_SIZE)).decode("ascii")
+
+
+def wrap_master_key_with_kms(master_key_b64: str, kms: KMSProvider) -> str:
+    """Wrap a base64-encoded master key using the provided KMS provider."""
+    return kms.wrap(b64decode(master_key_b64))
+
+
+def unwrap_master_key_with_kms(wrapped_b64: str, kms: KMSProvider) -> str:
+    """Unwrap a master key via KMS and return base64-encoded master key."""
+    raw = kms.unwrap(wrapped_b64)
+    return b64encode(raw).decode("ascii")
+
+
+def rotate_wrapped_master_keys(manifest_path: str, old_kms: KMSProvider, new_kms: KMSProvider) -> None:
+    """Rotate all wrapped master keys listed in a JSON manifest.
+
+    The manifest is expected to be a JSON object mapping identifiers to wrapped
+    master keys (base64 strings). The function writes a backup file
+    `<manifest>.bak` before replacing entries in-place.
+    """
+    if not os.path.exists(manifest_path):
+        raise FileNotFoundError(manifest_path)
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    backup_path = manifest_path + ".bak"
+    with open(backup_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    rotated = {}
+    for key_id, wrapped in manifest.items():
+        # unwrap with old KMS then re-wrap with new KMS
+        try:
+            master_b64 = unwrap_master_key_with_kms(wrapped, old_kms)
+            new_wrapped = wrap_master_key_with_kms(master_b64, new_kms)
+            rotated[key_id] = new_wrapped
+        except Exception:
+            # leave original entry if unwrap fails and continue
+            rotated[key_id] = wrapped
+
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(rotated, f, indent=2)
