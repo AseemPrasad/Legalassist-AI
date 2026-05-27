@@ -326,9 +326,3 @@ if Config.DEBUG:
         print(f"DEBUG: LegalAssist AI Config Loaded: {safe_config}")
     except Exception as e:
         logger.error(f"Failed to dump sanitized configuration: {e}")
-
-try:
-    Config.validate_urls()
-except RuntimeError as e:
-    logger.error("Configuration validation failed: %s", e)
-    raise

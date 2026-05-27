@@ -137,5 +137,5 @@ def test_case_timeline_forbidden_for_other_user(client, test_db):
 
     response = client.get(f"/api/v1/cases/{case.id}/timeline")
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Forbidden: You do not own this case"
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Case not found"

@@ -643,7 +643,7 @@ class NotificationService:
             success=True,
             channel=NotificationChannel.SMS,
             recipient=user_preference.phone_number,
-            message_id=f"task_{task_result.id}",
+            message_id=message_id,
             error=None,
         )
 

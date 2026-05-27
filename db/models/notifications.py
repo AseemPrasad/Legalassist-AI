@@ -40,7 +40,7 @@ class UserPreference(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
-    user = relationship("User", back_populates="preferences")
+    user = relationship("db.models.auth.User", back_populates="preferences")
 
 
 class NotificationTemplate(Base):
@@ -76,4 +76,4 @@ class NotificationLog(Base):
     failed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
-    deadline = relationship("CaseDeadline", back_populates="notifications")
+    deadline = relationship("db.models.cases.CaseDeadline", back_populates="notifications")
