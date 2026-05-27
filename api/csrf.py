@@ -102,17 +102,17 @@ def is_same_origin(request: Request, allowed_hosts: Optional[Set[str]] = None) -
             parsed = urlparse(referer)
             allowed = allowed_hosts or set()
             host = request.headers.get("host", "").split(":")[0]
-            if parsed.netloc in allowed or parsed.netloc == f"{host}:443":
+            if parsed.hostname in allowed or parsed.hostname == host:
                 return True
-            return parsed.netloc == f"{host}:443" or parsed.netloc == host
+            return parsed.hostname == host
         return False
     from urllib.parse import urlparse
     parsed = urlparse(origin)
     host = request.headers.get("host", "").split(":")[0]
     allowed = allowed_hosts or set()
-    if parsed.netloc in allowed:
+    if parsed.hostname in allowed:
         return True
-    return parsed.netloc == host
+    return parsed.hostname == host
 
 
 def validate_csrf(
