@@ -193,8 +193,8 @@ def test_get_case_details_forbidden(client, test_db):
     _, _, case_three = _seed_cases(test_db)
     
     response = client.get(f"/api/v1/cases/{case_three.id}")
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Forbidden: You do not own this case"
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Case not found"
 
 
 def test_get_case_details_not_found(client, test_db):
