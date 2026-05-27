@@ -400,6 +400,7 @@ def compare_cases(
         Detailed comparison including issues, arguments, and differences
     """
     _require_owned_case(case_id, current_user, db)
+    _require_owned_case(precedent_id, current_user, db)
 
     try:
         comparison = CaseComparison.compare_cases(db, case_id, precedent_id)
@@ -427,6 +428,7 @@ def get_comparison_suggestions(
         List of suggested arguments based on winning precedents
     """
     _require_owned_case(case_id, current_user, db)
+    _require_owned_case(precedent_id, current_user, db)
 
     try:
         suggestions = CaseComparison.suggest_arguments(db, case_id, precedent_id)
@@ -459,6 +461,7 @@ def get_comparison_differences(
         Highlighted differences and warnings
     """
     _require_owned_case(case_id, current_user, db)
+    _require_owned_case(precedent_id, current_user, db)
 
     try:
         differences = CaseComparison.highlight_differences(db, case_id, precedent_id)
