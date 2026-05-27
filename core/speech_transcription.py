@@ -88,7 +88,11 @@ def transcribe_audio(
     file_obj = io.BytesIO(audio_bytes)
     file_obj.name = filename
 
-    kwargs: dict = {"model": "whisper-1", "file": file_obj, "response_format": "text"}
+    kwargs: dict = {
+        "model": "whisper-1",
+        "file": file_obj,
+        "response_format": "text",
+    }
     if language:
         kwargs["language"] = language
 
@@ -105,11 +109,15 @@ def transcribe_audio(
         return result.strip()
 
     # Defensive: some SDK versions wrap the result.
-    text = getattr(result, "text", None) or (result.get("text") if isinstance(result, dict) else None)
+    text = getattr(result, "text", None) or (
+        result.get("text") if isinstance(result, dict) else None
+    )
     if text:
         return str(text).strip()
 
-    raise TranscriptionProviderUnavailable("Provider returned an empty transcription")
+    raise TranscriptionProviderUnavailable(
+        "Provider returned an empty transcription"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +134,9 @@ def _build_client():
         from config import Config
         from openai import OpenAI
 
-        api_key = getattr(Config, "OPENAI_API_KEY", "") or getattr(Config, "OPENROUTER_API_KEY", "")
+        api_key = getattr(Config, "OPENAI_API_KEY", "") or getattr(
+            Config, "OPENROUTER_API_KEY", ""
+        )
         if not api_key:
             raise TranscriptionProviderUnavailable(
                 "No OPENAI_API_KEY or OPENROUTER_API_KEY configured"
@@ -168,19 +178,20 @@ class TranscriptionEngine:
         """Transcribe *audio_bytes* and return the text.
 
         Behavior:
-        - If bytes decode as UTF-8, return decoded text (testing convenience).
+        - If bytes decode as UTF-8 printable text, return decoded text.
         - Otherwise, attempt provider call.
-        - If it fails, return the fallback sentinel '[transcription_unavailable]'.
+        - Raises TranscriptionInvalidAudio or
+          TranscriptionProviderUnavailable on failure.
         """
         # Fast path: text already
         try:
             text = audio_bytes.decode("utf-8")
-            if text.strip():
+            is_printable = all(
+                c.isprintable() or c.isspace() for c in text
+            )
+            if text.strip() and is_printable:
                 return text
         except Exception:
             pass
 
-        try:
-            return transcribe_audio(audio_bytes, language=language, client=client)
-        except Exception:
-            return "[transcription_unavailable]"
+        return transcribe_audio(audio_bytes, language=language, client=client)

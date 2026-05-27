@@ -6,11 +6,12 @@ from core.app_utils import LANGUAGE_CODE_TO_NAME
 
 NAME_TO_CODE = {v: k for k, v in LANGUAGE_CODE_TO_NAME.items()}
 
-# Mapping from app_utils language codes to gTTS language codes
-# Some regional languages might not be supported directly by gTTS, we try our best.
+# Mapping from app_utils language codes to gTTS language codes.
+# Some regional languages might not be supported directly by gTTS.
 GTTS_LANG_MAPPING = {
-    "as": "bn", # Assamese might fallback to Bengali sounding voice if unsupported, or just raise error
+    "as": "bn",  # Assamese might fallback to Bengali
 }
+
 
 def generate_audio(text: str, language_name: str) -> bytes:
     """
@@ -19,11 +20,11 @@ def generate_audio(text: str, language_name: str) -> bytes:
     """
     if not text:
         return None
-        
+
     try:
         lang_code = NAME_TO_CODE.get(language_name, "en")
         gtts_lang = GTTS_LANG_MAPPING.get(lang_code, lang_code)
-        
+
         tts = gTTS(text=text, lang=gtts_lang, slow=False)
         fp = io.BytesIO()
         tts.write_to_fp(fp)
@@ -33,7 +34,10 @@ def generate_audio(text: str, language_name: str) -> bytes:
         logging.error(f"Error generating TTS for {language_name}: {e}")
         return None
 
-def transcribe_audio(audio_bytes: bytes, client=None, language: Optional[str] = None) -> str:
+
+def transcribe_audio(
+    audio_bytes: bytes, client=None, language: Optional[str] = None
+) -> str:
     """
     Transcribe Speech-to-Text audio bytes using OpenAI Whisper API.
     Returns the transcribed text, or an empty string on failure.
