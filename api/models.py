@@ -371,6 +371,8 @@ class UpcomingDeadlinesResponse(BaseModel):
     """List of upcoming deadlines"""
     user_id: str
     total_deadlines: int
+    limit: int
+    offset: int
     critical_count: int
     high_count: int
     medium_count: int

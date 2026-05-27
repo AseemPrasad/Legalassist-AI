@@ -4,7 +4,7 @@ GET /api/v1/deadlines/upcoming - Get user's upcoming deadlines
 GET /api/v1/deadlines/{deadline_id} - Get deadline details
 POST /api/v1/deadlines - Create new deadline
 """
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from api.models import DeadlineResponse, UpcomingDeadlinesResponse
@@ -96,6 +96,8 @@ def _days_until_due(due_date: datetime, now: datetime) -> int:
 )
 async def get_upcoming_deadlines(
     days: int = 30,
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db_rls),
 ) -> UpcomingDeadlinesResponse:
@@ -110,10 +112,29 @@ async def get_upcoming_deadlines(
     logger.info(
         "Fetching upcoming deadlines",
         user_id=current_user.user_id,
-        days=days
+        days=days,
+        limit=limit,
+        offset=offset,
     )
     now = datetime.now(timezone.utc)
     target_date = (now + timedelta(days=days)).replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    base_params = {"user_id": current_user.user_id, "now": now, "target_date": target_date}
+    count_row = db.execute(
+        text(
+            """
+            SELECT COUNT(*) AS total_deadlines
+            FROM case_deadlines AS d
+            JOIN cases AS c ON c.id = d.case_id
+            WHERE d.user_id = :user_id
+              AND d.is_completed = 0
+              AND d.deadline_date > :now
+              AND d.deadline_date <= :target_date
+            """
+        ),
+        base_params,
+    ).mappings().first()
+    total_deadlines = int(count_row["total_deadlines"]) if count_row else 0
 
     deadline_rows = db.execute(
         text(
@@ -137,10 +158,11 @@ async def get_upcoming_deadlines(
               AND d.is_completed = 0
               AND d.deadline_date > :now
               AND d.deadline_date <= :target_date
-            ORDER BY d.deadline_date ASC
+                        ORDER BY d.deadline_date ASC, d.id ASC
+                        LIMIT :limit OFFSET :offset
             """
         ),
-        {"user_id": current_user.user_id, "now": now, "target_date": target_date},
+                {**base_params, "limit": limit, "offset": offset},
     ).mappings().all()
 
     deadlines = []
@@ -171,7 +193,9 @@ async def get_upcoming_deadlines(
     
     return UpcomingDeadlinesResponse(
         user_id=str(current_user.user_id),
-        total_deadlines=len(deadlines),
+        total_deadlines=total_deadlines,
+        limit=limit,
+        offset=offset,
         critical_count=critical,
         high_count=high,
         medium_count=medium,
