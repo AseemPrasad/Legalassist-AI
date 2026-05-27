@@ -98,6 +98,7 @@ def append_audit_entry(
         "user_agent": user_agent,
     }
 
+    db.commit()  # commit any pending outer transaction so the lock-bound read sees fresh state
     with _audit_append_lock:
         with db_session() as db:
             last = db.query(ImmutableAuditLog).order_by(ImmutableAuditLog.id.desc()).first()

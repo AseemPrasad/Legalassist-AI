@@ -7,9 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
-from database import get_db
+
 from api.auth import get_current_user
 from database import User, Case
+from api.dependencies import get_db_rls
 
 # Import case search engines
 from core.embedding_engine import EmbeddingEngine
@@ -52,7 +53,7 @@ def search_similar_cases(
     exclude_same_user: bool = Query(True),
     cross_jurisdiction: bool = Query(False),
     jurisdiction_weight: float = Query(0.2, ge=0, le=1),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -105,7 +106,7 @@ def search_by_text(
     min_similarity: float = Query(0.5, ge=0, le=1),
     case_type: Optional[str] = None,
     jurisdiction: Optional[str] = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -145,7 +146,7 @@ def search_by_text(
 
 @router.get("/search/statistics")
 def get_search_statistics(
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """Get statistics about indexed cases"""
@@ -166,7 +167,7 @@ def get_winning_precedents(
     issue: Optional[str] = None,
     argument_type: Optional[str] = None,
     limit: int = Query(5, ge=1, le=20),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -208,7 +209,7 @@ def get_losing_precedents(
     case_id: int,
     issue: Optional[str] = None,
     limit: int = Query(5, ge=1, le=20),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -247,7 +248,7 @@ def get_losing_precedents(
 def get_argument_success_rate(
     argument: str = Query(..., min_length=10),
     issue: Optional[str] = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -276,7 +277,7 @@ def get_argument_success_rate(
 def get_arguments_by_issue(
     issue: str = Query(..., min_length=3),
     outcome: Optional[str] = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -311,7 +312,7 @@ def get_arguments_by_issue(
 def compare_cases(
     case_id: int,
     precedent_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -338,7 +339,7 @@ def compare_cases(
 def get_comparison_suggestions(
     case_id: int,
     precedent_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -370,7 +371,7 @@ def get_comparison_suggestions(
 def get_comparison_differences(
     case_id: int,
     precedent_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -400,7 +401,7 @@ def query_knowledge_graph(
     issue: str = Query(..., min_length=3),
     outcome: Optional[str] = None,
     limit: int = Query(10, ge=1, le=50),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -438,7 +439,7 @@ def query_knowledge_graph(
 
 @router.get("/knowledge-graph/statistics")
 def get_knowledge_graph_statistics(
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """Get statistics about the knowledge graph"""
@@ -456,7 +457,7 @@ def get_knowledge_graph_statistics(
 def index_case(
     case_id: int,
     force_regenerate: bool = Query(False),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -496,7 +497,7 @@ def index_case(
 def extract_case_issues(
     case_id: int,
     override_existing: bool = Query(False),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -536,7 +537,7 @@ def extract_case_issues(
 def extract_case_arguments(
     case_id: int,
     override_existing: bool = Query(False),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -566,3 +567,6 @@ def extract_case_arguments(
     except Exception as e:
         logger.error(f"Error extracting arguments: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to extract arguments")
+
+
+

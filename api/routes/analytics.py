@@ -13,7 +13,8 @@ import structlog
 from datetime import datetime
 
 from analytics_engine import AnalyticsAggregator
-from database import get_db
+from api.dependencies import get_db_rls
+
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
 logger = structlog.get_logger(__name__)
@@ -110,7 +111,7 @@ async def get_analytics_overview(
     response_model=DashboardSummaryResponse,
     summary="Get dashboard summary"
 )
-def get_dashboard_summary(db: Session = Depends(get_db)) -> DashboardSummaryResponse:
+def get_dashboard_summary(db: Session = Depends(get_db_rls)) -> DashboardSummaryResponse:
     """Get the dashboard summary used by the Streamlit home analytics view."""
 
     summary = AnalyticsAggregator.get_dashboard_summary(db)
@@ -143,3 +144,6 @@ async def get_usage_metrics(
         },
         "generated_at": datetime.now(timezone.utc).isoformat()
     }
+
+
+

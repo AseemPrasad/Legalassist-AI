@@ -113,6 +113,80 @@ def update_notification_log_by_message_id(
     return log
 
 
+def reserve_notification(
+    db: Session,
+    deadline_id: int,
+    user_id: int,
+    channel: NotificationChannel,
+    recipient: str,
+    days_before: int,
+    message_preview: Optional[str] = None,
+) -> tuple[NotificationLog, bool]:
+    """Reserve a pending notification row before delivery starts."""
+    log = NotificationLog(
+        deadline_id=deadline_id,
+        user_id=user_id,
+        channel=channel,
+        recipient=recipient,
+        days_before=days_before,
+        status=NotificationStatus.PENDING,
+        message_preview=message_preview,
+    )
+    try:
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        return log, True
+    except IntegrityError:
+        db.rollback()
+        existing = db.query(NotificationLog).filter(
+            NotificationLog.deadline_id == deadline_id,
+            NotificationLog.days_before == days_before,
+            NotificationLog.channel == channel,
+        ).first()
+        return existing, False
+
+
+def update_notification_result(
+    db: Session,
+    deadline_id: int,
+    user_id: int,
+    days_before: int,
+    channel: NotificationChannel,
+    status: NotificationStatus,
+    message_id: Optional[str] = None,
+    error_message: Optional[str] = None,
+    message_preview: Optional[str] = None,
+) -> NotificationLog:
+    """Upsert a notification log after a delivery attempt."""
+    existing = db.query(NotificationLog).filter(
+        NotificationLog.deadline_id == deadline_id,
+        NotificationLog.days_before == days_before,
+        NotificationLog.channel == channel,
+    ).with_for_update(read=True).first()
+
+    if existing:
+        existing.status = status
+        existing.message_id = message_id or existing.message_id
+        existing.error_message = error_message or existing.error_message
+        existing.message_preview = message_preview or existing.message_preview
+        if status == NotificationStatus.SENT:
+            existing.sent_at = dt.datetime.now(dt.timezone.utc)
+        db.add(existing)
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    return get_or_create_notification_log(
+        db=db,
+        deadline_id=deadline_id,
+        user_id=user_id,
+        channel=channel,
+        recipient="unknown",
+        days_before=days_before,
+    )[0]
+
+
 def create_case_deadline(
     db: Session,
     user_id: int,

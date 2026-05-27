@@ -243,6 +243,19 @@ class CaseNoteHistoryResponse(BaseModel):
     versions: List[CaseNoteVersionItem]
 
 
+class AnonymizedShareCreateRequest(BaseModel):
+    scope: str = Field("personal_identifiers", min_length=1, max_length=255)
+    expires_in_hours: int = Field(72, ge=1, le=8760)
+
+
+class AnonymizedShareResponse(BaseModel):
+    token: str
+    anonymized_id: str
+    scope: str
+    share_url: str
+    expires_at: datetime
+
+
 # ============================================================================
 # Report Generation Models
 # ============================================================================
@@ -358,6 +371,8 @@ class UpcomingDeadlinesResponse(BaseModel):
     """List of upcoming deadlines"""
     user_id: str
     total_deadlines: int
+    limit: int
+    offset: int
     critical_count: int
     high_count: int
     medium_count: int

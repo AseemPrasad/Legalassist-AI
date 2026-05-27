@@ -91,6 +91,49 @@ def get_client():
 
 # ==================== TEXT PROCESSING ====================
 
+def _validate_encoding_quality(text: str) -> Tuple[bool, float]:
+    """
+    Validate the quality/readability of the extracted text.
+    Detects if the text is heavily corrupted, mostly garbage characters,
+    or has invalid unicode replacement characters.
+    
+    Returns:
+        Tuple[bool, float]: (is_valid, quality_score_0_to_1)
+    """
+    if not text or not text.strip():
+        return False, 0.0
+        
+    # Count total characters and replacement characters (corrupted bytes)
+    total_chars = len(text)
+    replacement_chars = text.count('\uFFFD')
+    
+    # Calculate ratio of replacement characters
+    replacement_ratio = replacement_chars / total_chars if total_chars > 0 else 0.0
+    
+    # Count printable alphanumeric characters vs total characters
+    alnum_chars = sum(1 for c in text if c.isalnum() or c.isspace())
+    alnum_ratio = alnum_chars / total_chars if total_chars > 0 else 0.0
+    
+    # Compute a quality score from 0.0 to 1.0
+    # Heavily penalize replacement characters and non-alphanumeric/non-space garbage
+    quality = (1.0 - replacement_ratio) * alnum_ratio
+    
+    # We consider it valid if quality score is at least 0.5 and replacement ratio is under 15%
+    is_valid = quality >= 0.5 and replacement_ratio < 0.15
+    
+    # Additional check: detect fragmented text where words are split into single characters
+    # e.g., "J u d g m e n t  o f  t h e  C o u r t"
+    words = [w for w in text.split() if w]
+    if len(words) > 15:
+        avg_word_len = sum(len(w) for w in words) / len(words)
+        if avg_word_len < 2.0:
+            is_valid = False
+            quality = min(quality, 0.3)
+            
+    return is_valid, quality
+
+
+
 def _extract_pages_pypdf(reader: PdfReader) -> str:
     text = ""
     for page in reader.pages:

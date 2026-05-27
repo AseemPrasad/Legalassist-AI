@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 import api.routes.cases as cases_route
 from api.auth import CurrentUser, get_current_user
-from database import Base, Case, CaseStatus, CaseDocument, DocumentType
+from database import Base, Case, CaseStatus, CaseDocument, DocumentType, AnonymizedShareToken
 
 
 @pytest.fixture()
@@ -193,8 +193,8 @@ def test_get_case_details_forbidden(client, test_db):
     _, _, case_three = _seed_cases(test_db)
     
     response = client.get(f"/api/v1/cases/{case_three.id}")
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Forbidden: You do not own this case"
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Case not found"
 
 
 def test_get_case_details_not_found(client, test_db):
@@ -209,3 +209,80 @@ def test_get_case_details_invalid_id(client):
     response = client.get("/api/v1/cases/abc")
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid case ID format"
+
+
+def test_create_anonymized_share_link(client, test_db):
+    case_one, _, _ = _seed_cases(test_db)
+
+    response = client.post(
+        f"/api/v1/cases/{case_one.id}/share-anonymized",
+        json={"scope": "full_party_removal", "expires_in_hours": 24},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope"] == "full_party_removal"
+    assert payload["token"]
+    assert payload["share_url"].endswith(f"/api/v1/cases/share/{payload['token']}")
+
+    share_row = test_db.query(AnonymizedShareToken).filter(AnonymizedShareToken.token == payload["token"]).first()
+    assert share_row is not None
+    assert share_row.case_id == case_one.id
+    assert share_row.used_at is None
+
+
+def test_share_token_invalid_returns_404(client):
+    response = client.get("/api/v1/cases/share/not-a-real-token")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Share token not found"
+
+
+def test_share_token_expired_returns_410(client, test_db):
+    case_one, _, _ = _seed_cases(test_db)
+    create_response = client.post(
+        f"/api/v1/cases/{case_one.id}/share-anonymized",
+        json={"scope": "personal_identifiers", "expires_in_hours": 24},
+    )
+    token = create_response.json()["token"]
+
+    share_row = test_db.query(AnonymizedShareToken).filter(AnonymizedShareToken.token == token).first()
+    assert share_row is not None
+    share_row.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    test_db.commit()
+
+    response = client.get(f"/api/v1/cases/share/{token}")
+    assert response.status_code == 410
+    assert response.json()["detail"] == "Share token expired"
+
+
+def test_share_token_json_excludes_pii(client, test_db):
+    case_one, _, _ = _seed_cases(test_db)
+    sensitive_doc = CaseDocument(
+        case_id=case_one.id,
+        document_type=DocumentType.ORDER,
+        document_content="Order for Alice Johnson",
+        summary="Alice Johnson can be reached at alice@example.com or 555-0100.",
+        uploaded_at=datetime.now(timezone.utc),
+    )
+    test_db.add(sensitive_doc)
+    test_db.commit()
+
+    create_response = client.post(
+        f"/api/v1/cases/{case_one.id}/share-anonymized",
+        json={"scope": "full_party_removal", "expires_in_hours": 24},
+    )
+    token = create_response.json()["token"]
+
+    response = client.get(f"/api/v1/cases/share/{token}")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["scope"] == "full_party_removal"
+    assert payload["case_type"] == case_one.case_type
+    assert payload["documents"]
+    assert all(doc["summary"] is None for doc in payload["documents"])
+    assert all(event["description"] is None or event["description"] == "" for event in payload["timeline"])
+    raw_text = response.text
+    assert "alice@example.com" not in raw_text
+    assert "555-0100" not in raw_text
+    assert case_one.case_number not in raw_text
