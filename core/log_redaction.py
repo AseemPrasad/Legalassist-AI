@@ -12,22 +12,13 @@ OTP_PATTERN = re.compile(r"(?i)\b(?:otp|one[-\s]?time password)\b[^0-9]{0,24}([0
 
 SENSITIVE_KEYS = {
     "authorization",
-    "body",
-    "content",
     "email",
-    "html",
-    "html_content",
-    "message",
-    "message_body",
     "otp",
     "password",
-    "payload",
     "phone",
     "phone_number",
     "recipient",
     "secret",
-    "summary",
-    "text",
     "token",
 }
 
