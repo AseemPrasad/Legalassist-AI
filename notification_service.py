@@ -727,20 +727,18 @@ class NotificationService:
             days_left=days_left,
         )
 
-        # Update the reserved log with task id as message_id (still PENDING until background updates)
+        # Annotate with the real task id without touching the status column.
+        # update_notification_result(status=PENDING) would overwrite a SENT
+        # status set by a fast Celery worker that completed before this line.
         try:
-            update_notification_result(
-                db=db,
-                deadline_id=deadline.id,
-                user_id=deadline.user_id,
-                days_before=days_left,
-                channel=NotificationChannel.EMAIL,
-                status=NotificationStatus.PENDING,
-                message_id=f"task_{task_result.id}",
-                message_preview=html_content,
-            )
+            db.query(NotificationLog).filter(
+                NotificationLog.deadline_id == deadline.id,
+                NotificationLog.days_before == days_left,
+                NotificationLog.channel == NotificationChannel.EMAIL,
+            ).update({"message_id": f"task_{task_result.id}"})
+            db.commit()
         except Exception:
-            logger.exception("Failed to annotate reserved email with task id")
+            logger.debug("Failed to annotate reserved email with task id")
 
         return NotificationResult(
             success=True,
