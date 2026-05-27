@@ -134,13 +134,15 @@ class MultiModalProcessor:
             # Extract text from all pages
             text_pages = []
             total_pages = len(pdf_reader.pages)
+            ocr_used = False
+            confidences = []
             
             for page_num, page in enumerate(pdf_reader.pages):
                 page_text = page.extract_text()
                 if page_text and page_text.strip():
                     text_pages.append(page_text)
+                    confidences.append(100.0)
                 elif enable_ocr:
-                    # Fallback to OCR for this page
                     logger.info(f"Page {page_num + 1} has no extractable text, using OCR")
                     page_image = self._pdf_page_to_image(page)
                     if page_image is not None:
@@ -151,6 +153,11 @@ class MultiModalProcessor:
                         )
                         if ocr_result['success']:
                             text_pages.append(ocr_result['text'])
+                            ocr_used = True
+                            if 'confidence' in ocr_result and 'overall' in ocr_result['confidence']:
+                                confidences.append(ocr_result['confidence']['overall'])
+                            else:
+                                confidences.append(85.0)  # Default fallback confidence
             
             full_text = '\n\n'.join(text_pages)
             
@@ -159,14 +166,16 @@ class MultiModalProcessor:
                 logger.warning("PDF has little extractable text, treating as scanned")
                 return self._process_scanned_pdf(file_data, languages, aggressive_ocr)
             
+            avg_confidence = float(np.mean(confidences)) if confidences else 100.0
+            
             return {
                 'text': full_text,
                 'success': True,
                 'file_type': 'pdf',
                 'pages_processed': len(text_pages),
                 'total_pages': total_pages,
-                'ocr_used': False,
-                'confidence': 100.0  # High confidence for extractable text
+                'ocr_used': ocr_used,
+                'confidence': avg_confidence
             }
             
         except Exception as e:
