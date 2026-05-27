@@ -43,7 +43,8 @@ class APISettings(BaseSettings):
 
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", _jwt_from_vault or "")
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRATION_HOURS: int = 24
+    JWT_EXPIRATION_HOURS: int = int(os.getenv("JWT_EXPIRATION_HOURS", os.getenv("JWT_EXPIRY_HOURS", "168")))
+    JWT_ACCESS_TOKEN_MINUTES: int = int(os.getenv("JWT_ACCESS_TOKEN_MINUTES", str(JWT_EXPIRATION_HOURS * 60)))
     API_KEY_HEADER: str = "X-API-Key"
     CSRF_SECRET: str = ""
     
