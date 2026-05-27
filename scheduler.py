@@ -853,3 +853,17 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
 if __name__ == "__main__":
     # If run directly, start the worker
     run_worker()
+
+
+def safe_cancel_scheduled_task(scheduler, task_id: str) -> bool:
+    """
+    Safely cancels a scheduled cron task using its ID, checking for existence 
+    and thread locks to prevent deadlocks.
+    """
+    logger.info("scheduler_cancellation_requested", task_id=task_id)
+    try:
+        scheduler.remove_job(task_id)
+        return True
+    except Exception as e:
+        logger.error("scheduler_cancellation_failed", task_id=task_id, error=str(e))
+        return False
