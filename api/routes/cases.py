@@ -4,9 +4,16 @@ POST /api/v1/cases/search - Search for similar cases
 POST /api/v1/cases/similarity-feedback - Save similarity feedback
 GET /api/v1/cases/{id}/timeline - Get case timeline
 """
-from datetime import datetime, timezone
+import csv
+import io
+import re
+from typing import Optional
+from datetime import datetime, timezone, timedelta
+import secrets
 
-from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, Form, Request
+from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, Form, Request, Query
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 from api.models import (
     CaseSearchRequest, CaseSearchResponse, CaseResult,
@@ -16,23 +23,29 @@ from api.models import (
     CaseNotePublishRequest,
     CaseNoteHistoryResponse,
     CaseNoteVersionItem,
+    AnonymizedShareCreateRequest,
+    AnonymizedShareResponse,
 )
 from api.auth import get_current_user, CurrentUser
 from api.validation import validate_file_upload, validate_file_upload_streaming, ValidationConfig
 import structlog
 from sqlalchemy import func
 from functools import wraps
+from config import Config
+from services.privacy_redaction import normalize_privacy_profile
 
 from database import (
     CaseRecord,
     CaseOutcome,
-    get_db,
     submit_similarity_feedback,
     Case,
     DocumentType,
     CaseDocument,
     Attachment,
+    AnonymizedShareToken,
+    get_db,
 )
+from api.dependencies import get_db_rls
 from db.case_service import save_case_note_draft, publish_case_note, get_case_note_history
 from db.repositories.case_queries import fetch_latest_documents_per_case
 from db.crud.audit import record_immutable_audit_event
@@ -47,6 +60,17 @@ from analytics_engine import CaseSimilarityCalculator
 router = APIRouter(prefix="/api/v1/cases", tags=["cases"])
 logger = structlog.get_logger(__name__)
 
+EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+PHONE_PATTERN = re.compile(r"(?:(?:\+?\d[\d\s().-]{6,}\d))")
+
+
+def redact_pii(text: Optional[str]) -> Optional[str]:
+    if not isinstance(text, str):
+        return text
+    text = EMAIL_PATTERN.sub("[redacted-email]", text)
+    text = PHONE_PATTERN.sub("[redacted-phone]", text)
+    return text
+
 
 def _build_case_summary_payload(case: Case, latest_doc: CaseDocument | None = None) -> dict:
     return {
@@ -58,6 +82,75 @@ def _build_case_summary_payload(case: Case, latest_doc: CaseDocument | None = No
         "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
         "summary": latest_doc.summary if latest_doc else "",
     }
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _coerce_datetime(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _build_share_url(token: str) -> str:
+    base_url = str(Config.BASE_URL or "").rstrip("/")
+    path = f"/api/v1/cases/share/{token}"
+    return f"{base_url}{path}" if base_url else path
+
+
+def _generate_unique_share_token(db: Session) -> str:
+    for _ in range(5):
+        token = secrets.token_urlsafe(32)
+        if not db.query(AnonymizedShareToken).filter(AnonymizedShareToken.token == token).first():
+            return token
+    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate share token")
+
+
+def _get_share_token_or_404(db: Session, token: str) -> AnonymizedShareToken:
+    share = db.query(AnonymizedShareToken).filter(AnonymizedShareToken.token == token).first()
+    if not share:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Share token not found")
+    expires_at = _coerce_datetime(share.expires_at)
+    if expires_at and expires_at < _utcnow():
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Share token expired")
+    return share
+
+
+def _build_anonymized_share_payload(case: Case, share: AnonymizedShareToken) -> dict:
+    from case_manager import generate_anonymized_case_data
+
+    anonymized_data = generate_anonymized_case_data(case.id, profile_name=share.scope)
+    if anonymized_data is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Anonymized case not found")
+
+    payload = dict(anonymized_data)
+    payload["share"] = {
+        "token": share.token,
+        "scope": share.scope,
+        "expires_at": share.expires_at.isoformat() if share.expires_at else None,
+        "created_at": share.created_at.isoformat() if share.created_at else None,
+        "anonymized_id": share.anonymized_id,
+    }
+    return payload
+
+
+def _build_anonymized_share_pdf(case: Case, share: AnonymizedShareToken, payload: dict) -> bytes:
+    from pdf_exporter import generate_anonymized_pdf
+
+    pdf_bytes = generate_anonymized_pdf(
+        case.id,
+        share.anonymized_id,
+        case.user_id,
+        profile_name=share.scope,
+        anonymized_data=payload,
+    )
+    if pdf_bytes is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unable to generate anonymized PDF")
+    return pdf_bytes
 
 
 def _audit_case_view_route(func):
@@ -95,8 +188,10 @@ def get_owned_case(case_id: str, current_user: CurrentUser, db: Session) -> Case
     if not case:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
 
+    # Ownership mismatches intentionally return 404 to avoid leaking whether a
+    # case exists to callers who do not own it.
     if current_user.role != "admin" and case.user_id != user_id_int:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: You do not own this case")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
 
     return case
 
@@ -109,7 +204,7 @@ def get_owned_case(case_id: str, current_user: CurrentUser, db: Session) -> Case
 async def search_cases(
     request: CaseSearchRequest,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_rls)
 ) -> CaseSearchResponse:
     """
     Search for similar cases in database
@@ -277,7 +372,7 @@ async def search_cases(
 async def submit_similarity_result_feedback(
     request: SimilarityFeedbackRequest,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_rls)
 ) -> SimilarityFeedbackResponse:
     """Persist user feedback for a similarity search result."""
     query_signature = request.query_signature or ""
@@ -354,7 +449,7 @@ def _build_case_timeline_payload(case: Case, timeline_events) -> dict:
 async def get_case_timeline(
     case_id: str,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
 ) -> CaseTimeline:
     """Get case history and timeline."""
     logger.info(
@@ -370,6 +465,83 @@ async def get_case_timeline(
 
 
 @router.get(
+    "/{case_id}/timeline/export",
+    summary="Export case timeline events in CSV or JSON format"
+)
+async def export_case_timeline(
+    case_id: str,
+    format: str = Query(..., pattern="^(csv|json)$", description="Export format: csv or json"),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db_rls),
+):
+    """
+    Export case timeline events in a machine-readable format (CSV or JSON).
+    Ensures authorization is enforced and data is PII-free.
+    """
+    logger.info(
+        "Exporting case timeline",
+        case_id=case_id,
+        format=format,
+        user_id=current_user.user_id,
+    )
+
+    case = get_owned_case(case_id, current_user, db)
+
+    timeline_events = _timeline_service.get_case_timeline(db, case.id)
+    payload = _build_case_timeline_payload(case, timeline_events)
+
+    redacted_events = []
+    for event in payload["events"]:
+        redacted_event = CaseEvent(
+            date=event.date,
+            event_type=event.event_type,
+            description=redact_pii(event.description) or "",
+            court=redact_pii(event.court),
+            judge=redact_pii(event.judge),
+            location=redact_pii(event.location),
+            documents=[redact_pii(doc) or "" for doc in event.documents] if event.documents else [],
+        )
+        redacted_events.append(redacted_event)
+
+    if format == "csv":
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["Date", "Event Type", "Description", "Court", "Judge", "Location", "Documents"])
+        for event in redacted_events:
+            date_str = event.date.isoformat() if hasattr(event.date, "isoformat") else str(event.date)
+            docs_str = "; ".join(event.documents) if event.documents else ""
+            writer.writerow([
+                date_str,
+                event.event_type,
+                event.description,
+                event.court or "",
+                event.judge or "",
+                event.location or "",
+                docs_str
+            ])
+        csv_bytes = buffer.getvalue().encode("utf-8")
+        headers = {
+            "Content-Disposition": f'attachment; filename="case_{case.id}_timeline.csv"'
+        }
+        return Response(content=csv_bytes, media_type="text/csv", headers=headers)
+
+    else:
+        # JSON format
+        redacted_payload = CaseTimeline(
+            case_id=str(case.id),
+            case_number=redact_pii(case.case_number) or "",
+            title=redact_pii(case.title or case.case_number) or "",
+            status=case.status.value if hasattr(case.status, "value") else str(case.status),
+            created_at=case.created_at,
+            updated_at=case.updated_at or case.created_at,
+            events=redacted_events,
+            total_events=len(redacted_events),
+            duration_years=payload["duration_years"],
+        )
+        return redacted_payload
+
+
+@router.get(
     "/{case_id}",
     summary="Get case details"
 )
@@ -377,7 +549,7 @@ async def get_case_timeline(
 async def get_case_details(
     case_id: str,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_rls)
 ) -> dict:
     """Get complete case details"""
     
@@ -393,6 +565,112 @@ async def get_case_details(
 
 
 @router.post(
+    "/{case_id}/share-anonymized",
+    response_model=AnonymizedShareResponse,
+    summary="Create a shareable anonymized case link",
+)
+async def create_anonymized_case_share(
+    case_id: str,
+    request: AnonymizedShareCreateRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> AnonymizedShareResponse:
+    case = get_owned_case(case_id, current_user, db)
+    scope = normalize_privacy_profile(request.scope)
+    from case_manager import generate_anonymized_case_data
+
+    anonymized_data = generate_anonymized_case_data(case.id, profile_name=scope)
+    if anonymized_data is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Anonymized case not found")
+
+    anonymized_id = str(anonymized_data.get("anonymized_id") or "")
+    if not anonymized_id:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to build anonymized case identifier")
+
+    share = AnonymizedShareToken(
+        token=_generate_unique_share_token(db),
+        case_id=case.id,
+        anonymized_id=anonymized_id,
+        created_by=int(current_user.user_id),
+        created_at=_utcnow(),
+        expires_at=_utcnow() + timedelta(hours=request.expires_in_hours),
+        scope=scope,
+        used_at=None,
+    )
+    db.add(share)
+    db.commit()
+    db.refresh(share)
+
+    record_immutable_audit_event(
+        event_type="case.share_token_created",
+        action="created",
+        actor_user_id=int(current_user.user_id),
+        resource_type="case",
+        resource_id=str(case.id),
+        outcome="success",
+        metadata={
+            "scope": scope,
+            "anonymized_id": anonymized_id,
+            "expires_at": share.expires_at.isoformat(),
+        },
+    )
+
+    return AnonymizedShareResponse(
+        token=share.token,
+        anonymized_id=share.anonymized_id,
+        scope=share.scope,
+        share_url=_build_share_url(share.token),
+        expires_at=share.expires_at,
+    )
+
+
+@router.get(
+    "/share/{token}",
+    summary="Resolve an anonymized share token",
+)
+async def resolve_anonymized_case_share(
+    token: str,
+    format: str = Query(default="json", pattern="^(json|pdf)$"),
+    db: Session = Depends(get_db),
+):
+    share = _get_share_token_or_404(db, token)
+    case = db.query(Case).filter(Case.id == share.case_id).first()
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+
+    payload = _build_anonymized_share_payload(case, share)
+
+    if share.used_at is None:
+        share.used_at = _utcnow()
+        db.add(share)
+        db.commit()
+
+    record_immutable_audit_event(
+        event_type="case.share_token_viewed",
+        action="viewed",
+        actor_user_id=share.created_by,
+        resource_type="case",
+        resource_id=str(case.id),
+        outcome="success",
+        metadata={
+            "scope": share.scope,
+            "anonymized_id": share.anonymized_id,
+            "format": format,
+        },
+    )
+
+    if format == "pdf":
+        pdf_bytes = _build_anonymized_share_pdf(case, share, payload)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="anonymized_case_{share.anonymized_id}.pdf"'},
+        )
+
+    return JSONResponse(content=jsonable_encoder(payload))
+
+
+@router.post(
     "/{case_id}/documents/upload",
     summary="Upload a PDF or image document to a case",
 )
@@ -402,7 +680,7 @@ async def upload_case_document_endpoint(
     file: UploadFile = File(...),
     document_type: str = Form(default="Other"),
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
 ) -> dict:
     """Store an upload, create linked attachment/document rows, and queue OCR extraction."""
     case = get_owned_case(case_id, current_user, db)
@@ -472,7 +750,7 @@ async def save_case_note_draft_endpoint(
     case_id: str,
     request: CaseNoteDraftRequest,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
 ) -> dict:
     case = get_owned_case(case_id, current_user, db)
     case_id_int = case.id
@@ -502,7 +780,7 @@ async def publish_case_note_endpoint(
     case_id: str,
     request: CaseNotePublishRequest,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
 ) -> dict:
     case = get_owned_case(case_id, current_user, db)
     case_id_int = case.id
@@ -534,7 +812,7 @@ async def publish_case_note_endpoint(
 async def get_case_note_history_endpoint(
     case_id: str,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
 ) -> CaseNoteHistoryResponse:
     case = get_owned_case(case_id, current_user, db)
     case_id_int = case.id
@@ -569,7 +847,7 @@ async def list_cases(
     limit: int = 10,
     offset: int = 0,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_rls)
 ) -> dict:
     """Get list of cases for current user"""
     
@@ -614,3 +892,4 @@ async def list_cases(
         "offset": offset,
         "cases": cases_list
     }
+

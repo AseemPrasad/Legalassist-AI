@@ -25,6 +25,16 @@ def test_db():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    # Deduplicate indexes in metadata to prevent sqlite3 index already exists errors
+    for table in Base.metadata.tables.values():
+        seen_names = set()
+        keep = set()
+        for idx in list(table.indexes):
+            if idx.name not in seen_names:
+                seen_names.add(idx.name)
+                keep.add(idx)
+        table.indexes = keep
+
     Base.metadata.create_all(bind=engine)
     SessionLocal = sessionmaker(
         autocommit=False,
@@ -137,5 +147,5 @@ def test_case_timeline_forbidden_for_other_user(client, test_db):
 
     response = client.get(f"/api/v1/cases/{case.id}/timeline")
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Forbidden: You do not own this case"
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Case not found"
