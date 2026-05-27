@@ -6,16 +6,16 @@ CHANGE: build_judgment_result_text now returns (plain_text, structured_dict).
         render_shareable_result_box accepts the tuple directly — no other changes needed.
 """
 
+import sys
+import os
+# Add parent directory to sys.path to resolve 'core' and other top-level modules
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import streamlit as st
 import logging
 import routes
-import sys
-import os
 from config import Config
 from pages.ui_components import render_header, SESSION_KEYS
-
-# Add parent directory to sys.path to resolve 'core' module
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from core.app_utils import (
     get_client,
@@ -23,18 +23,13 @@ from core.app_utils import (
     extract_text_from_pdf,
     analyze_legal_citations,
     compress_text,
-    english_leakage_detected,
     output_language_mismatch_detected,
     build_prompt,
     build_retry_prompt,
     get_remedies_advice,
-    extract_appeal_info,
     get_localized_ui_text,
-    localize_yes_no,
     RETRO_STYLING,
     LANGUAGES,
-    parse_summary_bullets,
-    validate_pdf_metadata,
     build_judgment_result_text,
     render_shareable_result_box,
     safe_llm_call,
@@ -44,8 +39,6 @@ from core.app_utils import (
     parse_timeline,        
     build_timeline_prompt,
 )
-
-from core.multimodal_processor import MultiModalProcessor
 
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
 

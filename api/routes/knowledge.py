@@ -9,7 +9,8 @@ from api.auth import CurrentUser, get_current_user
 from api.feature_flags import is_feature_enabled_for_user, get_feature_flag_manager
 from api.models import KnowledgeInvalidationItem, KnowledgeInvalidationListResponse
 from db.crud.knowledge import get_knowledge_freshness_summary, list_knowledge_invalidations
-from database import get_db
+from api.dependencies import get_db_rls
+
 
 
 router = APIRouter(prefix="/api/v1/knowledge", tags=["knowledge"])
@@ -21,7 +22,7 @@ async def list_invalidations(
     document_id: int | None = Query(default=None),
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> KnowledgeInvalidationListResponse:
     """Return the invalidation ledger for the current user.
@@ -96,3 +97,6 @@ async def list_invalidations(
         next_recompute_at=summary["next_recompute_at"],
         generated_at=datetime.now(timezone.utc),
     )
+
+
+

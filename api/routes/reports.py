@@ -30,7 +30,8 @@ except Exception:
     generate_report_task = None
     TaskStatus = None
     enqueue_task_from_http_request = None
-from database import get_db, Report
+from database import Report
+from api.dependencies import get_db_rls
 from db.crud.reports import create_report, get_report_by_id, update_report_status, list_reports_by_user
 from db.crud.audit import record_audit_event
 import structlog
@@ -48,7 +49,7 @@ logger = structlog.get_logger(__name__)
 async def generate_report(
     request: ReportGenerationRequest,
     http_request: Request,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> ReportGenerationResponse:
     """
@@ -147,7 +148,7 @@ async def generate_report(
 )
 async def get_report_status(
     report_id: str,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> ReportGenerationResponse:
     """
@@ -211,7 +212,7 @@ async def get_report_status(
 )
 async def download_report(
     report_id: str,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """
@@ -317,7 +318,7 @@ async def list_reports(
     limit: int = 10,
     offset: int = 0,
     status_filter: str | None = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> dict:
     """
@@ -369,4 +370,7 @@ async def list_reports(
         "offset": offset,
         "reports": reports_data
     }
+
+
+
 

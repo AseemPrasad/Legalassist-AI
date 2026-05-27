@@ -11,7 +11,8 @@ from api.auth import get_current_user, CurrentUser
 import structlog
 from datetime import datetime, timedelta, timezone
 
-from database import Case, CaseDeadline, get_db
+from database import Case, CaseDeadline
+from api.dependencies import get_db_rls
 
 router = APIRouter(prefix="/api/v1/deadlines", tags=["deadlines"])
 logger = structlog.get_logger(__name__)
@@ -70,7 +71,7 @@ def _require_owned_deadline(deadline_id: str, current_user: CurrentUser, db: Ses
 async def get_upcoming_deadlines(
     days: int = 30,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
 ) -> UpcomingDeadlinesResponse:
     """
     Get upcoming deadlines for user
@@ -150,7 +151,7 @@ async def get_upcoming_deadlines(
 async def get_deadline_details(
     deadline_id: str,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
 ) -> DeadlineResponse:
     """Get complete deadline details"""
     
@@ -195,7 +196,7 @@ async def create_deadline(
     case_id: str = None,
     reminder_days: int = 7,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_rls)
 ) -> DeadlineResponse:
     """Create a new deadline"""
     
@@ -237,7 +238,7 @@ async def update_deadline(
     due_date: datetime = None,
     priority: str = None,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db_rls)
 ) -> DeadlineResponse:
     """Update a deadline"""
     
@@ -267,3 +268,6 @@ async def update_deadline(
         reminder_days=7,
         created_at=deadline.created_at
     )
+
+
+
