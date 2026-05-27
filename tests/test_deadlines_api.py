@@ -281,6 +281,8 @@ def test_get_upcoming_deadlines_returns_db_results(client, test_db):
     assert set(payload) == {
         "user_id",
         "total_deadlines",
+        "limit",
+        "offset",
         "critical_count",
         "high_count",
         "medium_count",
@@ -290,6 +292,8 @@ def test_get_upcoming_deadlines_returns_db_results(client, test_db):
     }
     assert payload["user_id"] == "42"
     assert payload["total_deadlines"] == 2
+    assert payload["limit"] == 50
+    assert payload["offset"] == 0
     assert payload["critical_count"] == 1
     assert payload["high_count"] == 0
     assert payload["medium_count"] == 1
@@ -313,3 +317,47 @@ def test_get_upcoming_deadlines_returns_db_results(client, test_db):
     assert deadlines[0]["due_date"] < deadlines[1]["due_date"]
     assert deadlines[0]["title"] == seeded["owned_case_one"]["title"]
     assert deadlines[1]["title"] == seeded["owned_case_two"]["title"]
+
+
+def test_get_upcoming_deadlines_uses_stable_ordering_with_pagination(client, test_db):
+    now = datetime.now(timezone.utc)
+    case = _seed_case(test_db, user_id=42, case_id=10, title="Paged Case")
+
+    same_due_date = now + timedelta(days=9)
+    for deadline_id in [30, 20, 10]:
+        test_db.execute(
+            text(
+                """
+                INSERT INTO case_deadlines (
+                    id, user_id, case_id, case_title, deadline_date, deadline_type,
+                    description, created_at, updated_at, is_completed
+                ) VALUES (
+                    :id, :user_id, :case_id, :case_title, :deadline_date, :deadline_type,
+                    :description, :created_at, :updated_at, :is_completed
+                )
+                """
+            ),
+            {
+                "id": deadline_id,
+                "user_id": 42,
+                "case_id": case["id"],
+                "case_title": case["title"],
+                "deadline_date": same_due_date.isoformat(),
+                "deadline_type": "appeal",
+                "description": f"Deadline {deadline_id}",
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "is_completed": 0,
+            },
+        )
+    test_db.commit()
+
+    response = client.get("/api/v1/deadlines/upcoming?days=30&limit=2&offset=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_deadlines"] == 3
+    assert payload["limit"] == 2
+    assert payload["offset"] == 1
+    assert [deadline["deadline_id"] for deadline in payload["deadlines"]] == ["20", "30"]
+    assert [deadline["description"] for deadline in payload["deadlines"]] == ["Deadline 20", "Deadline 30"]

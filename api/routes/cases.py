@@ -189,8 +189,10 @@ def get_owned_case(case_id: str, current_user: CurrentUser, db: Session) -> Case
     if not case:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
 
+    # Ownership mismatches intentionally return 404 to avoid leaking whether a
+    # case exists to callers who do not own it.
     if current_user.role != "admin" and case.user_id != user_id_int:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: You do not own this case")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
 
     return case
 

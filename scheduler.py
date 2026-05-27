@@ -67,6 +67,7 @@ from contextlib import contextmanager
 
 import pytz
 import structlog
+from db.models import SchedulerRun, SchedulerJobStatus
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.schedulers.blocking import BlockingScheduler
@@ -92,15 +93,10 @@ from db import (
     engine,
     init_db,
     SessionLocal,
-    get_upcoming_deadlines,
-    get_prefs_by_user_ids,
-    UserPreference,
 )
 from db.crud.knowledge import process_due_knowledge_invalidations
 from notifications.reminder_engine import (
-    plan_eligible_reminders,
-    should_process_threshold,
-    is_notify_enabled,
+    get_reminder_dispatch_candidates,
     is_reminder_time_for_user,
 )
 from notification_service import NotificationService
@@ -231,9 +227,6 @@ def _send_deadline_reminders_safe(db, deadline, user_preference, days_left):
         return []
 
 
-# Reminder time logic moved to notifications.reminder_engine.build_reminder_jobs
-
-
 def check_and_send_reminders():
     """
     Hourly job: Check all upcoming deadlines and send reminders at 8 AM in each user's local timezone.
@@ -309,9 +302,13 @@ def check_and_send_reminders():
         db = SessionLocal()
         sent_count = 0
         try:
-            # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
-            upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
-            logger.info("scheduler_upcoming_deadlines_found", count=len(upcoming_deadlines))
+            candidates = get_reminder_dispatch_candidates(
+                db,
+                days_before=31,
+                now_utc=datetime.now(timezone.utc),
+                reminder_time_checker=is_reminder_time_for_user,
+            )
+            logger.info("scheduler_reminder_candidates_found", count=len(candidates))
 
             # Prefetch user preferences for eligible deadlines to avoid N+1 queries
             eligible = []
@@ -343,7 +340,6 @@ def check_and_send_reminders():
 
                 logger.info("scheduler_processing_deadline", case_id=deadline.case_id, days_left=days_left)
 
-                # Send reminders using the notification service
                 results = _send_deadline_reminders_safe(db, deadline, user_preference, days_left)
 
                 for res in results:
@@ -364,8 +360,30 @@ def check_and_send_reminders():
 
             logger.info("scheduler_reminder_job_completed", reminders_sent=sent_count)
 
+            # Persist run metrics
+            run = SchedulerRun(
+                job_name="reminder_job",
+                started_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(timezone.utc),
+                sent_count=sent_count,
+                status=SchedulerJobStatus.SUCCESS,
+                error_code=None,
+            )
+            db.add(run)
+            db.commit()
         except Exception as e:
             logger.error("scheduler_reminder_job_failed", error=sanitize_log_text(str(e)), exc_info=True)
+            # Persist failure metrics
+            run = SchedulerRun(
+                job_name="reminder_job",
+                started_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(timezone.utc),
+                sent_count=sent_count if 'sent_count' in locals() else 0,
+                status=SchedulerJobStatus.FAILED,
+                error_code=str(e),
+            )
+            db.add(run)
+            db.commit()
         finally:
             db.close()
 
@@ -387,8 +405,31 @@ def recompute_due_knowledge_invalidations():
         try:
             processed = process_due_knowledge_invalidations(db)
             logger.info("scheduler_knowledge_recompute_completed", processed=len(processed))
+            
+            # Persist run metrics
+            run = SchedulerRun(
+                job_name="knowledge_job",
+                started_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(timezone.utc),
+                sent_count=len(processed),
+                status=SchedulerJobStatus.SUCCESS,
+                error_code=None,
+            )
+            db.add(run)
+            db.commit()
         except Exception as exc:
             logger.error("scheduler_knowledge_recompute_failed", error=sanitize_log_text(str(exc)), exc_info=True)
+            
+            run = SchedulerRun(
+                job_name="knowledge_job",
+                started_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(timezone.utc),
+                sent_count=0,
+                status=SchedulerJobStatus.FAILED,
+                error_code=str(exc),
+            )
+            db.add(run)
+            db.commit()
         finally:
             db.close()
 
@@ -785,25 +826,20 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
     
     try:
         logger.info("scheduler_sync_reminder_check_started", target_days=target_days)
-        upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
-        prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
-        prefs_by_user = {pref.user_id: pref for pref in prefs}
-        candidates = plan_eligible_reminders(
-            upcoming_deadlines,
-            prefs_by_user,
+        candidates = get_reminder_dispatch_candidates(
+            db,
+            days_before=31,
+            now_utc=datetime.now(timezone.utc),
             reminder_time_checker=is_reminder_time_for_user,
         )
         
         sent_count = 0
-        for candidate in candidates:
-            deadline = candidate.deadline
-            days_left = candidate.days_left
+        for deadline, days_left, user_preference in candidates:
 
             if target_days and days_left != target_days:
                 continue
 
-            # Send reminders
-            results = _send_deadline_reminders_safe(db, deadline, candidate.user_preference, days_left)
+            results = _send_deadline_reminders_safe(db, deadline, user_preference, days_left)
             sent_count += len([r for r in results if r.success])
 
         logger.info("scheduler_sync_reminder_check_completed", reminders_sent=sent_count)
