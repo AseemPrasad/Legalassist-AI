@@ -111,7 +111,10 @@ async def get_analytics_overview(
     response_model=DashboardSummaryResponse,
     summary="Get dashboard summary"
 )
-def get_dashboard_summary(db: Session = Depends(get_db_rls)) -> DashboardSummaryResponse:
+def get_dashboard_summary(
+    db: Session = Depends(get_db_rls),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> DashboardSummaryResponse:
     """Get the dashboard summary used by the Streamlit home analytics view."""
 
     summary = AnalyticsAggregator.get_dashboard_summary(db)
