@@ -29,6 +29,10 @@ router = APIRouter(prefix="/api/cases", tags=["case-search"])
 embedding_engine = EmbeddingEngine()
 
 
+def _user_case_ids(current_user: User, db: Session) -> set[int]:
+    return {row[0] for row in db.query(Case.id).filter(Case.user_id == current_user.user_id).all()}
+
+
 def _require_owned_case(case_id: int, current_user: User, db: Session) -> Case:
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
@@ -133,6 +137,9 @@ def search_by_text(
             filter_jurisdiction=jurisdiction,
         )
         
+        owned = _user_case_ids(current_user, db)
+        results = [r for r in results if r.get("case_id") in owned]
+        
         return {
             "query": query,
             "results": results,
@@ -149,11 +156,31 @@ def get_search_statistics(
     db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
-    """Get statistics about indexed cases"""
+    """Get statistics about the authenticated user's indexed cases"""
     try:
-        search_engine = SemanticCaseSearch(embedding_engine)
-        stats = search_engine.get_statistics(db)
-        return stats
+        from database import CaseEmbedding
+        owned = _user_case_ids(current_user, db)
+        if not owned:
+            return {"total_indexed_cases": 0, "case_types": {}, "jurisdictions": {}}
+
+        base = db.query(CaseEmbedding).filter(CaseEmbedding.case_id.in_(owned))
+        total = base.count()
+
+        case_type_counts = {}
+        for row in base.with_entities(CaseEmbedding.case_type).distinct().all():
+            ct = row[0]
+            case_type_counts[ct] = base.filter(CaseEmbedding.case_type == ct).count()
+
+        jurisdiction_counts = {}
+        for row in base.with_entities(CaseEmbedding.jurisdiction).distinct().all():
+            j = row[0]
+            jurisdiction_counts[j] = base.filter(CaseEmbedding.jurisdiction == j).count()
+
+        return {
+            "total_indexed_cases": total,
+            "case_types": case_type_counts,
+            "jurisdictions": jurisdiction_counts,
+        }
     except Exception as e:
         logger.error(f"Error getting statistics: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get statistics")
@@ -262,12 +289,36 @@ def get_argument_success_rate(
         Success statistics for the argument
     """
     try:
-        stats = PrecedentMatcher.get_argument_success_rate(
-            db=db,
-            argument_text=argument,
-            issue_name=issue,
+        from database import CaseArgument, CaseIssue
+        owned = _user_case_ids(current_user, db)
+        if not owned:
+            return {"success_rate": 0, "total_uses": 0, "successful": 0, "failed": 0}
+
+        query = db.query(CaseArgument).filter(
+            CaseArgument.argument_text == argument,
+            CaseArgument.case_id.in_(owned),
         )
-        return stats
+        if issue:
+            issue_obj = db.query(CaseIssue).filter(CaseIssue.issue_name == issue).first()
+            if issue_obj:
+                query = query.filter(CaseArgument.issue_id == issue_obj.id)
+
+        all_arguments = query.all()
+        if not all_arguments:
+            return {"success_rate": 0, "total_uses": 0, "successful": 0, "failed": 0}
+
+        successful = sum(1 for a in all_arguments if a.argument_succeeded is True)
+        failed = sum(1 for a in all_arguments if a.argument_succeeded is False)
+        total = len(all_arguments)
+        success_rate = (successful / total * 100) if total > 0 else 0
+        return {
+            "argument": argument[:100],
+            "success_rate": round(success_rate, 1),
+            "total_uses": total,
+            "successful": successful,
+            "failed": failed,
+            "unknown": total - successful - failed,
+        }
     except Exception as e:
         logger.error(f"Error analyzing argument: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to analyze argument")
@@ -291,15 +342,38 @@ def get_arguments_by_issue(
         List of arguments with success rates
     """
     try:
-        arguments = PrecedentMatcher.find_arguments_by_issue(
-            db=db,
-            issue_name=issue,
-            outcome=outcome,
+        from database import CaseArgument, CaseIssue
+        owned = _user_case_ids(current_user, db)
+
+        issue_obj = db.query(CaseIssue).filter(CaseIssue.issue_name == issue).first()
+        if not issue_obj:
+            return {"issue": issue, "arguments": [], "count": 0}
+
+        query = db.query(CaseArgument).filter(
+            CaseArgument.issue_id == issue_obj.id,
+            CaseArgument.case_id.in_(owned),
         )
+        arguments = query.all()
+
+        result_list = []
+        total = len(arguments)
+        for arg in arguments:
+            result_list.append({
+                "argument_id": arg.id,
+                "argument_text": arg.argument_text[:200],
+                "argument_type": arg.argument_type,
+                "succeeded": arg.argument_succeeded,
+                "case_id": arg.case_id,
+            })
+
+        successful = sum(1 for a in arguments if a.argument_succeeded is True)
+        failed = sum(1 for a in arguments if a.argument_succeeded is False)
+
         return {
             "issue": issue,
-            "arguments": arguments,
-            "count": len(arguments),
+            "arguments": result_list,
+            "count": len(result_list),
+            "success_rate": round((successful / total * 100), 1) if total > 0 else 0,
         }
     except Exception as e:
         logger.error(f"Error finding arguments: {str(e)}")
@@ -416,22 +490,46 @@ def query_knowledge_graph(
         List of cases matching the query
     """
     try:
-        results = KnowledgeGraphBuilder.query_graph(
-            db=db,
-            issue_name=issue,
-            desired_outcome=outcome,
-            limit=limit,
-        )
-        
+        from database import CaseIssue, KnowledgeGraphEdge
+
+        owned = _user_case_ids(current_user, db)
+        issues = db.query(CaseIssue).filter(CaseIssue.issue_name.ilike(f"%{issue}%")).all()
+        results = []
+
+        for iss in issues:
+            query = db.query(KnowledgeGraphEdge).filter(
+                KnowledgeGraphEdge.issue_id == iss.id,
+                KnowledgeGraphEdge.case_id.in_(owned),
+            )
+            if outcome:
+                query = query.filter(KnowledgeGraphEdge.outcome == outcome)
+            edges = query.all()
+
+            for edge in edges:
+                case = edge.case
+                argument = edge.argument
+                results.append({
+                    "case_id": case.id,
+                    "case_number": case.case_number,
+                    "case_type": case.case_type,
+                    "jurisdiction": case.jurisdiction,
+                    "issue": iss.issue_name,
+                    "argument": argument.argument_text[:200] if argument else None,
+                    "argument_succeeded": argument.argument_succeeded if argument else None,
+                    "outcome": edge.outcome,
+                    "weight": float(edge.weight) if edge.weight else 1.0,
+                    "case_created_at": case.created_at.isoformat(),
+                })
+
+        results.sort(key=lambda x: x["weight"], reverse=True)
         return {
             "query": {
                 "issue": issue,
                 "outcome": outcome,
             },
-            "results": results,
-            "count": len(results),
+            "results": results[:limit],
+            "count": min(len(results), limit),
         }
-        
     except Exception as e:
         logger.error(f"Error querying knowledge graph: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to query knowledge graph")
@@ -442,10 +540,59 @@ def get_knowledge_graph_statistics(
     db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
 ):
-    """Get statistics about the knowledge graph"""
+    """Get statistics about the knowledge graph scoped to the authenticated user"""
     try:
-        stats = KnowledgeGraphBuilder.get_graph_statistics(db)
-        return stats
+        from database import CaseIssue, CaseArgument, KnowledgeGraphEdge
+        owned = _user_case_ids(current_user, db)
+        if not owned:
+            return {
+                "total_issues": 0, "total_arguments": 0, "total_edges": 0,
+                "successful_edges": 0, "issue_argument_counts": {},
+            }
+
+        total_issues = db.query(CaseIssue).filter(
+            CaseIssue.id.in_(
+                db.query(KnowledgeGraphEdge.issue_id).filter(
+                    KnowledgeGraphEdge.case_id.in_(owned)
+                ).distinct().subquery()
+            )
+        ).count()
+
+        total_arguments = db.query(CaseArgument).filter(
+            CaseArgument.case_id.in_(owned)
+        ).count()
+
+        edge_query = db.query(KnowledgeGraphEdge).filter(
+            KnowledgeGraphEdge.case_id.in_(owned)
+        )
+        total_edges = edge_query.count()
+        successful_edges = edge_query.filter(
+            KnowledgeGraphEdge.outcome.in_(["plaintiff_won", "defendant_won"])
+        ).count()
+
+        issue_arg_counts = {}
+        issues = db.query(CaseIssue).filter(
+            CaseIssue.id.in_(
+                db.query(KnowledgeGraphEdge.issue_id).filter(
+                    KnowledgeGraphEdge.case_id.in_(owned)
+                ).distinct().subquery()
+            )
+        ).all()
+        for iss in issues:
+            arg_count = db.query(CaseArgument).filter(
+                CaseArgument.issue_id == iss.id,
+                CaseArgument.case_id.in_(owned),
+            ).count()
+            if arg_count > 0:
+                issue_arg_counts[iss.issue_name] = arg_count
+
+        return {
+            "total_issues": total_issues,
+            "total_arguments": total_arguments,
+            "total_edges": total_edges,
+            "successful_edges": successful_edges,
+            "issue_argument_counts": issue_arg_counts,
+        }
     except Exception as e:
         logger.error(f"Error getting graph statistics: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get statistics")
