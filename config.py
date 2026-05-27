@@ -176,11 +176,9 @@ class Config:
 
     @classmethod
     def is_development(cls):
-<<<<<<< fix/websocket-job-ownership
         env_dev = cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
         if not env_dev:
             return False
-        # Secondary safety check: flag if BASE_URL looks like production
         base = str(cls.BASE_URL or "").lower()
         if not any(local in base for local in ("localhost", "127.0.0.1", "0.0.0.0", "::1")):
             import logging
@@ -194,6 +192,17 @@ class Config:
     @classmethod
     def is_production(cls):
         return cls.APP_ENV in ("production", "prod", "live")
+
+    @classmethod
+    def validate_urls(cls):
+        if not cls.is_production():
+            return
+        for name, url in (("API_BASE_URL", cls.API_BASE_URL), ("BASE_URL", cls.BASE_URL)):
+            if url and not url.lower().startswith("https://"):
+                raise RuntimeError(
+                    f"{name}={url!r} must use HTTPS in production. "
+                    "Set the URL to an https:// endpoint or use localhost for development."
+                )
 
 
 import re
@@ -318,6 +327,8 @@ if Config.DEBUG:
     except Exception as e:
         logger.error(f"Failed to dump sanitized configuration: {e}")
 
-=======
-        return cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
->>>>>>> main
+try:
+    Config.validate_urls()
+except RuntimeError as e:
+    logger.error("Configuration validation failed: %s", e)
+    raise
