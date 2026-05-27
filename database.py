@@ -24,7 +24,8 @@ from sqlalchemy import (
     create_engine,
     make_url,
 )
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
+from contextlib import contextmanager
 
 from config import Config
 from db.models import CaseNote

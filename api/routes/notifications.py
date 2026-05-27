@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 
 from api.errors import StructuredAPIError
 from config import Config
-from database import get_db
+
 from db.crud.notifications import update_notification_log_by_message_id
+from api.dependencies import get_db_rls, get_db_rls_optional
 from db.models.notifications import NotificationStatus
 
 try:
@@ -94,7 +95,7 @@ def _update_delivery_status(db: Session, message_id: str | None, status_value: N
 
 
 @router.post("/twilio")
-async def twilio_delivery_webhook(request: Request, db: Session = Depends(get_db)) -> dict:
+async def twilio_delivery_webhook(request: Request, db: Session = Depends(get_db_rls)) -> dict:
     raw_body = (await request.body()).decode("utf-8")
     params = dict(parse_qsl(raw_body, keep_blank_values=True))
 
@@ -117,7 +118,7 @@ async def twilio_delivery_webhook(request: Request, db: Session = Depends(get_db
 
 
 @router.post("/sendgrid")
-async def sendgrid_delivery_webhook(request: Request, db: Session = Depends(get_db)) -> dict:
+async def sendgrid_delivery_webhook(request: Request, db: Session = Depends(get_db_rls)) -> dict:
     raw_body = (await request.body()).decode("utf-8")
 
     if not _verify_sendgrid_signature(request, raw_body):
@@ -149,3 +150,5 @@ async def sendgrid_delivery_webhook(request: Request, db: Session = Depends(get_
 
     logger.info("sendgrid_delivery_webhook_processed", events=processed, updated=updated)
     return {"ok": True, "events": processed, "updated": updated}
+
+

@@ -29,7 +29,7 @@ from api.validation import (
 )
 
 # Import routes
-from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech, document_verification, argument_strength, deadline_engine, efiling
+from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech, document_verification, argument_strength, deadline_engine, efiling, notifications as notifications_webhooks, anonymized_cases
 
 settings = get_settings()
 logger = structlog.get_logger(__name__)
@@ -110,6 +110,8 @@ def create_app() -> FastAPI:
     app.include_router(argument_strength.router)
     app.include_router(deadline_engine.router)
     app.include_router(efiling.router)
+    app.include_router(notifications_webhooks.router)
+    app.include_router(anonymized_cases.router)
     # Model feedback & optimization
     from api.routes import models as models_router
     app.include_router(models_router.router)
