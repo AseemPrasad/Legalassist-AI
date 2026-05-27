@@ -82,6 +82,54 @@ def list_knowledge_invalidations(
     )
 
 
+def has_pending_invalidations(
+    db: Session,
+    *,
+    case_id: int,
+) -> bool:
+    """Return True if the case has any non-completed knowledge invalidations.
+
+    Used by the chat page to detect stale RAG context before answering.
+    """
+    stale_statuses = [
+        KnowledgeInvalidationStatus.PENDING.value,
+        KnowledgeInvalidationStatus.PROCESSING.value,
+        KnowledgeInvalidationStatus.FAILED.value,
+    ]
+    return (
+        db.query(KnowledgeInvalidation.id)
+        .filter(
+            KnowledgeInvalidation.case_id == case_id,
+            KnowledgeInvalidation.status.in_(stale_statuses),
+        )
+        .first()
+        is not None
+    )
+
+
+def get_latest_case_document_text(
+    db: Session,
+    *,
+    case_id: int,
+) -> Optional[str]:
+    """Return the document_content of the most recently uploaded document for a case.
+
+    Prefers Judgment documents; falls back to the most recently uploaded document
+    of any type that has non-empty content.
+    """
+    # Try the most recent judgment first
+    doc = (
+        db.query(CaseDocument)
+        .filter(
+            CaseDocument.case_id == case_id,
+            CaseDocument.document_content.isnot(None),
+        )
+        .order_by(CaseDocument.uploaded_at.desc())
+        .first()
+    )
+    return doc.document_content if doc else None
+
+
 def get_knowledge_freshness_summary(
     db: Session,
     *,
