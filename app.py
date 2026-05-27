@@ -923,3 +923,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def get_app_version():
+    """Returns the current application version."""
+    return "1.0.0"
