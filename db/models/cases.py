@@ -66,7 +66,10 @@ class CaseDeadline(Base):
 
 class Case(Base):
     __tablename__ = "cases"
-    __table_args__ = (UniqueConstraint("user_id", "case_number", name="uq_user_case_number"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "case_number", name="uq_user_case_number"),
+        Index("ix_cases_anonymized_id", "anonymized_id"),
+    )
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -76,6 +79,9 @@ class Case(Base):
     status = Column(SQLEnum(CaseStatus), default=CaseStatus.ACTIVE, nullable=False)
     title = Column(String(255), nullable=True)
     version = Column(Integer, default=1, nullable=False)
+    # Stores the HMAC-derived anonymized share ID so lookups by anon_id are O(log N).
+    # Populated on first call to generate_anonymized_case_data().
+    anonymized_id = Column(String(64), nullable=True, unique=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 

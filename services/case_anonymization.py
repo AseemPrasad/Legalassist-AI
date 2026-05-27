@@ -109,6 +109,13 @@ def generate_anonymized_case_data(case_id: int, profile_name: Optional[str] = No
         profile = get_privacy_profile_definition(selected_profile)
         anonymized_id = _generate_anonymized_case_id(case_id=case_id, created_at=case.created_at)
 
+        # Persist the anonymized_id on the Case row so it can be looked up later.
+        if case.anonymized_id != anonymized_id:
+            case.anonymized_id = anonymized_id
+            db.add(case)
+            db.commit()
+            db.refresh(case)
+
         payload = {
             "export": {
                 "case_id": case_id,

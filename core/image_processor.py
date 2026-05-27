@@ -5,10 +5,8 @@ Handles image preprocessing, enhancement, and quality assessment
 
 import logging
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter
 import cv2
-from typing import Tuple, Optional, Dict, Any
-from pathlib import Path
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +317,11 @@ class ImageProcessor:
                 # Try Otsu first, fallback to adaptive
                 try:
                     processed = ImageProcessor.binarize_image(processed, method='otsu')
-                except:
+                except cv2.error as e:
+                    logger.warning(f"Otsu binarization failed, falling back to adaptive thresholding: {str(e)}")
+                    processed = ImageProcessor.binarize_image(processed, method='adaptive')
+                except Exception as e:
+                    logger.warning(f"Unexpected error during Otsu binarization, falling back to adaptive: {str(e)}")
                     processed = ImageProcessor.binarize_image(processed, method='adaptive')
             
             # Sharpen if aggressive
