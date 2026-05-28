@@ -522,3 +522,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def check_cli_directory_permissions(path: str) -> bool:
+    """
+    Verifies read/write permissions for a directory before the CLI tool 
+    attempts file output or database dump operations.
+    """
+    import os
+    if not os.path.exists(path):
+        try:
+            os.makedirs(path, exist_ok=True)
+        except Exception:
+            return False
+    return os.access(path, os.W_OK | os.R_OK)

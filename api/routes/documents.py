@@ -3,7 +3,9 @@ Document Analysis Endpoints
 POST /api/v1/analyze/document - Analyze document asynchronously
 GET /api/v1/analyze/{job_id} - Check analysis job status
 """
+import os
 import uuid
+from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
 from fastapi import Request
@@ -18,14 +20,61 @@ except Exception:
     enqueue_task_from_http_request = None
 from api.validation import (
     validate_file_upload,
+    validate_file_url,
     validate_text_input,
     validate_file_upload_streaming,
     ValidationConfig,
 )
+from api.job_registry import register_job_owner
+from config import Config
 import structlog
 
 router = APIRouter(prefix="/api/v1/analyze", tags=["document-analysis"])
 logger = structlog.get_logger(__name__)
+
+
+def validate_file_path(file_path: str) -> str:
+    """Canonicalize and restrict *file_path* to allowed directories.
+
+    Raises HTTPException(400) if the path is not within one of the
+    configured allowed directories.
+    """
+    raw = Path(file_path)
+    try:
+        resolved = raw.resolve(strict=False)
+    except (OSError, RuntimeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_path could not be resolved",
+        )
+
+    allowed_dirs = [
+        Path(Config.ATTACHMENTS_DIR).resolve(),
+    ]
+    # Also allow the upload temp dir if configured
+    upload_temp = getattr(Config, "UPLOAD_TEMP_DIR", None)
+    if upload_temp:
+        allowed_dirs.append(Path(upload_temp).resolve())
+    # Allow the project-root attachments dir as a fallback
+    allowed_dirs.append(Path.cwd().resolve() / "attachments")
+
+    allowed = any(
+        resolved == d or str(resolved).startswith(str(d) + os.sep)
+        for d in allowed_dirs
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_path is outside the allowed directories",
+        )
+
+    if resolved.is_symlink():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_path must not be a symbolic link",
+        )
+
+    return str(resolved)
 
 
 @router.post(
@@ -61,6 +110,13 @@ async def analyze_document(
     # Validate text input if provided
     if request.text:
         validate_text_input(request.text, max_length=ValidationConfig.MAX_TEXT_LENGTH)
+
+    # SSRF validation: block private/internal IPs for file_url
+    if request.file_url:
+        validate_file_url(request.file_url)
+
+    # Path traversal prevention: canonicalize and restrict file_path
+    safe_path = validate_file_path(request.file_path) if request.file_path else None
     
     # Generate document ID and job ID
     document_id = str(uuid.uuid4())
@@ -81,10 +137,12 @@ async def analyze_document(
         user_id=current_user.user_id,
         document_id=document_id,
         text=request.text,
-        file_path=request.file_path,
+        file_path=safe_path,
         file_url=request.file_url,
         document_type=request.document_type,
     )
+    
+    register_job_owner(task.id, current_user.user_id)
     
     return AnalysisJobResponse(
         job_id=task.id,
@@ -260,6 +318,8 @@ async def upload_document_file(
             file_bytes=file_bytes,
             document_type=document_type,
         )
+        
+        register_job_owner(task.id, current_user.user_id)
         
         return AnalysisJobResponse(
             job_id=task.id,

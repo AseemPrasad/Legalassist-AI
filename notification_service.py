@@ -57,20 +57,30 @@ from db import (
     UserPreference,
     CaseDeadline,
 )
-from database import get_notification_template_for_user
+from database import (
+    get_notification_template_for_user,
+    reserve_notification,
+    update_notification_result,
+)
 from db.crud.notifications import (
     get_or_create_notification_log,
     update_notification_log_by_keys,
     has_notification_been_sent,
-    reserve_notification,
-    update_notification_result,
-    get_notification_template_for_user,
 )
 from db.crud.audit import record_immutable_audit_event
 from core.template_renderer import render_template, validate_template, TemplateValidationError
 from core.log_redaction import mask_recipient, sanitize_log_text
 
 # Import debug mode helper
+
+_NOTIFICATION_PREVIEW_MAX_LEN = 200
+
+
+def _safe_preview(text: Optional[str]) -> str:
+    """Truncate and redact PII from notification content for DB storage."""
+    return sanitize_log_text(text)[:_NOTIFICATION_PREVIEW_MAX_LEN]
+
+
 def _is_debug_or_testing_mode() -> bool:
     """Return True when explicit debug/testing flags are enabled."""
     return Config.DEBUG or Config.TESTING
@@ -132,7 +142,7 @@ class SMSClient:
         try:
             if not self.client:
                 # Not configured: run in mock mode ONLY if in debug/testing.
-                if _is_debug_or_testing_mode():
+                if _is_debug_or_testing_mode() and not Config.is_production():
                     logger.info("sms_mocked", recipient=mask_recipient(to_number))
                     return True, f"mock_sms_{datetime.now().timestamp()}", None
                 
@@ -193,7 +203,7 @@ class EmailClient:
         try:
             if not self.client:
                 # Not configured: run in mock mode ONLY if in debug/testing.
-                if _is_debug_or_testing_mode():
+                if _is_debug_or_testing_mode() and not Config.is_production():
                     logger.info("email_mocked", recipient=mask_recipient(to_email))
                     return True, f"mock_email_{datetime.now().timestamp()}", None
                 
@@ -305,7 +315,7 @@ def send_email_task(
                     status=NotificationStatus.SENT if success else NotificationStatus.FAILED,
                     message_id=message_id,
                     error_message=error,
-                    message_preview=html_content,
+                    message_preview=_safe_preview(html_content),
                 )
                 logger.info("Background notification result updated", deadline_id=deadline_id)
         except Exception as e:
@@ -412,7 +422,7 @@ def send_sms_task(
                     status=status,
                     message_id=message_id,
                     error_message=error,
-                    message_preview=message,
+                    message_preview=_safe_preview(message),
                 )
                 logger.info("background_sms_notification_logged", deadline_id=deadline_id)
         except Exception as e:
@@ -634,7 +644,7 @@ class NotificationService:
             success=True,
             channel=NotificationChannel.SMS,
             recipient=user_preference.phone_number,
-            message_id=f"task_{task_result.id}",
+            message_id=message_id,
             error=None,
         )
 
@@ -717,20 +727,18 @@ class NotificationService:
             days_left=days_left,
         )
 
-        # Update the reserved log with task id as message_id (still PENDING until background updates)
+        # Annotate with the real task id without touching the status column.
+        # update_notification_result(status=PENDING) would overwrite a SENT
+        # status set by a fast Celery worker that completed before this line.
         try:
-            update_notification_result(
-                db=db,
-                deadline_id=deadline.id,
-                user_id=deadline.user_id,
-                days_before=days_left,
-                channel=NotificationChannel.EMAIL,
-                status=NotificationStatus.PENDING,
-                message_id=f"task_{task_result.id}",
-                message_preview=html_content,
-            )
+            db.query(NotificationLog).filter(
+                NotificationLog.deadline_id == deadline.id,
+                NotificationLog.days_before == days_left,
+                NotificationLog.channel == NotificationChannel.EMAIL,
+            ).update({"message_id": f"task_{task_result.id}"})
+            db.commit()
         except Exception:
-            logger.exception("Failed to annotate reserved email with task id")
+            logger.debug("Failed to annotate reserved email with task id")
 
         return NotificationResult(
             success=True,

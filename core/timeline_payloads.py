@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Literal
+from typing import Any, ClassVar, Dict, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
@@ -27,8 +27,8 @@ def _json_safe_value(value: Any) -> Any:
 class TimelineEventPayload(BaseModel):
     """Validated realtime payload for a single timeline event."""
 
-    CURRENT_SCHEMA_VERSION = 2
-    LEGACY_SCHEMA_VERSION = 1
+    CURRENT_SCHEMA_VERSION: ClassVar[int] = 2
+    LEGACY_SCHEMA_VERSION: ClassVar[int] = 1
 
     model_config = ConfigDict(extra="ignore")
 

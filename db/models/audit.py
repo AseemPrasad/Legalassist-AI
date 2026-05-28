@@ -23,5 +23,5 @@ class AuditEvent(Base):
     event_metadata = Column("metadata", JSON, nullable=True)
     notes = Column(Text, nullable=True)
 
-    actor_user = relationship("User")
+    actor_user = relationship("db.models.auth.User")
     case = relationship("Case")

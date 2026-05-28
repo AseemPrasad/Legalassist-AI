@@ -7,8 +7,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import services.deadlines_auto_creator as deadlines_auto_creator
-from database import Base, Case, CaseDeadline, CaseTimeline
-from db.models import User
+from db.base import Base
+from db.models import Case, CaseDeadline, CaseTimeline, User
 from services.deadlines_auto_creator import _extract_days_from_text, _validate_days_value
 
 

@@ -6,6 +6,7 @@ implementation and avoid security drift.
 """
 from __future__ import annotations
 
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List
@@ -34,17 +35,49 @@ settings = get_settings()
 
 _REVOCATION_CACHE: dict[str, tuple[bool, float]] = {}
 _REVOCATION_CACHE_TTL: int = 300  # 5 minutes
+_REVOCATION_CACHE_MAX_SIZE: int = 10000
+_REVOCATION_CACHE_LOCK = threading.Lock()
+
+
+def _prune_revocation_cache() -> None:
+    """Remove expired entries and trim cache to max size.
+
+    Caller must hold _REVOCATION_CACHE_LOCK.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    cutoff = now - _REVOCATION_CACHE_TTL
+
+    expired = [k for k, (_, ts) in _REVOCATION_CACHE.items() if ts < cutoff]
+    for k in expired:
+        del _REVOCATION_CACHE[k]
+
+    if len(_REVOCATION_CACHE) > _REVOCATION_CACHE_MAX_SIZE:
+        sorted_keys = sorted(
+            _REVOCATION_CACHE.keys(),
+            key=lambda k: _REVOCATION_CACHE[k][1],
+        )
+        excess = len(_REVOCATION_CACHE) - _REVOCATION_CACHE_MAX_SIZE
+        for k in sorted_keys[:excess]:
+            del _REVOCATION_CACHE[k]
 
 
 def _is_token_revoked_cached(jti: str) -> bool:
     now = datetime.now(timezone.utc).timestamp()
-    cached = _REVOCATION_CACHE.get(jti)
-    if cached is not None and (now - cached[1]) < _REVOCATION_CACHE_TTL:
-        return cached[0]
+
+    with _REVOCATION_CACHE_LOCK:
+        cached = _REVOCATION_CACHE.get(jti)
+        if cached is not None and (now - cached[1]) < _REVOCATION_CACHE_TTL:
+            return cached[0]
+
     from database import SessionLocal, is_token_revoked
     with SessionLocal() as db:
         revoked = is_token_revoked(db, jti)
+
+    with _REVOCATION_CACHE_LOCK:
         _REVOCATION_CACHE[jti] = (revoked, now)
+        if len(_REVOCATION_CACHE) > _REVOCATION_CACHE_MAX_SIZE:
+            _prune_revocation_cache()
+
     return revoked
 
 
@@ -146,16 +179,6 @@ def revoke_jwt_token(token: str) -> bool:
         return False
 
     try:
-        try:
-            unverified = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
-            jti = unverified.get("jti")
-            exp = unverified.get("exp")
-            if not jti or not exp:
-                return False
-        except jwt.PyJWTError as exc:
-            logger.warning("revoke_token_decode_failed", error=str(exc))
-            return False
-
         payload = None
         last_error = None
         for secret in _get_jwt_secrets_to_try():
@@ -190,7 +213,10 @@ def revoke_jwt_token(token: str) -> bool:
         with SessionLocal() as db:
             if not is_token_revoked(db, jti):
                 revoke_token(db, jti, expires_at)
+                # Ensure in-memory cache marks this JTI as revoked immediately
+                now = datetime.now(timezone.utc).timestamp()
+                _REVOCATION_CACHE[jti] = (True, now)
         return True
     except Exception as exc:
-        logger.error("revoke_jwt_token_failed", error=str(exc))
+        logger.error("revoke_jwt_token_failed", error=type(exc).__name__)
         return False

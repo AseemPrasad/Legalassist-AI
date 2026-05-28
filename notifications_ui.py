@@ -691,3 +691,13 @@ if __name__ == "__main__":
         page_notification_history()
     elif page == "Preferences":
         page_notification_preferences()
+
+
+def is_valid_email_address(email: str) -> bool:
+    """
+    Performs quick syntax validation on raw input email addresses 
+    prior to dispatcher queue insertion.
+    """
+    import re
+    email_regex = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+    return bool(email and email_regex.match(email))

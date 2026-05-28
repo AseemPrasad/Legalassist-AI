@@ -52,6 +52,9 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 # Configure Bcrypt password hashing with cost factor of 14 for security
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=14)
 
+# PBKDF2 iterations for API key hashing (OWASP 2023 minimum for SHA-256)
+API_KEY_HASH_ITERATIONS = 600000
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plain password against a bcrypt hash."""
     return pwd_context.verify(plain_password, hashed_password)
@@ -130,6 +133,14 @@ def revoke_jwt_token(token: str) -> bool:
 
             if not is_token_revoked(db, jti):
                 revoke_token(db, jti, expires_at)
+                # Mark in-memory revocation cache if jwt_auth cache is available
+                try:
+                    import api.jwt_auth as _jwt_mod
+                    now = datetime.now(timezone.utc).timestamp()
+                    _jwt_mod._REVOCATION_CACHE[jti] = (True, now)
+                except Exception:
+                    # non-fatal; cache may not be present in some test envs
+                    pass
         return True
     except Exception:
         return False
@@ -145,8 +156,8 @@ def generate_api_key() -> str:
 
 
 def hash_api_key(key: str, salt: str) -> str:
-    """Hash API key for storage with salt"""
-    return hashlib.sha256((salt + key).encode()).hexdigest()
+    """Hash API key for storage with salt using PBKDF2-HMAC-SHA256"""
+    return hashlib.pbkdf2_hmac('sha256', key.encode(), salt.encode(), API_KEY_HASH_ITERATIONS).hex()
 
 
 def verify_api_key(key: str, salt: str, key_hash: str) -> bool:
@@ -166,7 +177,7 @@ def create_api_key_record(
     and saves the APIKey record with the hashed secret and user association.
     """
     secret = generate_api_key()
-    salt = secrets.token_hex(16)
+    salt = "1:" + secrets.token_hex(14)
     key_hash = hash_api_key(secret, salt)
     created_at = datetime.now(timezone.utc)
     expires_at = None

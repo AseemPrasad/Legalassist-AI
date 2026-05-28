@@ -11,6 +11,7 @@ Provides protection against CSRF attacks by:
 
 import hashlib
 import hmac
+import os
 import secrets
 import structlog
 from typing import Optional, Set
@@ -39,13 +40,16 @@ def generate_csrf_token(user_id: int, session_id: str) -> str:
     secret = _get_csrf_secret()
     message = f"{user_id}:{session_id}"
     sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
-    return f"{session_id}.{sig[:32]}"
+    return f"{CSRF_TOKEN_V2_PREFIX}{session_id}.{sig[:32]}"
 
 
 def validate_csrf_token(token: str, user_id: int) -> bool:
     if not token or "." not in token:
         return False
-    parts = token.rsplit(".", 1)
+    if not token.startswith(CSRF_TOKEN_V2_PREFIX):
+        return False
+    inner = token[len(CSRF_TOKEN_V2_PREFIX):]
+    parts = inner.rsplit(".", 1)
     if len(parts) != 2:
         return False
     session_id, received_sig = parts
@@ -62,11 +66,20 @@ def _get_csrf_secret() -> str:
     global _CSRF_SECRET_CACHE
     if _CSRF_SECRET_CACHE is not None:
         return _CSRF_SECRET_CACHE
-    import os
-    secret = os.getenv("CSRF_SECRET")
-    if not secret:
-        secret = os.getenv("SECRET_KEY", "")
+
+    from api.config import get_settings
+    settings = get_settings()
+    secret = settings.CSRF_SECRET
+    if not secret or len(secret) < 16:
+        secret = os.environ.get("SECRET_KEY", "")
         if not secret or len(secret) < 16:
+            is_prod = settings.ENVIRONMENT in ("production", "prod", "live")
+            if is_prod:
+                raise RuntimeError(
+                    "CSRF_SECRET environment variable must be set in production. "
+                    "Auto-generation is not allowed."
+                )
+            logger.warning("csrf_secret_auto_generated", message="CSRF_SECRET not set. Auto-generated per-process secret — cross-worker CSRF will fail in multi-worker deployments.")
             secret = secrets.token_hex(32)
     _CSRF_SECRET_CACHE = secret
     return secret
@@ -208,7 +221,7 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
             response.set_cookie(
                 CSRF_COOKIE_NAME,
                 token,
-                httponly=False,
+                httponly=True,
                 samesite="lax",
                 secure=True,
                 path="/",
@@ -228,13 +241,12 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
                 except Exception:
                     resolved_user_id = None
 
-            if resolved_user_id is not None:
-                session_id = jwt_jti or secrets.token_urlsafe(16)
-                token = generate_csrf_token(resolved_user_id, session_id)
+            if resolved_user_id is not None and jwt_jti:
+                token = generate_csrf_token(resolved_user_id, jwt_jti)
                 response.set_cookie(
                     CSRF_COOKIE_NAME,
                     token,
-                    httponly=False,
+                    httponly=True,
                     samesite="lax",
                     secure=True,
                     path="/",

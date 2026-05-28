@@ -26,9 +26,8 @@ from sqlalchemy import (
     create_engine,
     make_url,
 )
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 from contextlib import contextmanager
-from sqlalchemy.orm import Session
 
 from config import Config
 from db.models import CaseNote
@@ -181,7 +180,8 @@ from db.models.analytics import (
     CaseEmbedding, CaseIssue, CaseArgument, KnowledgeGraphEdge, PrecedentMatch, RevokedToken,
 )
 from db.models.cases import (
-    CaseStatus, DocumentType, CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote,
+    CaseStatus, DocumentType, CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote, AnonymizedShareToken,
+    CaseComment, CasePresence,
 )
 from db.models.notifications import (
     NotificationStatus, NotificationChannel, UserPreference, NotificationTemplate, NotificationLog,
@@ -1373,6 +1373,48 @@ def log_notification(
     db.commit()
     db.refresh(log)
     return log
+
+
+def reserve_idempotency_key(db: Session, key: str, method: str, path: str) -> Tuple[IdempotencyKey, bool]:
+    """Attempt to reserve an idempotency key; returns (instance, created_bool)"""
+    from sqlalchemy.exc import IntegrityError
+
+    ik = IdempotencyKey(key=key, method=method, path=path, status=IdempotencyKeyStatus.IN_PROGRESS)
+    try:
+        db.add(ik)
+        db.commit()
+        db.refresh(ik)
+        return ik, True
+    except IntegrityError:
+        db.rollback()
+        existing = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
+        return existing, False
+
+
+def set_idempotency_response(db: Session, key: str, status_code: int, headers: dict, body: str) -> IdempotencyKey:
+    ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).with_for_update(read=True).first()
+    if not ik:
+        ik = IdempotencyKey(key=key, method="POST", path="unknown")
+    ik.response_status = status_code
+    ik.response_headers = headers
+    ik.response_body = body
+    ik.status = IdempotencyKeyStatus.COMPLETED
+    ik.completed_at = dt.datetime.now(dt.timezone.utc)
+    db.add(ik)
+    db.commit()
+    db.refresh(ik)
+    return ik
+
+
+def get_idempotency_response(db: Session, key: str):
+    ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key, IdempotencyKey.status == IdempotencyKeyStatus.COMPLETED).first()
+    if not ik:
+        return None
+    return {
+        "status_code": ik.response_status,
+        "headers": ik.response_headers or {},
+        "body": ik.response_body or "",
+    }
 
 
 def reserve_notification(
