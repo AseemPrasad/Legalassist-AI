@@ -9,8 +9,10 @@ def _parse_date(value: Any, tz: str) -> datetime:
     elif isinstance(value, date):
         dt = datetime(value.year, value.month, value.day)
     else:
-        # expect ISO string
-        dt = datetime.fromisoformat(str(value))
+        try:
+            dt = datetime.fromisoformat(str(value))
+        except ValueError:
+            dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=ZoneInfo(tz))
