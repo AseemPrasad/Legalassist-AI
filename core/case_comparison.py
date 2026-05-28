@@ -23,6 +23,36 @@ class CaseComparison:
     """Compare cases to highlight patterns and suggest arguments"""
 
     @staticmethod
+    def calculate_length_penalized_similarity(text1: str, text2: str) -> float:
+        """Calculate SequenceMatcher ratio penalized by length difference.
+        
+        Args:
+            text1: First text string
+            text2: Second text string
+            
+        Returns:
+            Normalized and penalized float similarity score between 0.0 and 1.0
+        """
+        if not text1 or not text2:
+            return 0.0
+            
+        raw_ratio = SequenceMatcher(None, text1, text2).ratio()
+        
+        len1 = len(text1)
+        len2 = len(text2)
+        
+        if len1 == 0 or len2 == 0:
+            return 0.0
+            
+        # Multiplicative penalty based on the length ratio
+        # Raising ratio to 0.25 scales down similarity if length mismatch is severe,
+        # but keeps it reasonable for minor differences.
+        len_ratio = min(len1, len2) / max(len1, len2)
+        penalty = len_ratio ** 0.25
+        
+        return raw_ratio * penalty
+
+    @staticmethod
     def compare_cases(
         db: Session,
         user_case_id: int,
@@ -97,12 +127,11 @@ class CaseComparison:
                     if user_arg["issue"] not in shared_issues:
                         continue
                     
-                    # Calculate text similarity
-                    similarity = SequenceMatcher(
-                        None,
+                    # Calculate text similarity with length penalty normalization
+                    similarity = CaseComparison.calculate_length_penalized_similarity(
                         user_arg["text"],
                         prec_arg["text"]
-                    ).ratio()
+                    )
                     
                     if similarity > 0.5:  # Threshold for similarity
                         similar_arguments.append({
