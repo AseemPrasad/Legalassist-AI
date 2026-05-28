@@ -18,7 +18,7 @@ DEFAULT_PRIVACY_PROFILE = "personal_identifiers"
 PRIVACY_PROFILES_ENV = "PRIVACY_REDACTION_PROFILES_JSON"
 
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-PHONE_PATTERN = re.compile(r"(?:(?:\+?\d[\d\s().-]{6,}\d))")
+PHONE_PATTERN = re.compile(r"(?:(?:\+\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})")
 
 DEFAULT_PRIVACY_PROFILES: Dict[str, Dict[str, Any]] = {
     "personal_identifiers": {
