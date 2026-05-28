@@ -1362,8 +1362,6 @@ def export_data_task(
 @celery_app.task(
     bind=True,
     name="send_notification",
-    max_retries=3,
-    default_retry_delay=60,
     queue="notifications",
 )
 def send_notification_task(
@@ -1431,7 +1429,7 @@ def send_notification_task(
             if not success:
                 _record_audit("failure", "email", provider_id, error)
                 if self.request.retries < self.max_retries:
-                    raise self.retry(exc=RuntimeError(f"Email delivery failed: {error}"))
+                    raise self.retry(exc=RuntimeError(f"Email delivery failed: {error}"), countdown=60)
                 raise RuntimeError(f"Email delivery failed after {self.max_retries} retries")
             _record_audit("success", "email", provider_id, None)
             logger.info("notification_delivered", user_id=user_id, channel="email", provider_message_id=provider_id)
@@ -1459,7 +1457,7 @@ def send_notification_task(
             if not success:
                 _record_audit("failure", "sms", provider_id, error)
                 if self.request.retries < self.max_retries:
-                    raise self.retry(exc=RuntimeError(f"SMS delivery failed: {error}"))
+                    raise self.retry(exc=RuntimeError(f"SMS delivery failed: {error}"), countdown=60)
                 raise RuntimeError(f"SMS delivery failed after {self.max_retries} retries")
             _record_audit("success", "sms", provider_id, None)
             logger.info("notification_delivered", user_id=user_id, channel="sms", provider_message_id=provider_id)
