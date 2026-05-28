@@ -791,6 +791,10 @@ def process_case_document_upload_task(
             summary_parts.append(f"Statutes: {', '.join(metadata['statutes'][:3])}")
         summary = " | ".join(summary_parts) if summary_parts else None
 
+        # Link attachment BEFORE update_case_document commits the transaction,
+        # so both the document update and attachment reference are saved atomically.
+        attachment.document_id = doc.id
+
         updated = update_case_document(
             session,
             document_id=doc.id,
@@ -801,7 +805,6 @@ def process_case_document_upload_task(
             ocr_used=bool(diagnostics.get("ocr_used", False)),
         )
 
-        attachment.document_id = doc.id
         session.commit()
 
         create_timeline_event(
