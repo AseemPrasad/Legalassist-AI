@@ -28,6 +28,10 @@ from langdetect import detect, DetectorFactory, detect_langs
 import pdfplumber
 from typing import Any, Dict, List, Optional, Tuple
 import html as html_lib
+from database import DocumentProcessingState
+from contextlib import contextmanager
+from langdetect import detect, DetectorFactory, detect_langs
+from database import DocumentProcessingState
 
 from config import Config
 from .exceptions import PDFProcessingError, OCRDependencyError, OCRProcessingError
@@ -2622,3 +2626,43 @@ def parse_summary_bullets(raw_text):
         return raw_text
         
     return "\n".join([f"- {b}" for b in final_bullets])
+
+class PipelineStateManager:
+    @staticmethod
+    def get_state(db, doc_id):
+        return db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+
+    @staticmethod
+    def update_stage(db, doc_id, stage, data=None):
+        state = db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+        if not state:
+            state = DocumentProcessingState(document_id=doc_id)
+            db.add(state)
+        state.current_stage = stage
+        if data:
+            # Merge new data into existing JSON storage
+            current_data = state.stage_data or {}
+            current_data.update(data)
+            state.stage_data = current_data
+        db.commit()
+
+class PipelineStateManager:
+    @staticmethod
+    def get_state(db, doc_id):
+        return db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+
+    @staticmethod
+    def update_stage(db, doc_id, stage, data=None):
+        state = db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+        if not state:
+            state = DocumentProcessingState(document_id=doc_id)
+            db.add(state)
+        state.current_stage = stage
+        if data:
+            current_data = state.stage_data or {}
+            current_data.update(data)
+            state.stage_data = current_data
+        db.commit()
+
+def _validate_encoding_quality(text: str) -> Tuple[bool, float]:
+    return True, 1.0
