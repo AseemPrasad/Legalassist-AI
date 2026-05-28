@@ -70,22 +70,29 @@ def calculate_deadline(
 
     remaining = max(0, int(business_days))
     current = dt
-
-    # If business_days is zero, deadline is same day but still may be adjusted
     steps = 0
+
+    def _roll_forward(d):
+        """Normalize *d* to the next non-weekend, non-holiday date."""
+        while True:
+            if exclude_weekends and _is_weekend(d.date(), jurisdiction):
+                d += timedelta(days=1)
+                continue
+            if d.date().isoformat() in holidays_set:
+                d += timedelta(days=1)
+                continue
+            break
+        return d
+
     while remaining > 0:
-        # move to next day at same local wall clock
-        current = current + timedelta(days=1)
+        current += timedelta(days=1)
         steps += 1
-        d = current.date()
-
-        if exclude_weekends and _is_weekend(d, jurisdiction):
-            continue
-
-        if d.isoformat() in holidays_set:
-            continue
-
+        current = _roll_forward(current)
         remaining -= 1
+
+    # Normalize even when business_days==0 (e.g. start is a weekend/holiday)
+    if int(business_days) == 0:
+        current = _roll_forward(current)
 
     adjusted_for_weekends_holidays = current
 
