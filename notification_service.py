@@ -36,6 +36,7 @@ if celery_app is None:
 
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 # Email and SMS Libraries
 try:
@@ -608,37 +609,40 @@ class NotificationService:
 
         if message is None:
             message = self.build_sms_message(deadline.case_title, days_left, deadline.deadline_date)
-        # Reserve a notification slot to avoid races
-        reserved_log, created = reserve_notification(
-            db=db,
-            deadline_id=deadline.id,
-            user_id=deadline.user_id,
-            channel=NotificationChannel.SMS,
-            recipient=user_preference.phone_number,
-            days_before=days_left,
-            message_preview=message,
-        )
 
-        if not created:
-            logger.debug("SMS reservation already exists; skipping send", deadline_id=deadline.id, days_before=days_left)
-            return NotificationResult(success=False, channel=NotificationChannel.SMS, recipient=user_preference.phone_number, error="already_reserved")
-
+        # Send SMS before writing to DB so a crash never leaves an orphan PENDING record.
         success, message_id, error = self.sms_client.send_sms(user_preference.phone_number, message)
 
         status = NotificationStatus.SENT if success else NotificationStatus.FAILED
 
-        # Update the reserved record with the final result
-        update_notification_result(
-            db=db,
-            deadline_id=deadline.id,
-            user_id=deadline.user_id,
-            days_before=days_left,
-            channel=NotificationChannel.SMS,
-            status=status,
-            message_id=message_id,
-            error_message=error,
-            message_preview=message,
-        )
+        # Atomically create the notification log with the final status.
+        # The unique constraint on (deadline_id, days_before, channel) prevents
+        # duplicate sends from concurrent workers.
+        try:
+            with db.begin_nested():
+                log = NotificationLog(
+                    deadline_id=deadline.id,
+                    user_id=deadline.user_id,
+                    channel=NotificationChannel.SMS,
+                    recipient=user_preference.phone_number,
+                    days_before=days_left,
+                    message_preview=message,
+                    status=status,
+                    message_id=message_id,
+                    error_message=error,
+                )
+                if success:
+                    log.sent_at = datetime.now(timezone.utc)
+                db.add(log)
+                db.flush()
+        except IntegrityError:
+            logger.debug("SMS notification already recorded; skipping", deadline_id=deadline.id, days_before=days_left)
+            return NotificationResult(
+                success=False,
+                channel=NotificationChannel.SMS,
+                recipient=user_preference.phone_number,
+                error="already_recorded",
+            )
 
         return NotificationResult(
             success=True,
