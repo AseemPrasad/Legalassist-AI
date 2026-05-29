@@ -43,6 +43,8 @@ import routes
 from observability.integration import initialize_observability_for_environment
 
 # Initialize database
+from database import init_db, SessionLocal, db_session, CaseRecord
+from db.models import DocumentType
 from config import Config
 Config.validate_runtime_security()
 init_db()
@@ -855,7 +857,6 @@ def main():
                         db = None
                         try:
                             from analytics_engine import AnalyticsAggregator
-                            from database import CaseRecord
                             
                             db = SessionLocal()
                             summary = AnalyticsAggregator.get_dashboard_summary(db)
