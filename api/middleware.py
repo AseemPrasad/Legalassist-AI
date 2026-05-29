@@ -18,6 +18,7 @@ from api.errors import StructuredAPIError, structured_error_response
 from api.middlewares.idempotency import http_idempotency_manager, idempotency_middleware, is_safe_to_cache
 from api.middlewares.rate_limit import rate_limit_middleware
 from api.middlewares.request_size import request_size_limit_middleware
+from api.middlewares.security import security_headers_middleware
 from api.limiter import limiter
 from observability.instrumentation import (
     bind_request_context,

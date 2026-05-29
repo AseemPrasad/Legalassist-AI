@@ -17,7 +17,8 @@ from api.middleware import (
     add_correlation_id_middleware,
     error_handling_middleware,
     logging_middleware,
-    request_size_limit_middleware
+    request_size_limit_middleware,
+    security_headers_middleware,
 )
 from api.idempotency_middleware import idempotency_middleware
 from observability.integration import initialize_observability_for_environment
@@ -96,6 +97,7 @@ def create_app() -> FastAPI:
     app.middleware("http")(add_correlation_id_middleware)
     app.middleware("http")(logging_middleware)
     app.middleware("http")(error_handling_middleware)
+    app.middleware("http")(security_headers_middleware)
     
     if settings.RATE_LIMIT_ENABLED:
         app.middleware("http")(rate_limit_middleware)
