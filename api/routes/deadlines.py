@@ -343,6 +343,24 @@ async def update_deadline(
     now = datetime.now(timezone.utc)
     effective_due_date = _normalize_utc_datetime(due_date or deadline["deadline_date"])
     days_until = _days_until_due(effective_due_date, now)
+
+    db.execute(
+        text("""
+            UPDATE case_deadlines
+            SET case_title = :title,
+                deadline_date = :due_date,
+                updated_at = :now
+            WHERE id = :deadline_id
+        """),
+        {
+            "title": title or deadline["case_title"],
+            "due_date": effective_due_date,
+            "now": now,
+            "deadline_id": deadline["id"],
+        },
+    )
+    db.commit()
+
     return DeadlineResponse(
         deadline_id=str(deadline["id"]),
         user_id=str(current_user.user_id),
