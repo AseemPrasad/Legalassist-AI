@@ -19,21 +19,32 @@ class APISettings(BaseSettings):
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
     API_WORKERS: int = int(os.getenv("API_WORKERS", "4"))
     
+    # Environment
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+
     # CORS
     CORS_ORIGINS: list = [
         "http://localhost:3000",
         "http://localhost:8501",
         "http://localhost:8000",
     ]
+
+    # Allowed Hosts
+    ALLOWED_HOSTS: list = ["localhost", "127.0.0.1"]
     
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS: int = 100  # requests
     RATE_LIMIT_WINDOW: int = 60  # seconds
     RATE_LIMIT_BURST: int = 200  # max burst
+<<<<<<< fix/profduction
+    AUTH_RATE_LIMIT_REQUESTS: int = 5  # auth-specific limit
+    AUTH_RATE_LIMIT_WINDOW: int = 60  # auth-specific window (seconds)
+=======
     RATE_LIMIT_ABUSE_THRESHOLD: int = 3  # consecutive denials before a temporary block
     RATE_LIMIT_ABUSE_WINDOW: int = 60  # seconds for abuse counter window
     RATE_LIMIT_ABUSE_BLOCK_SECONDS: int = 300  # block duration after abuse threshold
+>>>>>>> main
     
     # Authentication
     AUTH_ENABLED: bool = True
@@ -45,9 +56,14 @@ class APISettings(BaseSettings):
         _jwt_from_vault = None
 
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", _jwt_from_vault or "")
+    JWT_SECRET_KEY_PREVIOUS: str = ""
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRATION_HOURS: int = 24
+    JWT_ISSUER: str = "legalassist.ai"
+    JWT_AUDIENCE: str = "legalassist-users"
+    JWT_EXPIRATION_HOURS: int = int(os.getenv("JWT_EXPIRATION_HOURS", os.getenv("JWT_EXPIRY_HOURS", "168")))
+    JWT_ACCESS_TOKEN_MINUTES: int = int(os.getenv("JWT_ACCESS_TOKEN_MINUTES", str(JWT_EXPIRATION_HOURS * 60)))
     API_KEY_HEADER: str = "X-API-Key"
+    CSRF_SECRET: str = ""
     
     # Database
     DATABASE_URL: str = os.getenv(
@@ -91,6 +107,10 @@ class APISettings(BaseSettings):
     ENABLE_TRACING: bool = True
     JAEGER_ENABLED: bool = os.getenv("JAEGER_ENABLED", "false").lower() == "true"
     
+    # WebSocket
+    WEBSOCKET_RATE_LIMIT_REQUESTS: int = 30
+    WEBSOCKET_RATE_LIMIT_WINDOW: int = 60
+
     # Feature Flags
     ENABLE_OAUTH2: bool = os.getenv("ENABLE_OAUTH2", "true").lower() == "true"
     ENABLE_WEBSOCKET: bool = os.getenv("ENABLE_WEBSOCKET", "true").lower() == "true"

@@ -24,9 +24,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
-# Initialize OpenAI when configured.
-openai.api_key = getattr(Config, "OPENAI_API_KEY", "") or getattr(Config, "OPENROUTER_API_KEY", "")
-
 
 class EmbeddingEngine:
     """Generate and manage embeddings for case documents"""
@@ -36,14 +33,11 @@ class EmbeddingEngine:
         model: str = "text-embedding-3-small",
         dimension: int = 1536,
     ):
-        """Initialize embedding engine
-        
-        Args:
-            model: Embedding model to use (text-embedding-3-small, text-embedding-3-large)
-            dimension: Embedding dimension (1536 for small, 3072 for large)
-        """
         self.model = model
         self.dimension = dimension
+        self._client = openai.OpenAI(
+            api_key=getattr(Config, "OPENAI_API_KEY", None) or getattr(Config, "OPENROUTER_API_KEY", "")
+        )
 
     def generate_embedding(self, text: str) -> Optional[List[float]]:
         """Generate embedding for a single text
@@ -68,13 +62,12 @@ class EmbeddingEngine:
                 logger.warning(f"Text truncated from {len(text)} to {max_chars} chars")
                 text = text[:max_chars]
             
-            # Call OpenAI API
-            response = openai.Embedding.create(
+            response = self._client.embeddings.create(
                 model=self.model,
                 input=text,
             )
             
-            embedding = response["data"][0]["embedding"]
+            embedding = response.data[0].embedding
             return embedding
             
         except Exception as e:

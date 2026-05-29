@@ -35,6 +35,13 @@ class DocumentType(str, enum.Enum):
     OTHER = "Other"
 
 
+class DeadlineStatus(str, enum.Enum):
+    """Status of a case deadline"""
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    OVERDUE = "overdue"
+
+
 class CaseDeadline(Base):
     __tablename__ = "case_deadlines"
 
@@ -48,9 +55,10 @@ class CaseDeadline(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
     is_completed = Column(Boolean, default=False, index=True)
+    status = Column(String(50), default="active", nullable=False, index=True)
 
     case = relationship("Case", back_populates="deadlines")
-    notifications = relationship("NotificationLog", back_populates="deadline")
+    notifications = relationship("db.models.notifications.NotificationLog", back_populates="deadline")
     attachments = relationship("Attachment", back_populates="deadline")
 
     def days_until_deadline(self) -> int:
@@ -66,7 +74,10 @@ class CaseDeadline(Base):
 
 class Case(Base):
     __tablename__ = "cases"
-    __table_args__ = (UniqueConstraint("user_id", "case_number", name="uq_user_case_number"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "case_number", name="uq_user_case_number"),
+        Index("ix_cases_anonymized_id", "anonymized_id"),
+    )
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -76,6 +87,9 @@ class Case(Base):
     status = Column(SQLEnum(CaseStatus), default=CaseStatus.ACTIVE, nullable=False)
     title = Column(String(255), nullable=True)
     version = Column(Integer, default=1, nullable=False)
+    # Stores the HMAC-derived anonymized share ID so lookups by anon_id are O(log N).
+    # Populated on first call to generate_anonymized_case_data().
+    anonymized_id = Column(String(64), nullable=True, unique=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
@@ -83,12 +97,15 @@ class Case(Base):
         "version_id_col": version
     }
 
-    user = relationship("User", back_populates="cases")
+    user = relationship("db.models.auth.User", back_populates="cases")
     documents = relationship("CaseDocument", back_populates="case", cascade="all, delete-orphan")
     deadlines = relationship("CaseDeadline", back_populates="case", cascade="all, delete-orphan")
     timeline_events = relationship("CaseTimeline", back_populates="case", cascade="all, delete-orphan")
     notes = relationship("CaseNote", back_populates="case", cascade="all, delete-orphan")
     attachments = relationship("Attachment", back_populates="case", cascade="all, delete-orphan")
+    anonymized_share_tokens = relationship("AnonymizedShareToken", back_populates="case", cascade="all, delete-orphan")
+    comments = relationship("CaseComment", back_populates="case", cascade="all, delete-orphan", order_by="CaseComment.created_at")
+    presence_updates = relationship("CasePresence", back_populates="case", cascade="all, delete-orphan")
 
 
 class CaseDocument(Base):
@@ -107,8 +124,8 @@ class CaseDocument(Base):
     extraction_method = Column(String(50), nullable=True)
     ocr_used = Column(Boolean, default=False, nullable=False)
 
-    case = relationship("Case", back_populates="documents")
-    attachment = relationship("Attachment", foreign_keys=[source_attachment_id])
+    case = relationship("db.models.cases.Case", back_populates="documents")
+    attachment = relationship("db.models.cases.Attachment", foreign_keys=[source_attachment_id])
 
 
 class Attachment(Base):
@@ -127,8 +144,8 @@ class Attachment(Base):
     is_encrypted = Column(Boolean, default=False, nullable=False)
     wrapped_key = Column(Text, nullable=True)
 
-    case = relationship("Case", back_populates="attachments")
-    deadline = relationship("CaseDeadline", back_populates="attachments")
+    case = relationship("db.models.cases.Case", back_populates="attachments")
+    deadline = relationship("db.models.cases.CaseDeadline", back_populates="attachments")
 
 
 class CaseTimeline(Base):
@@ -142,7 +159,7 @@ class CaseTimeline(Base):
     event_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
-    case = relationship("Case", back_populates="timeline_events")
+    case = relationship("db.models.cases.Case", back_populates="timeline_events")
 
 
 class CaseNote(Base):
@@ -159,8 +176,8 @@ class CaseNote(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
-    case = relationship("Case", back_populates="notes")
-    versions = relationship("CaseNoteVersion", back_populates="note", cascade="all, delete-orphan", order_by="CaseNoteVersion.version_number")
+    case = relationship("db.models.cases.Case", back_populates="notes")
+    versions = relationship("db.models.cases.CaseNoteVersion", back_populates="note", cascade="all, delete-orphan", order_by="db.models.cases.CaseNoteVersion.version_number")
 
 
 class CaseNoteVersion(Base):
@@ -178,3 +195,60 @@ class CaseNoteVersion(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     note = relationship("CaseNote", back_populates="versions")
+
+
+class AnonymizedShareToken(Base):
+    __tablename__ = "anonymized_share_tokens"
+    __table_args__ = (
+        UniqueConstraint("token", name="uq_anonymized_share_tokens_token"),
+        Index("ix_anonymized_share_tokens_token", "token"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    token = Column(String(128), nullable=False)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    anonymized_id = Column(String(64), nullable=False, index=True)
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    scope = Column(String(255), nullable=False, default="personal_identifiers")
+    used_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+    case = relationship("Case", back_populates="anonymized_share_tokens")
+
+
+class CaseComment(Base):
+    """Threaded collaboration comment attached to a case."""
+    __tablename__ = "case_comments"
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    parent_comment_id = Column(Integer, ForeignKey("case_comments.id", ondelete="CASCADE"), nullable=True, index=True)
+    comment_text = Column(Text, nullable=False)
+    is_resolved = Column(Boolean, default=False, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    case = relationship("Case", back_populates="comments")
+    user = relationship("db.models.auth.User", back_populates="case_comments")
+    parent_comment = relationship("CaseComment", remote_side=[id], back_populates="replies")
+    replies = relationship("CaseComment", back_populates="parent_comment", cascade="all, delete-orphan")
+
+
+class CasePresence(Base):
+    """Tracks recently active collaborators on a case."""
+    __tablename__ = "case_presence"
+    __table_args__ = (UniqueConstraint("case_id", "user_id", name="uq_case_presence_user"),)
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    active_view = Column(String(255), nullable=True)
+    cursor_anchor = Column(String(255), nullable=True)
+    last_seen = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    case = relationship("Case", back_populates="presence_updates")
+    user = relationship("db.models.auth.User", back_populates="case_presence")

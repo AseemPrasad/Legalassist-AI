@@ -455,3 +455,60 @@ def create_timeline_event(
     db.refresh(event)
     return event
 
+
+def transition_deadline(db: Session, deadline_id: int, target_status: str, actor_user_id: int) -> CaseDeadline:
+    """
+    Transition a deadline to a new status with validation and audit trail.
+    Allowed transitions:
+    - active -> completed
+    - active -> overdue
+    - overdue -> completed
+    - overdue -> active
+    - completed -> active (reopening)
+    """
+    from db.crud.audit import record_audit_event
+
+    deadline = db.query(CaseDeadline).filter(CaseDeadline.id == deadline_id).first()
+    if not deadline:
+        raise ValueError(f"Deadline {deadline_id} not found")
+
+    old_status = deadline.status or ("completed" if deadline.is_completed else "active")
+    if old_status == target_status:
+        raise ValueError(f"Deadline is already in '{target_status}' status")
+
+    # Validate transition
+    allowed = {
+        "active": {"completed", "overdue"},
+        "overdue": {"completed", "active"},
+        "completed": {"active"},
+    }
+
+    if target_status not in allowed.get(old_status, set()):
+        raise ValueError(f"Invalid transition from '{old_status}' to '{target_status}'")
+
+    deadline.status = target_status
+    if target_status == "completed":
+        deadline.is_completed = True
+    else:
+        deadline.is_completed = False
+
+    db.commit()
+    db.refresh(deadline)
+
+    # Audit trail
+    record_audit_event(
+        db,
+        actor=f"user:{actor_user_id}",
+        action="transition_deadline",
+        resource=f"deadline:{deadline.id}",
+        case_id=deadline.case_id,
+        actor_user_id=actor_user_id,
+        metadata={
+            "deadline_id": deadline.id,
+            "old_status": old_status,
+            "new_status": target_status,
+        }
+    )
+
+    return deadline
+

@@ -6,17 +6,16 @@ CHANGE: build_judgment_result_text now returns (plain_text, structured_dict).
         render_shareable_result_box accepts the tuple directly — no other changes needed.
 """
 
-import streamlit as st
-import logging
-
-import routes
 import sys
 import os
+# Add parent directory to sys.path to resolve 'core' and other top-level modules
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import streamlit as st
+import logging
+import routes
 from config import Config
 from pages.ui_components import render_header, SESSION_KEYS
-
-# Add parent directory to sys.path to resolve 'core' module
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from core.app_utils import (
     get_client,
@@ -24,26 +23,22 @@ from core.app_utils import (
     extract_text_from_pdf,
     analyze_legal_citations,
     compress_text,
-    english_leakage_detected,
     output_language_mismatch_detected,
     build_prompt,
     build_retry_prompt,
     get_remedies_advice,
-    extract_appeal_info,
     get_localized_ui_text,
-    localize_yes_no,
     RETRO_STYLING,
     LANGUAGES,
-    parse_summary_bullets,
-    validate_pdf_metadata,
     build_judgment_result_text,
     render_shareable_result_box,
     safe_llm_call,
     generate_legal_draft,
     export_draft_to_pdf,
+    parse_llm_json,
+    parse_timeline,        
+    build_timeline_prompt,
 )
-
-from core.multimodal_processor import MultiModalProcessor
 
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
 
@@ -223,16 +218,49 @@ def render_page():
                         if retry_summary and len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
                             summary = retry_summary
 
-                    if not summary:
-                        st.error(ui["empty_summary"])
-                    else:
-                        remedies = {}
+                        if not summary:
+                            st.error(ui["empty_summary"])
+                        else:
+                            # 1. Parse and UI Confidence
+                            summary_data = parse_llm_json(summary)
+                            summary = summary_data.get("summary", summary)
+                            
+                            st.markdown("### 🔍 Confidence & Transparency")
+                            score = summary_data.get("confidence_score", 0.5)
+                            st.progress(score, text=f"Confidence: {int(score*100)}%")
+                            
+                            with st.expander("AI Explanation"):
+                                st.write(summary_data.get("explanation", "No explanation provided."))
+                            
+                            if summary_data.get("key_entities"):
+                                st.write("Entities:", ", ".join(summary_data["key_entities"]))
 
-                        with st.spinner(ui["remedies_spinner"]):
-                            try:
-                                remedies = get_remedies_advice(raw_text, language, client) or {}
-                            except Exception as e:
-                                st.error(f"{ui['remedies_error']}: {str(e)}")
+                            # 2. Get Remedies
+                            remedies = {}
+                            with st.spinner(ui["remedies_spinner"]):
+                                try:
+                                    remedies = get_remedies_advice(raw_text, language, client) or {}
+                                except Exception as e:
+                                    st.error(f"{ui['remedies_error']}: {str(e)}")
+
+                            # 3. Build Result and Render (ONLY ONCE)
+                            result = build_judgment_result_text(summary, remedies, ui)
+                            render_shareable_result_box(result, ui)
+                            st.success(ui["summary_success"])
+
+                            # 4. Timeline Logic (Inserted here)
+                            if "timeline_events" not in st.session_state:
+                                with st.spinner("Extracting timeline..."):
+                                    timeline_prompt = build_timeline_prompt(safe_text)
+                                    timeline_raw, error = safe_llm_call(client, model_id, [{"role": "user", "content": timeline_prompt}], 1000, 0.1)
+                                    st.session_state["timeline_events"] = parse_timeline(timeline_raw) if not error else []
+                            
+                            timeline_events = st.session_state["timeline_events"]
+                            if timeline_events:
+                                st.markdown("### 🗓️ Case Timeline")
+                                for item in timeline_events:
+                                    date_str = item.get('date', 'Date Unspecified')
+                                    st.markdown(f"- **{date_str}**: {item.get('event', '')}")
 
                         # build_judgment_result_text now returns (plain_text, structured_dict)
                         result = build_judgment_result_text(summary, remedies, ui)
@@ -261,6 +289,21 @@ def render_page():
                                     st.write(
                                         f"- {item['citation']} ({item['citation_type']}, {item['status']}, confidence {item['confidence']:.2f})"
                                     )
+                            # 1. Generate Timeline
+                            with st.spinner("Extracting timeline..."):
+                                timeline_prompt = build_timeline_prompt(safe_text)
+                                timeline_raw, error = safe_llm_call(client, model_id, [{"role": "user", "content": timeline_prompt}], 1000, 0.1)
+                                
+                                if not error:
+                                    timeline_events = parse_timeline(timeline_raw)
+                                    
+                                    # 2. Render Timeline
+                                    if timeline_events:
+                                        st.markdown("### 🗓️ Case Timeline")
+                                        for item in timeline_events:
+                                            # Use a cleaner UI for dates
+                                            date_str = item['date'] if item['date'] != 'N/A' else "Date Unspecified"
+                                            st.write(f"- **{date_str}**: {item['event']}")
 
                         # ===== DRAFTING SECTION =====
                         st.markdown("---")

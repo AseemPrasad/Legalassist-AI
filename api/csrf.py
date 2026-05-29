@@ -11,6 +11,7 @@ Provides protection against CSRF attacks by:
 
 import hashlib
 import hmac
+import os
 import secrets
 import structlog
 from typing import Optional, Set
@@ -28,6 +29,7 @@ CSRF_TOKEN_HEADER = "X-CSRF-Token"
 CSRF_COOKIE_NAME = "csrf_token"
 ACCESS_TOKEN_COOKIE_NAME = "access_token"
 CSRF_SESSION_PREFIX = "csrf_session:"
+CSRF_TOKEN_V2_PREFIX = "v2:"
 
 
 class CSRFError(StructuredAPIError):
@@ -39,13 +41,16 @@ def generate_csrf_token(user_id: int, session_id: str) -> str:
     secret = _get_csrf_secret()
     message = f"{user_id}:{session_id}"
     sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
-    return f"{session_id}.{sig[:32]}"
+    return f"{CSRF_TOKEN_V2_PREFIX}{session_id}.{sig[:32]}"
 
 
 def validate_csrf_token(token: str, user_id: int) -> bool:
     if not token or "." not in token:
         return False
-    parts = token.rsplit(".", 1)
+    if not token.startswith(CSRF_TOKEN_V2_PREFIX):
+        return False
+    inner = token[len(CSRF_TOKEN_V2_PREFIX):]
+    parts = inner.rsplit(".", 1)
     if len(parts) != 2:
         return False
     session_id, received_sig = parts
@@ -62,11 +67,20 @@ def _get_csrf_secret() -> str:
     global _CSRF_SECRET_CACHE
     if _CSRF_SECRET_CACHE is not None:
         return _CSRF_SECRET_CACHE
-    import os
-    secret = os.getenv("CSRF_SECRET")
-    if not secret:
-        secret = os.getenv("SECRET_KEY", "")
+
+    from api.config import get_settings
+    settings = get_settings()
+    secret = settings.CSRF_SECRET
+    if not secret or len(secret) < 16:
+        secret = os.environ.get("SECRET_KEY", "")
         if not secret or len(secret) < 16:
+            is_prod = settings.ENVIRONMENT in ("production", "prod", "live")
+            if is_prod:
+                raise RuntimeError(
+                    "CSRF_SECRET environment variable must be set in production. "
+                    "Auto-generation is not allowed."
+                )
+            logger.warning("csrf_secret_auto_generated", message="CSRF_SECRET not set. Auto-generated per-process secret — cross-worker CSRF will fail in multi-worker deployments.")
             secret = secrets.token_hex(32)
     _CSRF_SECRET_CACHE = secret
     return secret
@@ -82,6 +96,7 @@ def get_referer(request: Request) -> Optional[str]:
 
 def is_same_origin(request: Request, allowed_hosts: Optional[Set[str]] = None) -> bool:
     origin = get_origin(request)
+    expected_scheme = request.url.scheme
     if not origin:
         referer = get_referer(request)
         if referer:
@@ -89,17 +104,21 @@ def is_same_origin(request: Request, allowed_hosts: Optional[Set[str]] = None) -
             parsed = urlparse(referer)
             allowed = allowed_hosts or set()
             host = request.headers.get("host", "").split(":")[0]
-            if parsed.netloc in allowed or parsed.netloc == f"{host}:443":
+            if parsed.scheme != expected_scheme:
+                return False
+            if parsed.hostname in allowed or parsed.hostname == host:
                 return True
-            return parsed.netloc == f"{host}:443" or parsed.netloc == host
+            return parsed.hostname == host
         return False
     from urllib.parse import urlparse
     parsed = urlparse(origin)
     host = request.headers.get("host", "").split(":")[0]
     allowed = allowed_hosts or set()
-    if parsed.netloc in allowed:
+    if parsed.scheme != expected_scheme:
+        return False
+    if parsed.hostname in allowed:
         return True
-    return parsed.netloc == host
+    return parsed.hostname == host
 
 
 def validate_csrf(
@@ -135,6 +154,7 @@ def validate_csrf(
         try:
             payload = verify_token(access_token)
             current_user_id = int(payload.get("sub"))
+            request.state.csrf_user_id = current_user_id
         except TokenExpiredError as exc:
             raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="TOKEN_EXPIRED", message=str(exc))
         except (InvalidTokenError, TypeError, ValueError):
@@ -180,7 +200,7 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         }
 
     async def dispatch(self, request: Request, call_next):
-        path = request.url.path
+        path = request.url.path.rstrip("/") or "/"
 
         if path in self.exempt_paths:
             return await call_next(request)
@@ -202,13 +222,21 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         access_token = request.cookies.get(ACCESS_TOKEN_COOKIE_NAME)
         csrf_cookie = request.cookies.get(CSRF_COOKIE_NAME)
 
-        if request.method in SAFE_METHODS and not csrf_cookie:
+        if request.method in SAFE_METHODS and (not csrf_cookie or access_token):
+            if user_id is None and access_token:
+                try:
+                    from api.jwt_auth import verify_token
+                    payload = verify_token(access_token)
+                    user_id = int(payload.get("sub", 0))
+                    request.state.csrf_user_id = user_id
+                except Exception:
+                    user_id = 0
             session_id = secrets.token_urlsafe(16)
             token = generate_csrf_token(int(user_id) if str(user_id).isdigit() else 0, session_id)
             response.set_cookie(
                 CSRF_COOKIE_NAME,
                 token,
-                httponly=False,
+                httponly=True,
                 samesite="lax",
                 secure=True,
                 path="/",
@@ -228,13 +256,12 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
                 except Exception:
                     resolved_user_id = None
 
-            if resolved_user_id is not None:
-                session_id = jwt_jti or secrets.token_urlsafe(16)
-                token = generate_csrf_token(resolved_user_id, session_id)
+            if resolved_user_id is not None and jwt_jti:
+                token = generate_csrf_token(resolved_user_id, jwt_jti)
                 response.set_cookie(
                     CSRF_COOKIE_NAME,
                     token,
-                    httponly=False,
+                    httponly=True,
                     samesite="lax",
                     secure=True,
                     path="/",

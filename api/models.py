@@ -243,6 +243,19 @@ class CaseNoteHistoryResponse(BaseModel):
     versions: List[CaseNoteVersionItem]
 
 
+class AnonymizedShareCreateRequest(BaseModel):
+    scope: str = Field("personal_identifiers", min_length=1, max_length=255)
+    expires_in_hours: int = Field(72, ge=1, le=8760)
+
+
+class AnonymizedShareResponse(BaseModel):
+    token: str
+    anonymized_id: str
+    scope: str
+    share_url: str
+    expires_at: datetime
+
+
 # ============================================================================
 # Report Generation Models
 # ============================================================================
@@ -358,6 +371,8 @@ class UpcomingDeadlinesResponse(BaseModel):
     """List of upcoming deadlines"""
     user_id: str
     total_deadlines: int
+    limit: int
+    offset: int
     critical_count: int
     high_count: int
     medium_count: int
@@ -448,3 +463,35 @@ class PaginatedResponse(BaseModel):
     limit: int
     offset: int
     items: List[Dict[str, Any]]
+
+
+# ============================================================================
+# Notification Preference Models
+# ============================================================================
+
+class UserPreferenceUpdate(BaseModel):
+    """Update user notification preferences"""
+    email: EmailStr
+    phone_number: Optional[str] = None
+    notification_channel: str = "both"  # "sms", "email", "both"
+    timezone: str = "UTC"
+    reminder_thresholds: List[int] = Field(default_factory=lambda: [30, 10, 3, 1])
+    holiday_aware_reminders: bool = False
+    holiday_country: Optional[str] = None
+    holiday_region: Optional[str] = None
+    holiday_calendar_json: Optional[str] = None
+
+
+class UserPreferenceResponse(BaseModel):
+    """User notification preferences response"""
+    user_id: int
+    email: str
+    phone_number: Optional[str] = None
+    notification_channel: str
+    timezone: str
+    reminder_thresholds: List[int]
+    holiday_aware_reminders: bool
+    holiday_country: Optional[str] = None
+    holiday_region: Optional[str] = None
+    holiday_calendar_json: Optional[str] = None
+    updated_at: datetime

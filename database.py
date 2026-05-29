@@ -24,7 +24,8 @@ from sqlalchemy import (
     create_engine,
     make_url,
 )
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
+from contextlib import contextmanager
 
 from config import Config
 from db.models import CaseNote
@@ -177,10 +178,11 @@ from db.models.analytics import (
     CaseEmbedding, CaseIssue, CaseArgument, KnowledgeGraphEdge, PrecedentMatch, RevokedToken,
 )
 from db.models.cases import (
-    CaseStatus, DocumentType, CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote,
+    CaseStatus, DocumentType, CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote, AnonymizedShareToken,
+    CaseComment, CasePresence,
 )
 from db.models.notifications import (
-    NotificationStatus, NotificationChannel, UserPreference, NotificationTemplate, NotificationLog,
+    NotificationStatus, NotificationChannel, UserPreference, NotificationTemplate,
 )
 from db.models.feedback import UserFeedback
 from db.models.reports import Report
@@ -222,6 +224,7 @@ class CaseDeadline(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
     is_completed = Column(Boolean, default=False, index=True)
+    status = Column(String(50), default="active", nullable=False, index=True)
 
     # Relationships
     case = relationship("Case", back_populates="deadlines")
@@ -263,6 +266,7 @@ class UserPreference(Base):
     holiday_region = Column(String(255), nullable=True)   # e.g., "MH" / state/province (optional in MVP)
     # JSON array of ISO dates: ["2026-01-26", "2026-03-29", ...]
     holiday_calendar_json = Column(Text, nullable=True)
+    reminder_thresholds = Column(JSON, default=lambda: [30, 10, 3, 1], nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
@@ -270,6 +274,33 @@ class UserPreference(Base):
 
     # Relationships
     user = relationship("User", back_populates="preferences")
+
+    def get_reminder_thresholds(self) -> list[int]:
+        if self.reminder_thresholds is not None:
+            if isinstance(self.reminder_thresholds, list):
+                return [int(x) for x in self.reminder_thresholds]
+            elif isinstance(self.reminder_thresholds, str):
+                try:
+                    import json
+                    parsed = json.loads(self.reminder_thresholds)
+                    if isinstance(parsed, list):
+                        return [int(x) for x in parsed]
+                except Exception:
+                    pass
+                try:
+                    return [int(x.strip()) for x in self.reminder_thresholds.split(",") if x.strip().isdigit()]
+                except Exception:
+                    pass
+        thresholds = []
+        if getattr(self, "notify_30_days", True):
+            thresholds.append(30)
+        if getattr(self, "notify_10_days", True):
+            thresholds.append(10)
+        if getattr(self, "notify_3_days", True):
+            thresholds.append(3)
+        if getattr(self, "notify_1_day", True):
+            thresholds.append(1)
+        return thresholds
 
     def __repr__(self):
         return f"<UserPreference(user_id={self.user_id}, channel={self.notification_channel})>"
@@ -280,12 +311,14 @@ class NotificationLog(Base):
     __tablename__ = "notification_logs"
     __table_args__ = (
         UniqueConstraint("deadline_id", "days_before", "channel", name="uq_notification_deadline_days_channel"),
+        {"extend_existing": True},
     )
     id = Column(Integer, primary_key=True)
     deadline_id = Column(Integer, ForeignKey("case_deadlines.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     channel = Column(SQLEnum(NotificationChannel), nullable=False)
     status = Column(SQLEnum(NotificationStatus), default=NotificationStatus.PENDING, index=True)
+    attempted_channels = Column(JSON, nullable=True)
     recipient = Column(String(255), nullable=False)  # phone or email
     days_before = Column(Integer, nullable=False)  # 30, 10, 3, or 1 day reminder
     message_id = Column(String(255), nullable=True)  # From Twilio or SendGrid
@@ -301,28 +334,6 @@ class NotificationLog(Base):
 
     def __repr__(self):
         return f"<NotificationLog(user_id={self.user_id}, status={self.status}, channel={self.channel})>"
-
-
-class IdempotencyKeyStatus(str, enum.Enum):
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-
-
-class IdempotencyKey(Base):
-    __tablename__ = "idempotency_keys"
-    id = Column(Integer, primary_key=True)
-    key = Column(String(255), unique=True, nullable=False, index=True)
-    method = Column(String(10), nullable=False)
-    path = Column(String(1024), nullable=False)
-    status = Column(SQLEnum(IdempotencyKeyStatus), default=IdempotencyKeyStatus.IN_PROGRESS)
-    response_status = Column(Integer, nullable=True)
-    response_headers = Column(JSON, nullable=True)
-    response_body = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    completed_at = Column(DateTime(timezone=True), nullable=True)
-
-    def __repr__(self):
-        return f"<IdempotencyKey(key={self.key}, status={self.status})>"
 
 
 class CaseRecord(Base):
@@ -1188,6 +1199,16 @@ class PrecedentMatch(Base):
         return f"<PrecedentMatch(query={self.query_case_id}, precedent={self.precedent_case_id}, type={self.match_type})>"
 
 
+class DocumentProcessingState(Base):
+    __tablename__ = "document_processing_state"
+    __table_args__ = {"extend_existing": True}
+    
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey("case_documents.id", ondelete="CASCADE"), unique=True, index=True)
+    current_stage = Column(String(50), default="PENDING")
+    stage_data = Column(JSON, default={})
+    updated_at = Column(DateTime(timezone=True), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
 # Database initialization
 def init_db():
     """Create all tables"""
@@ -1238,6 +1259,7 @@ def create_or_update_user_preference(
     holiday_country: Optional[str] = None,
     holiday_region: Optional[str] = None,
     holiday_calendar_json: Optional[str] = None,
+    reminder_thresholds: Optional[list[int]] = None,
 ) -> UserPreference:
     """Create or update user notification preferences"""
     pref = db.query(UserPreference).filter(UserPreference.user_id == user_id).first()
@@ -1252,6 +1274,8 @@ def create_or_update_user_preference(
         pref.holiday_country = holiday_country
         pref.holiday_region = holiday_region
         pref.holiday_calendar_json = holiday_calendar_json
+        if reminder_thresholds is not None:
+            pref.reminder_thresholds = reminder_thresholds
         pref.updated_at = dt.datetime.now(dt.timezone.utc)
 
     else:
@@ -1266,6 +1290,7 @@ def create_or_update_user_preference(
             holiday_country=holiday_country,
             holiday_region=holiday_region,
             holiday_calendar_json=holiday_calendar_json,
+            reminder_thresholds=reminder_thresholds,
         )
 
         db.add(pref)
@@ -1475,6 +1500,8 @@ def update_notification_result(
     message_id: Optional[str] = None,
     error_message: Optional[str] = None,
     message_preview: Optional[str] = None,
+    recipient: Optional[str] = None,
+    attempted_channels: Optional[List[str]] = None,
 ) -> NotificationLog:
     """Update an existing notification log if present, otherwise create one.
 
@@ -1488,6 +1515,10 @@ def update_notification_result(
 
     if existing:
         existing.status = status
+        if recipient is not None:
+            existing.recipient = recipient
+        if attempted_channels is not None:
+            existing.attempted_channels = attempted_channels
         existing.message_id = message_id or existing.message_id
         existing.error_message = error_message or existing.error_message
         existing.message_preview = message_preview or existing.message_preview
@@ -1498,21 +1529,18 @@ def update_notification_result(
         db.refresh(existing)
         return existing
 
-    # Not found - create a new log record
     return log_notification(
         db=db,
         deadline_id=deadline_id,
         user_id=user_id,
         channel=channel,
-        recipient="unknown",
+        recipient=recipient or "unknown",
         days_before=days_before,
         status=status,
         message_id=message_id,
         error_message=error_message,
         message_preview=message_preview,
     )
-
-
 def get_notification_history(db: Session, user_id: int, limit: int = 50) -> List[NotificationLog]:
     """Get notification history for a user"""
     return db.query(NotificationLog).filter(
@@ -2293,4 +2321,12 @@ def get_user_stats(db: Session, user_id: int) -> dict:
     cases = get_user_cases(db, user_id)
 
 
-
+class DocumentProcessingState(Base):
+    __tablename__ = "document_processing_state"
+    __table_args__ = {"extend_existing": True}
+    
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey("case_documents.id", ondelete="CASCADE"), unique=True, index=True)
+    current_stage = Column(String(50), default="PENDING")
+    stage_data = Column(JSON, default={})
+    updated_at = Column(DateTime(timezone=True), onupdate=lambda: dt.datetime.now(dt.timezone.utc))

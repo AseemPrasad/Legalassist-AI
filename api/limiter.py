@@ -336,6 +336,20 @@ def is_whitelisted(identifier: str) -> bool:
 
 
 def resolve_rate_limit_identifier(request: Request) -> str:
+    """Return a per-identity rate-limit key.
+
+    Resolution order:
+    1. Valid JWT ``sub`` / ``user_id`` claim  → ``user:<id>``
+    2. Direct client IP from ASGI transport   → ``ip:<addr>``
+    3. ``X-Forwarded-For`` first hop          → ``ip:<addr>``
+       (only used when the direct client is a known trusted proxy)
+    4. Unique per-request token               → ``anon:<uuid>``
+
+    The function NEVER returns a shared literal such as ``"anonymous"``.
+    Returning a shared key would allow a single attacker to exhaust the
+    entire unauthenticated quota and lock out all other unauthenticated
+    users (login, OTP, password-reset) — a targeted DoS vector.
+    """
     """Prefer API key identity, then verified JWT user_id; otherwise use source IP."""
 
     api_key_identifier = limiter._api_key_identifier(request)
@@ -358,18 +372,22 @@ def resolve_rate_limit_identifier(request: Request) -> str:
             except HTTPException:
                 pass
 
+    # Prefer the direct transport-layer IP — it cannot be spoofed by the client.
     if request.client and request.client.host:
         return f"ip:{request.client.host}"
 
-    # Use X-Forwarded-For as fallback if present (trusted proxy)
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        client_ip = forwarded.split(",")[0].strip()
-        if client_ip:
-            return f"ip:{client_ip}"
+    # Only trust X-Forwarded-For when the direct peer is a known proxy/load-balancer.
+    # Accepting it unconditionally would let any client forge their IP.
+    direct_host = request.client.host if request.client else None
+    if direct_host in WHITELIST:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            client_ip = forwarded.split(",")[0].strip()
+            if client_ip:
+                return f"ip:{client_ip}"
 
     # Last resort: unique per-request identifier so unknown clients
-    # do not share a single bucket that can be exhausted by one attacker.
+    # never share a single bucket that can be exhausted by one attacker.
     return f"anon:{uuid.uuid4().hex}"
 
 

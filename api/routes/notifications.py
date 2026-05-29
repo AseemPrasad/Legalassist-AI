@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 from urllib.parse import parse_qsl
 
+
+
 import structlog
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 
 from api.errors import StructuredAPIError
 from config import Config
-from database import get_db
+
 from db.crud.notifications import update_notification_log_by_message_id
+from api.dependencies import get_db_rls, get_db_rls_optional
 from db.models.notifications import NotificationStatus
 
 try:
@@ -68,6 +71,14 @@ def _verify_sendgrid_signature(request: Request, payload: str) -> bool:
     if not signature or not timestamp:
         raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="SENDGRID_SIGNATURE_MISSING", message="Missing SendGrid signature headers")
 
+    import time
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="SENDGRID_WEBHOOK_INVALID_TIMESTAMP", message="Invalid SendGrid webhook timestamp")
+    if abs(time.time() - ts) > 300:
+        raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="SENDGRID_WEBHOOK_EXPIRED", message="SendGrid webhook timestamp is too old, possible replay attack")
+
     public_key = Config.get_sendgrid_event_webhook_public_key()
     if not public_key:
         raise StructuredAPIError(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, error_code="SENDGRID_WEBHOOK_NOT_CONFIGURED", message="SendGrid event webhook public key is not configured")
@@ -94,7 +105,7 @@ def _update_delivery_status(db: Session, message_id: str | None, status_value: N
 
 
 @router.post("/twilio")
-async def twilio_delivery_webhook(request: Request, db: Session = Depends(get_db)) -> dict:
+async def twilio_delivery_webhook(request: Request, db: Session = Depends(get_db_rls_optional)) -> dict:
     raw_body = (await request.body()).decode("utf-8")
     params = dict(parse_qsl(raw_body, keep_blank_values=True))
 
@@ -117,7 +128,7 @@ async def twilio_delivery_webhook(request: Request, db: Session = Depends(get_db
 
 
 @router.post("/sendgrid")
-async def sendgrid_delivery_webhook(request: Request, db: Session = Depends(get_db)) -> dict:
+async def sendgrid_delivery_webhook(request: Request, db: Session = Depends(get_db_rls_optional)) -> dict:
     raw_body = (await request.body()).decode("utf-8")
 
     if not _verify_sendgrid_signature(request, raw_body):
@@ -149,3 +160,86 @@ async def sendgrid_delivery_webhook(request: Request, db: Session = Depends(get_
 
     logger.info("sendgrid_delivery_webhook_processed", events=processed, updated=updated)
     return {"ok": True, "events": processed, "updated": updated}
+
+
+# ============================================================================
+# User Notification Preferences Router
+# ============================================================================
+
+from api.auth import get_current_user, CurrentUser
+from api.models import UserPreferenceUpdate, UserPreferenceResponse
+from db.notifications_service import create_or_update_user_preference
+from db.models.notifications import UserPreference, NotificationChannel
+
+pref_router = APIRouter(prefix="/api/v1/notifications", tags=["notifications"])
+
+@pref_router.get("/preferences", response_model=UserPreferenceResponse)
+async def get_user_preferences(
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db_rls),
+) -> UserPreferenceResponse:
+    """Get the current authenticated user's notification preferences."""
+    pref = db.query(UserPreference).filter(UserPreference.user_id == current_user.user_id).first()
+    if not pref:
+        # Create default preferences
+        pref = create_or_update_user_preference(
+            db=db,
+            user_id=current_user.user_id,
+            email=current_user.email,
+        )
+    
+    return UserPreferenceResponse(
+        user_id=pref.user_id,
+        email=pref.email,
+        phone_number=pref.phone_number,
+        notification_channel=pref.notification_channel.value if hasattr(pref.notification_channel, "value") else str(pref.notification_channel),
+        timezone=pref.timezone,
+        reminder_thresholds=pref.get_reminder_thresholds(),
+        holiday_aware_reminders=pref.holiday_aware_reminders,
+        holiday_country=pref.holiday_country,
+        holiday_region=pref.holiday_region,
+        holiday_calendar_json=pref.holiday_calendar_json,
+        updated_at=pref.updated_at,
+    )
+
+@pref_router.put("/preferences", response_model=UserPreferenceResponse)
+async def update_user_preferences(
+    payload: UserPreferenceUpdate,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db_rls),
+) -> UserPreferenceResponse:
+    """Create or update the current authenticated user's notification preferences."""
+    try:
+        channel_enum = NotificationChannel(payload.notification_channel.lower())
+    except ValueError:
+        channel_enum = NotificationChannel.BOTH
+
+    pref = create_or_update_user_preference(
+        db=db,
+        user_id=current_user.user_id,
+        email=payload.email,
+        phone_number=payload.phone_number,
+        notification_channel=channel_enum,
+        timezone=payload.timezone,
+        holiday_aware_reminders=payload.holiday_aware_reminders,
+        holiday_country=payload.holiday_country,
+        holiday_region=payload.holiday_region,
+        holiday_calendar_json=payload.holiday_calendar_json,
+        reminder_thresholds=payload.reminder_thresholds,
+    )
+
+    return UserPreferenceResponse(
+        user_id=pref.user_id,
+        email=pref.email,
+        phone_number=pref.phone_number,
+        notification_channel=pref.notification_channel.value if hasattr(pref.notification_channel, "value") else str(pref.notification_channel),
+        timezone=pref.timezone,
+        reminder_thresholds=pref.get_reminder_thresholds(),
+        holiday_aware_reminders=pref.holiday_aware_reminders,
+        holiday_country=pref.holiday_country,
+        holiday_region=pref.holiday_region,
+        holiday_calendar_json=pref.holiday_calendar_json,
+        updated_at=pref.updated_at,
+    )
+
+

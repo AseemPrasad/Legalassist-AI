@@ -36,6 +36,7 @@ if celery_app is None:
 
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 # Email and SMS Libraries
 try:
@@ -57,20 +58,30 @@ from db import (
     UserPreference,
     CaseDeadline,
 )
-from database import get_notification_template_for_user
+from database import (
+    get_notification_template_for_user,
+    reserve_notification,
+    update_notification_result,
+)
 from db.crud.notifications import (
     get_or_create_notification_log,
     update_notification_log_by_keys,
     has_notification_been_sent,
-    reserve_notification,
-    update_notification_result,
-    get_notification_template_for_user,
 )
 from db.crud.audit import record_immutable_audit_event
 from core.template_renderer import render_template, validate_template, TemplateValidationError
 from core.log_redaction import mask_recipient, sanitize_log_text
 
 # Import debug mode helper
+
+_NOTIFICATION_PREVIEW_MAX_LEN = 200
+
+
+def _safe_preview(text: Optional[str]) -> str:
+    """Truncate and redact PII from notification content for DB storage."""
+    return sanitize_log_text(text)[:_NOTIFICATION_PREVIEW_MAX_LEN]
+
+
 def _is_debug_or_testing_mode() -> bool:
     """Return True when explicit debug/testing flags are enabled."""
     return Config.DEBUG or Config.TESTING
@@ -86,6 +97,7 @@ class NotificationResult:
     recipient: str
     message_id: Optional[str] = None
     error: Optional[str] = None
+    attempted_channels: Optional[List[str]] = None
 
 
 class SMSClient:
@@ -110,7 +122,7 @@ class SMSClient:
     @tenacity.retry(
         wait=tenacity.wait_exponential(multiplier=1, min=2, max=60),
         stop=tenacity.stop_after_attempt(5),
-        retry=tenacity.retry_if_exception(lambda e: '503' in str(e) or '429' in str(e)),
+        retry=tenacity.retry_if_exception(lambda e: getattr(e, 'status_code', None) in (429, 503)),
         reraise=True
     )
     def _create_message_with_retry(self, to_number: str, message: str):
@@ -132,7 +144,7 @@ class SMSClient:
         try:
             if not self.client:
                 # Not configured: run in mock mode ONLY if in debug/testing.
-                if _is_debug_or_testing_mode():
+                if _is_debug_or_testing_mode() and not Config.is_production():
                     logger.info("sms_mocked", recipient=mask_recipient(to_number))
                     return True, f"mock_sms_{datetime.now().timestamp()}", None
                 
@@ -175,7 +187,7 @@ class EmailClient:
     @tenacity.retry(
         wait=tenacity.wait_exponential(multiplier=1, min=2, max=60),
         stop=tenacity.stop_after_attempt(5),
-        retry=tenacity.retry_if_exception(lambda e: '503' in str(e) or '429' in str(e)),
+        retry=tenacity.retry_if_exception(lambda e: getattr(e, 'status_code', None) in (429, 503)),
         reraise=True
     )
     def _send_email_with_retry(self, message):
@@ -193,7 +205,7 @@ class EmailClient:
         try:
             if not self.client:
                 # Not configured: run in mock mode ONLY if in debug/testing.
-                if _is_debug_or_testing_mode():
+                if _is_debug_or_testing_mode() and not Config.is_production():
                     logger.info("email_mocked", recipient=mask_recipient(to_email))
                     return True, f"mock_email_{datetime.now().timestamp()}", None
                 
@@ -305,7 +317,7 @@ def send_email_task(
                     status=NotificationStatus.SENT if success else NotificationStatus.FAILED,
                     message_id=message_id,
                     error_message=error,
-                    message_preview=html_content,
+                    message_preview=_safe_preview(html_content),
                 )
                 logger.info("Background notification result updated", deadline_id=deadline_id)
         except Exception as e:
@@ -412,7 +424,7 @@ def send_sms_task(
                     status=status,
                     message_id=message_id,
                     error_message=error,
-                    message_preview=message,
+                    message_preview=_safe_preview(message),
                 )
                 logger.info("background_sms_notification_logged", deadline_id=deadline_id)
         except Exception as e:
@@ -447,9 +459,9 @@ def send_sms_task(
 class NotificationService:
     """Main service for sending deadline reminders"""
 
-    def __init__(self):
-        self.sms_client = SMSClient()
-        self.email_client = EmailClient()
+    def __init__(self, sms_client: Optional[SMSClient] = None, email_client: Optional[EmailClient] = None):
+        self.sms_client = sms_client or SMSClient()
+        self.email_client = email_client or EmailClient()
         self.base_url = Config.BASE_URL.rstrip('/')
 
     def build_sms_message(self, case_title: str, days_left: int, deadline_date: datetime) -> str:
@@ -467,7 +479,7 @@ class NotificationService:
         Returns: (subject, html_content)
         """
         formatted_date = deadline.deadline_date.strftime("%d %B %Y")
-        escaped_title = html.escape(deadline.case_title)
+        escaped_title = html.escape(getattr(deadline, 'case_title', ''))
         escaped_type = html.escape(deadline.deadline_type.title())
         escaped_desc = html.escape(deadline.description) if deadline.description else "No additional details provided."
         
@@ -482,7 +494,7 @@ class NotificationService:
             accent_color = "#1a5490" # Info Blue
             urgency_label = "REMINDER"
 
-        subject = f"⚖️ {urgency_label}: {deadline.case_title} - {escaped_type} Deadline"
+        subject = f"⚖️ {urgency_label}: {getattr(deadline, 'case_title', '')} - {escaped_type} Deadline"
         
         html_content = f"""
         <!DOCTYPE html>
@@ -557,6 +569,134 @@ class NotificationService:
         
         return subject, html_content
 
+    def _get_fallback_channel_order(self, user_preference: UserPreference) -> List[NotificationChannel]:
+        if user_preference.notification_channel == NotificationChannel.EMAIL:
+            return [NotificationChannel.EMAIL, NotificationChannel.SMS]
+        return [NotificationChannel.SMS, NotificationChannel.EMAIL]
+
+    def send_with_fallback(
+        self,
+        db: Session,
+        deadline: CaseDeadline,
+        user_preference: UserPreference,
+        days_left: int,
+    ) -> NotificationResult:
+        """Send a reminder using the first working channel and record the whole attempt chain."""
+        attempted_channels: List[str] = []
+        channel_order = self._get_fallback_channel_order(user_preference)
+        final_channel = channel_order[0]
+        final_recipient = user_preference.phone_number or user_preference.email or "unknown"
+        final_message_id: Optional[str] = None
+        final_error: Optional[str] = None
+        final_message_preview: Optional[str] = None
+        success = False
+
+        sms_message: Optional[str] = None
+        email_subject: Optional[str] = None
+        email_html_content: Optional[str] = None
+
+        for channel in channel_order:
+            attempted_channels.append(channel.value)
+
+            if channel == NotificationChannel.SMS:
+                if not user_preference.phone_number:
+                    final_channel = channel
+                    final_recipient = "unknown"
+                    final_error = "No phone number configured"
+                    continue
+
+                if sms_message is None:
+                    sms_message = self.build_sms_message(
+                        getattr(deadline, "case_title", ""),
+                        days_left,
+                        deadline.deadline_date,
+                    )
+
+                success, message_id, error = self.sms_client.send_sms(user_preference.phone_number, sms_message)
+                final_channel = channel
+                final_recipient = user_preference.phone_number
+                final_message_id = message_id
+                final_error = error
+                final_message_preview = _safe_preview(sms_message)
+            else:
+                if not user_preference.email:
+                    final_channel = channel
+                    final_recipient = "unknown"
+                    final_error = "No email address configured"
+                    continue
+
+                if email_subject is None or email_html_content is None:
+                    email_subject, email_html_content = self.build_email_message(deadline, days_left)
+
+                success, message_id, error = self.email_client.send_email(user_preference.email, email_subject, email_html_content)
+                final_channel = channel
+                final_recipient = user_preference.email
+                final_message_id = message_id
+                final_error = error
+                final_message_preview = _safe_preview(email_subject)
+
+            if success:
+                break
+
+        final_status = NotificationStatus.SENT if success else NotificationStatus.FAILED
+
+        try:
+            update_notification_result(
+                db=db,
+                deadline_id=deadline.id,
+                user_id=deadline.user_id,
+                days_before=days_left,
+                channel=final_channel,
+                status=final_status,
+                message_id=final_message_id,
+                error_message=final_error,
+                message_preview=final_message_preview,
+                recipient=final_recipient,
+                attempted_channels=attempted_channels,
+            )
+        except Exception:
+            logger.exception(
+                "fallback_notification_log_failed",
+                deadline_id=deadline.id,
+                user_id=deadline.user_id,
+                days_left=days_left,
+                attempted_channels=attempted_channels,
+            )
+
+        try:
+            record_immutable_audit_event(
+                event_type="notification.sent" if success else "notification.failed",
+                action="sent" if success else "failed",
+                actor_user_id=deadline.user_id,
+                resource_type="notification",
+                resource_id=f"fallback:{deadline.id}:{deadline.user_id}:{days_left}",
+                outcome="success" if success else "failure",
+                case_id=deadline.case_id,
+                metadata={
+                    "deadline_id": deadline.id,
+                    "days_left": days_left,
+                    "attempted_channels": attempted_channels,
+                    "final_channel": final_channel.value,
+                    "message_id": final_message_id,
+                    "error": final_error,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "fallback_notification_audit_failed",
+                deadline_id=deadline.id,
+                user_id=deadline.user_id,
+            )
+
+        return NotificationResult(
+            success=success,
+            channel=final_channel,
+            recipient=final_recipient,
+            message_id=final_message_id,
+            error=final_error,
+            attempted_channels=attempted_channels,
+        )
+
     def send_sms_reminder(
         self,
         db: Session,
@@ -581,7 +721,7 @@ class NotificationService:
             tmpl = get_notification_template_for_user(db, deadline.user_id)
             if tmpl and tmpl.sms_template:
                 values = {
-                    "case_title": deadline.case_title,
+                    "case_title": getattr(deadline, 'case_title', ''),
                     "case_number": getattr(deadline, "case_id", ""),
                     "deadline_date": deadline.deadline_date.strftime("%d %b %Y") if deadline.deadline_date else "",
                     "days_left": days_left,
@@ -597,44 +737,47 @@ class NotificationService:
             logger.exception("Error rendering user SMS template; falling back to default")
 
         if message is None:
-            message = self.build_sms_message(deadline.case_title, days_left, deadline.deadline_date)
-        # Reserve a notification slot to avoid races
-        reserved_log, created = reserve_notification(
-            db=db,
-            deadline_id=deadline.id,
-            user_id=deadline.user_id,
-            channel=NotificationChannel.SMS,
-            recipient=user_preference.phone_number,
-            days_before=days_left,
-            message_preview=message,
-        )
+            message = self.build_sms_message(getattr(deadline, 'case_title', ''), days_left, deadline.deadline_date)
 
-        if not created:
-            logger.debug("SMS reservation already exists; skipping send", deadline_id=deadline.id, days_before=days_left)
-            return NotificationResult(success=False, channel=NotificationChannel.SMS, recipient=user_preference.phone_number, error="already_reserved")
-
+        # Send SMS before writing to DB so a crash never leaves an orphan PENDING record.
         success, message_id, error = self.sms_client.send_sms(user_preference.phone_number, message)
 
         status = NotificationStatus.SENT if success else NotificationStatus.FAILED
 
-        # Update the reserved record with the final result
-        update_notification_result(
-            db=db,
-            deadline_id=deadline.id,
-            user_id=deadline.user_id,
-            days_before=days_left,
-            channel=NotificationChannel.SMS,
-            status=status,
-            message_id=message_id,
-            error_message=error,
-            message_preview=message,
-        )
+        # Atomically create the notification log with the final status.
+        # The unique constraint on (deadline_id, days_before, channel) prevents
+        # duplicate sends from concurrent workers.
+        try:
+            with db.begin_nested():
+                log = NotificationLog(
+                    deadline_id=deadline.id,
+                    user_id=deadline.user_id,
+                    channel=NotificationChannel.SMS,
+                    recipient=user_preference.phone_number,
+                    days_before=days_left,
+                    message_preview=message,
+                    status=status,
+                    message_id=message_id,
+                    error_message=error,
+                )
+                if success:
+                    log.sent_at = datetime.now(timezone.utc)
+                db.add(log)
+                db.flush()
+        except IntegrityError:
+            logger.debug("SMS notification already recorded; skipping", deadline_id=deadline.id, days_before=days_left)
+            return NotificationResult(
+                success=False,
+                channel=NotificationChannel.SMS,
+                recipient=user_preference.phone_number,
+                error="already_recorded",
+            )
 
         return NotificationResult(
             success=True,
             channel=NotificationChannel.SMS,
             recipient=user_preference.phone_number,
-            message_id=f"task_{task_result.id}",
+            message_id=message_id,
             error=None,
         )
 
@@ -653,7 +796,7 @@ class NotificationService:
             tmpl = get_notification_template_for_user(db, deadline.user_id)
             if tmpl and (tmpl.email_html_template or tmpl.email_subject_template):
                 values = {
-                    "case_title": deadline.case_title,
+                    "case_title": getattr(deadline, 'case_title', ''),
                     "case_number": getattr(deadline, "case_id", ""),
                     "deadline_date": deadline.deadline_date.strftime("%d %B %Y") if deadline.deadline_date else "",
                     "days_left": days_left,
@@ -708,6 +851,13 @@ class NotificationService:
             logger.debug("Email reservation already exists; skipping send", deadline_id=deadline.id, days_left=days_left)
             return NotificationResult(success=False, channel=NotificationChannel.EMAIL, recipient=user_preference.email, error="already_reserved")
 
+        # Annotate the reserved record with a placeholder task id BEFORE dispatching,
+        # so the worker never races against an uncommitted DB state.
+        reserved_log.message_id = f"task_pending"
+        reserved_log.message_preview = html_content
+        db.add(reserved_log)
+        db.commit()
+
         task_result = send_email_task.delay(
             to_email=user_preference.email,
             subject=subject,
@@ -717,20 +867,16 @@ class NotificationService:
             days_left=days_left,
         )
 
-        # Update the reserved log with task id as message_id (still PENDING until background updates)
+        # Update with the real Celery task id (best-effort — worker may already be updating).
         try:
-            update_notification_result(
-                db=db,
-                deadline_id=deadline.id,
-                user_id=deadline.user_id,
-                days_before=days_left,
-                channel=NotificationChannel.EMAIL,
-                status=NotificationStatus.PENDING,
-                message_id=f"task_{task_result.id}",
-                message_preview=html_content,
-            )
+            db.query(NotificationLog).filter(
+                NotificationLog.deadline_id == deadline.id,
+                NotificationLog.days_before == days_left,
+                NotificationLog.channel == NotificationChannel.EMAIL,
+            ).update({"message_id": f"task_{task_result.id}"})
+            db.commit()
         except Exception:
-            logger.exception("Failed to annotate reserved email with task id")
+            logger.debug("Failed to annotate reserved email with task id")
 
         return NotificationResult(
             success=True,

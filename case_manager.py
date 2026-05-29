@@ -56,6 +56,7 @@ from database import (
     get_attachments_for_case,
     save_case_note_draft,
 )
+from db.case_service import get_case_note, publish_case_note, get_case_note_history
 from services.timeline_service import timeline_service as _timeline_service
 from services.deadlines_auto_creator import (
     _extract_days_from_text as _extract_days_from_text_service,
@@ -673,12 +674,17 @@ def _auto_create_deadlines_from_remedies(
     return _auto_create_deadlines_from_remedies_service(db, user_id, case_id, case_title, remedies, document_id)
 
 
-def get_document_content(document_id: int) -> Optional[str]:
-    """Get full document content by ID"""
+def get_document_content(document_id: int, user_id: int) -> Optional[str]:
+    """Get full document content by ID, verifying user ownership."""
     db = SessionLocal()
     try:
         doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
-        return doc.document_content if doc else None
+        if doc is None:
+            return None
+        if doc.case.user_id != user_id:
+            logger.warning("idor_document_access_denied", document_id=document_id, user_id=user_id, owner_id=doc.case.user_id)
+            return None
+        return doc.document_content
     finally:
         db.close()
 
@@ -925,6 +931,17 @@ def _update_case_status(user_id: int, case_id: int, status: CaseStatus) -> bool:
             metadata={"new_status": status.value},
         )
 
+        record_immutable_audit_event(
+            event_type="case.status_changed",
+            action="status_change",
+            actor_user_id=user_id,
+            resource_type="case",
+            resource_id=str(case_id),
+            outcome="success",
+            case_id=case_id,
+            metadata={"new_status": status.value},
+        )
+
         logger.info(f"Updated case {case_id} status to {status.value}")
         return True
 
@@ -1112,3 +1129,18 @@ def delete_user_cases(user_id: int, case_ids: List[int], confirm: bool = False) 
 # =============================================================================
 # END OF SERVICE
 # =============================================================================
+
+
+def validate_case_transition(current_status: str, target_status: str) -> bool:
+    """
+    Validates if a transition from current case status to target case status 
+    is permitted under standard case lifecycle rules.
+    """
+    allowed_transitions = {
+        "pending": ["active", "dismissed"],
+        "active": ["settled", "dismissed", "appealed"],
+        "appealed": ["active", "dismissed"],
+        "settled": [],
+        "dismissed": []
+    }
+    return target_status in allowed_transitions.get(current_status, [])
