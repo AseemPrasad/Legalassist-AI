@@ -22,6 +22,7 @@ from api.middleware import (
 from api.idempotency_middleware import idempotency_middleware
 from observability.integration import initialize_observability_for_environment
 from observability.instrumentation import get_metrics
+from api.errors import register_structured_error_handlers
 from api.validation import (
     ValidationConfig,
     ValidationError,
@@ -119,6 +120,8 @@ def create_app() -> FastAPI:
     # ========================================================================
     # Global Exception Handlers
     # ========================================================================
+
+    register_structured_error_handlers(app)
     
     @app.exception_handler(ValidationError)
     async def validation_error_handler(request: Request, exc: ValidationError):
