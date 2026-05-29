@@ -21,6 +21,7 @@ from .analytics import (
     KnowledgeGraphEdge,
     PrecedentMatch,
 )
+from .exports import ExportJob, ExportChunk
 from .knowledge import KnowledgeInvalidation, KnowledgeInvalidationStatus
 
 __all__ = [
@@ -62,6 +63,8 @@ __all__ = [
     "CaseArgument",
     "KnowledgeGraphEdge",
     "PrecedentMatch",
+    "ExportJob",
+    "ExportChunk",
     "KnowledgeInvalidation",
     "KnowledgeInvalidationStatus",
     "SchedulerRun",
