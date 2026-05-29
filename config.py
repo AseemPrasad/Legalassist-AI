@@ -171,6 +171,16 @@ class Config:
         except Exception:
             return str(_get_val("SENDGRID_API_KEY", "") or "")
 
+    @classmethod
+    def get_sendgrid_event_webhook_public_key(cls) -> str:
+        """Return the SendGrid event webhook public key for signature verification."""
+        try:
+            from utils.secret_manager import get_secret
+            val = get_secret("sendgrid_event_webhook_public_key") or _get_val("SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY", "")
+            return str(val or "")
+        except Exception:
+            return str(_get_val("SENDGRID_EVENT_WEBHOOK_PUBLIC_KEY", "") or "")
+
     # --- Application URLs ---
     BASE_URL = _get_val("BASE_URL", "https://legalassist.ai")
 
