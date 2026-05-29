@@ -113,7 +113,14 @@ def calculate_deadline(
             except Exception:
                 jurisdiction_adjustment = 0
 
-    final = adjusted_for_weekends_holidays + timedelta(days=jurisdiction_adjustment + int(emergency_extension_days))
+    # Apply adjustments sequentially so each step normalizes independently.
+    final = adjusted_for_weekends_holidays
+    if jurisdiction_adjustment:
+        final += timedelta(days=jurisdiction_adjustment)
+        final = _roll_forward(final)
+    if emergency_extension_days:
+        final += timedelta(days=int(emergency_extension_days))
+        final = _roll_forward(final)
 
     return {
         "deadline": final.isoformat(),
