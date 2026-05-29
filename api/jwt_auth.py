@@ -125,6 +125,8 @@ def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -
 
 
 def verify_token(token: str) -> Dict:
+    if not token or token.count(".") != 2:
+        raise InvalidTokenError("Invalid token: JWT must have exactly 3 dot-separated segments")
     try:
         payload = None
         last_error = None
@@ -218,5 +220,5 @@ def revoke_jwt_token(token: str) -> bool:
                 _REVOCATION_CACHE[jti] = (True, now)
         return True
     except Exception as exc:
-        logger.error("revoke_jwt_token_failed", error=str(exc))
+        logger.error("revoke_jwt_token_failed", error=type(exc).__name__)
         return False

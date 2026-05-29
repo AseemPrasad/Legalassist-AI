@@ -3,7 +3,9 @@ Document Analysis Endpoints
 POST /api/v1/analyze/document - Analyze document asynchronously
 GET /api/v1/analyze/{job_id} - Check analysis job status
 """
+import os
 import uuid
+from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
 from fastapi import Request
@@ -20,14 +22,59 @@ from api.validation import (
     validate_file_upload,
     validate_file_url,
     validate_text_input,
-    validate_file_upload_streaming,
     ValidationConfig,
+    PayloadTooLargeError,
 )
 from api.job_registry import register_job_owner
+from config import Config
 import structlog
 
 router = APIRouter(prefix="/api/v1/analyze", tags=["document-analysis"])
 logger = structlog.get_logger(__name__)
+
+
+def validate_file_path(file_path: str) -> str:
+    """Canonicalize and restrict *file_path* to allowed directories.
+
+    Raises HTTPException(400) if the path is not within one of the
+    configured allowed directories.
+    """
+    raw = Path(file_path)
+    try:
+        resolved = raw.resolve(strict=False)
+    except (OSError, RuntimeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_path could not be resolved",
+        )
+
+    allowed_dirs = [
+        Path(Config.ATTACHMENTS_DIR).resolve(),
+    ]
+    # Also allow the upload temp dir if configured
+    upload_temp = getattr(Config, "UPLOAD_TEMP_DIR", None)
+    if upload_temp:
+        allowed_dirs.append(Path(upload_temp).resolve())
+    # Allow the project-root attachments dir as a fallback
+    allowed_dirs.append(Path.cwd().resolve() / "attachments")
+
+    allowed = any(
+        resolved == d or str(resolved).startswith(str(d) + os.sep)
+        for d in allowed_dirs
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_path is outside the allowed directories",
+        )
+
+    if resolved.is_symlink():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_path must not be a symbolic link",
+        )
+
+    return str(resolved)
 
 
 @router.post(
@@ -67,6 +114,9 @@ async def analyze_document(
     # SSRF validation: block private/internal IPs for file_url
     if request.file_url:
         validate_file_url(request.file_url)
+
+    # Path traversal prevention: canonicalize and restrict file_path
+    safe_path = validate_file_path(request.file_path) if request.file_path else None
     
     # Generate document ID and job ID
     document_id = str(uuid.uuid4())
@@ -87,7 +137,7 @@ async def analyze_document(
         user_id=current_user.user_id,
         document_id=document_id,
         text=request.text,
-        file_path=request.file_path,
+        file_path=safe_path,
         file_url=request.file_url,
         document_type=request.document_type,
     )
@@ -211,22 +261,23 @@ async def upload_document_file(
             allowed_mime_types=ValidationConfig.ALLOWED_MIME_TYPES,
         )
         
-        # Validate file size during streaming read
-        bytes_read = await validate_file_upload_streaming(
-            file,
-            max_size=ValidationConfig.MAX_UPLOAD_SIZE,
-        )
-        
+        # Read file content into memory, then validate size from the buffer.
+        file_content = await file.read()
+        file_bytes_read = len(file_content)
+
+        if file_bytes_read > ValidationConfig.MAX_UPLOAD_SIZE:
+            raise PayloadTooLargeError(
+                detail=f"Upload exceeded maximum size limit of {round(ValidationConfig.MAX_UPLOAD_SIZE / 1024 / 1024, 2)} MB"
+            )
+
         logger.info(
             "File uploaded successfully",
             user_id=current_user.user_id,
             filename=file.filename,
-            size_bytes=bytes_read,
+            size_bytes=file_bytes_read,
             document_type=document_type,
         )
         
-        # Read file content
-        file_content = await file.read()
         file_ext = file.filename.split(".")[-1].lower() if file.filename else ""
 
         # MIME sniff first bytes to catch renamed binaries (e.g. PDF → .txt)

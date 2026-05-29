@@ -17,11 +17,13 @@ from api.middleware import (
     add_correlation_id_middleware,
     error_handling_middleware,
     logging_middleware,
-    request_size_limit_middleware
+    request_size_limit_middleware,
+    security_headers_middleware,
 )
 from api.idempotency_middleware import idempotency_middleware
 from observability.integration import initialize_observability_for_environment
 from observability.instrumentation import get_metrics
+from api.errors import register_structured_error_handlers
 from api.validation import (
     ValidationConfig,
     ValidationError,
@@ -29,7 +31,7 @@ from api.validation import (
 )
 
 # Import routes
-from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech, document_verification, argument_strength, deadline_engine, efiling
+from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech, document_verification, argument_strength, deadline_engine, efiling, notifications as notifications_webhooks, anonymized_cases
 
 settings = get_settings()
 logger = structlog.get_logger(__name__)
@@ -41,14 +43,20 @@ logger = structlog.get_logger(__name__)
 
 # Force explicit origins when credentials are enabled — never allow *
 _origins = settings.CORS_ORIGINS
-if isinstance(_origins, list) and "*" in _origins:
-    sanitized = [o for o in _origins if o != "*"]
+had_wildcard = False
+if isinstance(_origins, str):
+    _origins = [o.strip() for o in _origins.split(",") if o.strip()]
+if "*" in _origins:
+    had_wildcard = True
+    _origins = [o for o in _origins if o != "*"]
+if not _origins:
+    _origins = ["http://localhost:8080"]
+if had_wildcard:
     logging.getLogger(__name__).warning(
         "Removed wildcard '*' from CORS_ORIGINS because allow_credentials=True. "
         "Explicit origins required: %s",
-        sanitized or None,
+        _origins,
     )
-    _origins = sanitized or ["http://localhost:8080"]
 
 middleware = [
     Middleware(
@@ -89,6 +97,7 @@ def create_app() -> FastAPI:
     app.middleware("http")(add_correlation_id_middleware)
     app.middleware("http")(logging_middleware)
     app.middleware("http")(error_handling_middleware)
+    app.middleware("http")(security_headers_middleware)
     
     if settings.RATE_LIMIT_ENABLED:
         app.middleware("http")(rate_limit_middleware)
@@ -110,6 +119,9 @@ def create_app() -> FastAPI:
     app.include_router(argument_strength.router)
     app.include_router(deadline_engine.router)
     app.include_router(efiling.router)
+    app.include_router(notifications_webhooks.router)
+    app.include_router(notifications_webhooks.pref_router)
+    app.include_router(anonymized_cases.router)
     # Model feedback & optimization
     from api.routes import models as models_router
     app.include_router(models_router.router)
@@ -117,6 +129,8 @@ def create_app() -> FastAPI:
     # ========================================================================
     # Global Exception Handlers
     # ========================================================================
+
+    register_structured_error_handlers(app)
     
     @app.exception_handler(ValidationError)
     async def validation_error_handler(request: Request, exc: ValidationError):
@@ -271,6 +285,8 @@ app = create_app()
 
 if settings.ENABLE_WEBSOCKET:
     from fastapi import WebSocket
+    from api.jwt_auth import verify_token, InvalidTokenError
+    from api.job_registry import get_job_owner
     
     @app.websocket("/ws/progress/{job_id}")
     async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
@@ -281,6 +297,37 @@ if settings.ENABLE_WEBSOCKET:
         ws = new WebSocket('ws://localhost:8000/ws/progress/job_id')
         ws.onmessage = (event) => console.log(event.data)
         """
+        # Extract token from subprotocol or query parameter
+        auth_token = None
+        if "sec-websocket-protocol" in websocket.headers:
+            protocols = [p.strip() for p in websocket.headers["sec-websocket-protocol"].split(",")]
+            if "access_token" in protocols:
+                idx = protocols.index("access_token")
+                if idx + 1 < len(protocols):
+                    auth_token = protocols[idx + 1]
+        if not auth_token:
+            auth_token = websocket.query_params.get("token")
+        if not auth_token:
+            await websocket.close(code=4001, reason="Authentication required")
+            return
+
+        # Verify token
+        try:
+            payload = verify_token(auth_token)
+            user_id = payload.get("sub")
+            if not user_id:
+                await websocket.close(code=4003, reason="Invalid token")
+                return
+        except InvalidTokenError:
+            await websocket.close(code=4001, reason="Invalid or expired token")
+            return
+
+        # Verify job ownership
+        owner = get_job_owner(job_id)
+        if owner is not None and str(owner) != str(user_id):
+            await websocket.close(code=1008, reason="Forbidden: job not owned by user")
+            return
+
         await websocket.accept()
         
         try:

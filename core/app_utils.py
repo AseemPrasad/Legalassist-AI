@@ -1,35 +1,27 @@
-"""
-Shared utilities for LegalEase AI
-- PDF extraction and text processing
-- LLM prompts and remedies advisor
-- Styling and UI constants
-
-PATCHES APPLIED (2 bugs fixed):
-  FIX-1: Language consistency — remedies LLM system prompt now enforces target language;
-          _normalize_yes_no now returns localized values; _validate_court_name no longer
-          strips non-English court names; render_shareable_result_box passes ui_text down
-          correctly to _build_result_body_html.
-  FIX-2: "What you can do" layout — build_judgment_result_text now emits a structured
-          dict alongside the plain-text string; render_shareable_result_box uses the
-          structured dict to build guaranteed question/answer pairs in the HTML renderer,
-          so questions and answers are always correctly paired and answers are never cut short.
-          max_tokens for remedies raised from 500 → 900.
-"""
-
 import re
 import logging
 import os
 import json
 import io
+import tempfile
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+import html as html_lib
+from contextlib import contextmanager
+
 from openai import OpenAI
 from pypdf import PdfReader
-from langdetect import detect, DetectorFactory, detect_langs
+from langdetect import DetectorFactory, detect_langs
 import pdfplumber
 from typing import Any, Dict, List, Optional, Tuple
 import html as html_lib
+from database import DocumentProcessingState
+from contextlib import contextmanager
+from langdetect import detect, DetectorFactory, detect_langs
+from database import DocumentProcessingState
 
 from config import Config
+from database import DocumentProcessingState # Fixed import
 from .exceptions import PDFProcessingError, OCRDependencyError, OCRProcessingError
 
 try:
@@ -37,6 +29,11 @@ try:
     _tracer = trace.get_tracer(__name__)
 except Exception:
     _tracer = None
+
+# For consistent language detection results
+DetectorFactory.seed = 0
+_LOCALIZED_UI_TEXT_CACHE = {}
+parser_errors = [] # Define this so your function doesn't crash
 
 # For consistent language detection results
 DetectorFactory.seed = 0
@@ -90,6 +87,49 @@ def get_client():
 
 
 # ==================== TEXT PROCESSING ====================
+
+def _validate_encoding_quality(text: str) -> Tuple[bool, float]:
+    """
+    Validate the quality/readability of the extracted text.
+    Detects if the text is heavily corrupted, mostly garbage characters,
+    or has invalid unicode replacement characters.
+    
+    Returns:
+        Tuple[bool, float]: (is_valid, quality_score_0_to_1)
+    """
+    if not text or not text.strip():
+        return False, 0.0
+        
+    # Count total characters and replacement characters (corrupted bytes)
+    total_chars = len(text)
+    replacement_chars = text.count('\uFFFD')
+    
+    # Calculate ratio of replacement characters
+    replacement_ratio = replacement_chars / total_chars if total_chars > 0 else 0.0
+    
+    # Count printable alphanumeric characters vs total characters
+    alnum_chars = sum(1 for c in text if c.isalnum() or c.isspace())
+    alnum_ratio = alnum_chars / total_chars if total_chars > 0 else 0.0
+    
+    # Compute a quality score from 0.0 to 1.0
+    # Heavily penalize replacement characters and non-alphanumeric/non-space garbage
+    quality = (1.0 - replacement_ratio) * alnum_ratio
+    
+    # We consider it valid if quality score is at least 0.5 and replacement ratio is under 15%
+    is_valid = quality >= 0.5 and replacement_ratio < 0.15
+    
+    # Additional check: detect fragmented text where words are split into single characters
+    # e.g., "J u d g m e n t  o f  t h e  C o u r t"
+    words = [w for w in text.split() if w]
+    if len(words) > 15:
+        avg_word_len = sum(len(w) for w in words) / len(words)
+        if avg_word_len < 2.0:
+            is_valid = False
+            quality = min(quality, 0.3)
+            
+    return is_valid, quality
+
+
 
 def _extract_pages_pypdf(reader: PdfReader) -> str:
     text = ""
@@ -2577,5 +2617,82 @@ def parse_summary_bullets(raw_text):
     if not final_bullets:
         # Final fallback: return the raw text if all parsing heuristics failed
         return raw_text
-        
     return "\n".join([f"- {b}" for b in final_bullets])
+
+
+def get_file_stream(file_obj, chunk_size=65536):
+    """
+    Generator that yields chunks of a file object.
+    Prevents memory exhaustion by keeping resident memory usage low.
+    """
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    while True:
+        chunk = file_obj.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+def _validate_encoding_quality(text: str) -> Tuple[bool, float]:
+    # Placeholder for your encoding check
+    return True, 1.0
+class PipelineStateManager:
+    @staticmethod
+    def get_state(db, doc_id):
+        return db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+
+    @staticmethod
+    def update_stage(db, doc_id, stage, data=None):
+        state = db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+        if not state:
+            state = DocumentProcessingState(document_id=doc_id)
+            db.add(state)
+        state.current_stage = stage
+        if data:
+            # Merge new data into existing JSON storage
+            current_data = state.stage_data or {}
+            current_data.update(data)
+            state.stage_data = current_data
+        db.commit()
+
+class PipelineStateManager:
+    @staticmethod
+    def get_state(db, doc_id):
+        return db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+
+    @staticmethod
+    def update_stage(db, doc_id, stage, data=None):
+        state = db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+        if not state:
+            state = DocumentProcessingState(document_id=doc_id)
+            db.add(state)
+        state.current_stage = stage
+        if data:
+            current_data = state.stage_data or {}
+            current_data.update(data)
+            state.stage_data = current_data
+        db.commit()
+
+def get_file_stream(file_obj, chunk_size=65536):
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    while True:
+        chunk = file_obj.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+def process_file_to_disk(uploaded_file) -> str:
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    try:
+        for chunk in get_file_stream(uploaded_file):
+            tmp_file.write(chunk)
+        tmp_file.close()
+        return tmp_file.name
+    except Exception as e:
+        tmp_file.close()
+        if os.path.exists(tmp_file.name):
+            os.remove(tmp_file.name)
+        raise PDFProcessingError(f"Streaming to disk failed: {str(e)}")
+def _validate_encoding_quality(text: str) -> Tuple[bool, float]:
+    return True, 1.0

@@ -37,6 +37,10 @@ try:
     from opentelemetry.instrumentation.requests import RequestsInstrumentor
     from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
     from opentelemetry.instrumentation.redis import RedisInstrumentor
+    try:
+        from opentelemetry.instrumentation.celery import CeleryInstrumentor
+    except Exception:
+        CeleryInstrumentor = None
 except ModuleNotFoundError:  # pragma: no cover - optional in some environments
     trace = None
     metrics = None
@@ -663,6 +667,13 @@ def initialize_observability():
             log.info("redis_instrumented")
     except Exception as e:
         log.warning("redis_instrumentation_failed", error=str(e))
+
+    try:
+        if CeleryInstrumentor is not None:
+            CeleryInstrumentor().instrument()
+            log.info("celery_instrumented")
+    except Exception as e:
+        log.warning("celery_instrumentation_failed", error=str(e))
     
     # Start Prometheus metrics server
     metrics_port = int(os.getenv("PROMETHEUS_METRICS_PORT", "9090"))

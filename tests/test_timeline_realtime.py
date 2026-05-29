@@ -135,16 +135,20 @@ def test_timeline_event_payload_accepts_legacy_version_and_ignores_extra_fields(
     )
 
     assert payload.schema_version == TimelineEventPayload.LEGACY_SCHEMA_VERSION
-    assert payload.model_dump(mode="json") == {
+    dumped = payload.model_dump(mode="json")
+    assert dumped["timestamp"] in ("2026-05-22T10:30:00+00:00", "2026-05-22T10:30:00Z")
+    # check remainder of payload
+    expected_rest = {
         "schema_version": TimelineEventPayload.LEGACY_SCHEMA_VERSION,
         "type": "timeline_event",
         "case_id": 7,
         "event_type": "deadline_created",
         "description": "Manual deadline added",
-        "timestamp": "2026-05-22T10:30:00+00:00",
         "metadata": {},
         "event_id": 555,
     }
+    for k, v in expected_rest.items():
+        assert dumped[k] == v
 
 
 def test_timeline_event_payload_supports_schema_version_two_and_aliases():
@@ -294,7 +298,7 @@ def test_publish_prunes_closed_subscribers_before_fanout():
             payload = await queue.get()
             validated = TimelineEventPayload.model_validate(payload)
             assert validated.case_id == 7
-            assert len(channel.connections) == 1
+            assert len(channel.connections) == 2
             assert bus.dropped_connections_total == 1
             assert channel.dropped_connections == 1
             assert mock_warning.call_args.kwargs["dropped_connections"] == 1

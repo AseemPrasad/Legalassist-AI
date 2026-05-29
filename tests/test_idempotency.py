@@ -1,5 +1,6 @@
 """Tests for idempotency manager and Celery task integration"""
 
+import time
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -25,6 +26,19 @@ class FakeRedis:
     def delete(self, key):
         return self.store.pop(key, None) is not None
 
+    def expire(self, key, ex):
+        return key in self.store
+
+    def scan_iter(self, match=None, count=None):
+        if not match:
+            for key in list(self.store.keys()):
+                yield key.encode("utf-8")
+            return
+        prefix = match[:-1] if match.endswith("*") else match
+        for key in list(self.store.keys()):
+            if key.startswith(prefix):
+                yield key.encode("utf-8")
+
 
 def test_idempotency_manager_basic_flow(monkeypatch):
     fake = FakeRedis()
@@ -41,6 +55,65 @@ def test_idempotency_manager_basic_flow(monkeypatch):
     got = manager.get_result(key)
     assert got == result
     manager.release_lock(key)
+
+
+def test_idempotency_manager_heartbeat_and_state(monkeypatch):
+    fake = FakeRedis()
+    manager = IdempotencyManager(redis_url="redis://fake")
+    manager._client = fake
+
+    key = "task:heartbeat"
+    assert manager.acquire(key, ttl=5) is True
+    assert manager.heartbeat(key, ttl=5) is True
+
+    result = {"status": "ok"}
+    manager.mark_completed(key, result, ttl=20)
+
+    assert manager.get_result(key) == result
+    state = fake.store[manager._key_state(key)]
+    assert b'"status":"completed"' in state
+
+
+def test_stale_pending_can_be_taken_over_and_reconciled(monkeypatch):
+    fake = FakeRedis()
+    manager = IdempotencyManager(redis_url="redis://fake")
+    manager._client = fake
+
+    key = "task:stale"
+    assert manager.acquire(key, ttl=5) is True
+
+    state_key = manager._key_state(key)
+    state = manager._deserialize(fake.store[state_key])
+    state["heartbeat"] = int(time.time()) - 100
+    state["started"] = int(time.time()) - 100
+    fake.store[state_key] = manager._serialize(state)
+
+    fresh_manager = IdempotencyManager(redis_url="redis://fake")
+    fresh_manager._client = fake
+    assert fresh_manager.acquire(key, ttl=5, stale_after=1) is True
+
+    fresh_manager.mark_completed(key, {"recovered": True}, ttl=20)
+    assert fresh_manager.get_result(key) == {"recovered": True}
+
+
+def test_reconcile_stale_pending_marks_entries_stale(monkeypatch):
+    fake = FakeRedis()
+    manager = IdempotencyManager(redis_url="redis://fake")
+    manager._client = fake
+
+    key = "task:reconcile"
+    assert manager.acquire(key, ttl=5) is True
+
+    state_key = manager._key_state(key)
+    state = manager._deserialize(fake.store[state_key])
+    state["heartbeat"] = int(time.time()) - 100
+    state["started"] = int(time.time()) - 100
+    fake.store[state_key] = manager._serialize(state)
+
+    reclaimed = manager.reconcile_stale_pending(stale_after=1)
+    assert reclaimed == 1
+    updated = manager._deserialize(fake.store[state_key])
+    assert updated["status"] == "stale"
 
 
 def test_analyze_task_skips_when_duplicate(monkeypatch):

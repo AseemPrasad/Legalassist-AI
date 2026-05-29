@@ -348,9 +348,25 @@ def create_case_document(
     summary: Optional[str] = None,
     remedies: Optional[dict] = None,
 ) -> CaseDocument:
-    """Create a new case document"""
+    """Create a new case document.
+
+    Security: enforce that `case_id` belongs to `user_id` (server-side ownership
+    validation), consistent with create_case_deadline.
+    """
+    try:
+        normalized_case_id = int(case_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("case_id must be an integer matching cases.id") from exc
+
+    # Ownership validation (prevents attaching documents to another user's case)
+    case = db.query(Case).filter(Case.id == normalized_case_id).first()
+    if not case or case.user_id != user_id:
+        raise PermissionError(
+            "case_id not found or not owned by the provided user_id"
+        )
+
     doc = CaseDocument(
-        case_id=case_id,
+        case_id=normalized_case_id,
         document_type=document_type,
         document_content=document_content,
         file_path=file_path,
@@ -360,6 +376,43 @@ def create_case_document(
     db.add(doc)
     db.commit()
     db.refresh(doc)
+    return doc
+
+
+def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
+    """Get all documents for a case"""
+    return db.query(CaseDocument).filter(
+        CaseDocument.case_id == case_id
+    ).order_by(CaseDocument.uploaded_at).all()
+
+
+def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocument]:
+    """Get a case document by ID"""
+    return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
+
+
+def update_case_document(
+    db: Session,
+    document_id: int,
+    document_content: Optional[str] = None,
+    summary: Optional[str] = None,
+    remedies: Optional[dict] = None,
+) -> Optional[CaseDocument]:
+    """Update case document"""
+    doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
+    if doc:
+        if document_content is not None:
+            doc.document_content = document_content
+        if summary is not None:
+            doc.summary = summary
+        if remedies is not None:
+            doc.remedies = remedies
+        try:
+            db.commit()
+            db.refresh(doc)
+        except Exception as e:
+            db.rollback()
+            raise RuntimeError(f"Database write failed for case document {document_id}: {str(e)}") from e
     return doc
 
 
@@ -480,18 +533,6 @@ def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
         CaseDeadline.is_completed == False,
         CaseDeadline.deadline_date > now,
     ).order_by(CaseDeadline.deadline_date).all()
-
-
-def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
-    """Get all documents for a case"""
-    return db.query(CaseDocument).filter(
-        CaseDocument.case_id == case_id
-    ).order_by(CaseDocument.uploaded_at).all()
-
-
-def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocument]:
-    """Get a document by ID"""
-    return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
 
 
 def get_notification_template_for_user(db: Session, user_id: int) -> Optional[NotificationTemplate]:
@@ -628,84 +669,6 @@ def create_timeline_event(
     return event
 
 
-def create_case_document(
-    db: Session,
-    case_id: int,
-    document_type: DocumentType,
-    user_id: int,
-    document_content: Optional[str] = None,
-    file_path: Optional[str] = None,
-    summary: Optional[str] = None,
-    remedies: Optional[dict] = None,
-) -> CaseDocument:
-    """Create a new case document.
-
-    Security: enforce that `case_id` belongs to `user_id` (server-side ownership
-    validation), consistent with create_case_deadline.
-    """
-    try:
-        normalized_case_id = int(case_id)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("case_id must be an integer matching cases.id") from exc
-
-    # Ownership validation (prevents attaching documents to another user's case)
-    case = db.query(Case).filter(Case.id == normalized_case_id).first()
-    if not case or case.user_id != user_id:
-        raise PermissionError(
-            "case_id not found or not owned by the provided user_id"
-        )
-
-    doc = CaseDocument(
-        case_id=normalized_case_id,
-        document_type=document_type,
-        document_content=document_content,
-        file_path=file_path,
-        summary=summary,
-        remedies=remedies,
-    )
-    db.add(doc)
-    db.commit()
-    db.refresh(doc)
-    return doc
-
-
-def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
-    """Get all documents for a case"""
-    return db.query(CaseDocument).filter(
-        CaseDocument.case_id == case_id
-    ).order_by(CaseDocument.uploaded_at).all()
-
-
-def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocument]:
-    """Get a case document by ID"""
-    return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
-
-
-def update_case_document(
-    db: Session,
-    document_id: int,
-    document_content: Optional[str] = None,
-    summary: Optional[str] = None,
-    remedies: Optional[dict] = None,
-) -> Optional[CaseDocument]:
-    """Update case document"""
-    doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
-    if doc:
-        if document_content is not None:
-            doc.document_content = document_content
-        if summary is not None:
-            doc.summary = summary
-        if remedies is not None:
-            doc.remedies = remedies
-        try:
-            db.commit()
-            db.refresh(doc)
-        except Exception as e:
-            db.rollback()
-            raise RuntimeError(f"Database write failed for case document {document_id}: {str(e)}") from e
-    return doc
-
-
 def create_attachment(
     db: Session,
     user_id: int,
@@ -737,7 +700,6 @@ def get_attachments_for_case(db: Session, case_id: int) -> List[Attachment]:
     return db.query(Attachment).filter(Attachment.case_id == case_id).all()
 
 
-
 # Dynamic relationships injection to support legacy collaborative features on Case model
 from db.models.cases import Case
 from sqlalchemy.orm import relationship
@@ -746,7 +708,6 @@ Case.comments = relationship("CaseComment", back_populates="case", cascade="all,
 Case.presence_updates = relationship("CasePresence", back_populates="case", cascade="all, delete-orphan")
 User.case_comments = relationship("CaseComment", back_populates="user", cascade="all, delete-orphan")
 User.case_presence = relationship("CasePresence", back_populates="user", cascade="all, delete-orphan")
-
 
 
 import enum

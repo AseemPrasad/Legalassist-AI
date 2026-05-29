@@ -57,20 +57,20 @@ class HealthCheckManager:
                 max_overflow=0,
             )
             
-            async with engine.begin() as conn:
-                # Execute simple query with timeout
-                try:
-                    result = await asyncio.wait_for(
-                        conn.execute(text("SELECT 1")),
-                        timeout=timeout
-                    )
-                    await engine.dispose()
-                    logger.info("database_check_success")
-                    return HealthCheckResult("database", True, "Connected")
-                except asyncio.TimeoutError:
-                    await engine.dispose()
-                    logger.error("database_check_timeout")
-                    return HealthCheckResult("database", False, "Query timeout")
+            try:
+                async with engine.begin() as conn:
+                    try:
+                        await asyncio.wait_for(
+                            conn.execute(text("SELECT 1")),
+                            timeout=timeout
+                        )
+                        logger.info("database_check_success")
+                        return HealthCheckResult("database", True, "Connected")
+                    except asyncio.TimeoutError:
+                        logger.error("database_check_timeout")
+                        return HealthCheckResult("database", False, "Query timeout")
+            finally:
+                await engine.dispose()
         
         except Exception as e:
             logger.error("database_check_failed", error=str(e))
@@ -93,7 +93,6 @@ class HealthCheckManager:
                     redis_client.ping(),
                     timeout=timeout
                 )
-                await redis_client.close()
                 if pong:
                     logger.info("redis_check_success")
                     return HealthCheckResult("redis", True, "Connected")
@@ -101,9 +100,10 @@ class HealthCheckManager:
                     logger.warning("redis_check_failed_pong")
                     return HealthCheckResult("redis", False, "No PONG")
             except asyncio.TimeoutError:
-                await redis_client.close()
                 logger.error("redis_check_timeout")
                 return HealthCheckResult("redis", False, "Connection timeout")
+            finally:
+                await redis_client.close()
         
         except Exception as e:
             logger.error("redis_check_failed", error=str(e))

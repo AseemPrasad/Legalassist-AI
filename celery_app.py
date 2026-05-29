@@ -747,7 +747,6 @@ def analyze_document_task(
             "remedies_evidence_spans": remedies_data.get("evidence_spans", []),
             "analysis_time_seconds": analysis_time,
             "processed_at": datetime.now(timezone.utc).isoformat()
-
         }
 
         logger.info(
@@ -896,7 +895,7 @@ def generate_report_task(
             db_report.job_id = self.request.id
             db.commit()
 
-    # Idempotency: avoid regenerating same report repeatedly
+    # Anonymization / Idempotency: avoid regenerating same report repeatedly
     idemp = IdempotencyManager()
     idempotency_key = f"report:{user_id}:{case_id}:{report_type}:{format}:{privacy_profile}"
     if not idemp.acquire(idempotency_key, ttl=600):

@@ -11,14 +11,24 @@ This module provides comprehensive validation for:
 import ipaddress
 import os
 import socket
-from typing import Optional, Set, Tuple
+from typing import Optional, Set, Tuple, NamedTuple
 from pathlib import Path
 from urllib.parse import urlparse
 from fastapi import HTTPException, status, UploadFile
 
+import requests
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+
+class PinnedUrl(NamedTuple):
+    scheme: str
+    hostname: str
+    port: int
+    path: str
+    ip: str
+
 
 # SSRF protection: private / reserved / metadata IP ranges
 _FORBIDDEN_IP_NETWORKS = [
@@ -233,12 +243,14 @@ def validate_json_payload(payload_size: int, max_size: Optional[int] = None) -> 
         )
 
 
-def validate_file_url(url: str) -> None:
+def validate_file_url(url: str) -> PinnedUrl:
     """
     Validate a user-supplied URL against SSRF attacks.
     - Only http/https schemes allowed
     - No private, loopback, link-local, or metadata IPs
     - Only standard HTTP(S) ports
+    Returns a PinnedUrl with the single validated IP to use for the connection,
+    preventing DNS rebinding between validation and fetch.
     """
     try:
         parsed = urlparse(url)
@@ -255,13 +267,17 @@ def validate_file_url(url: str) -> None:
         raise ValidationError(detail=f"URL port {parsed.port} is not allowed.")
 
     hostname = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
     if hostname.lower() in _CLOUD_METADATA_HOSTS:
         logger.warning("url_metadata_host_denied", host=hostname, url=url)
         raise ValidationError(detail="URL points to a cloud metadata endpoint and is not allowed.")
 
-    # Resolve hostname to IP addresses
     try:
-        ips = socket.getaddrinfo(hostname, None)
+        ips = socket.getaddrinfo(hostname, port)
     except socket.gaierror as exc:
         logger.warning("url_dns_resolution_failed", host=hostname, error=str(exc))
         raise ValidationError(detail="Could not resolve the URL hostname.")
@@ -269,6 +285,7 @@ def validate_file_url(url: str) -> None:
         logger.warning("url_dns_resolution_os_error", host=hostname)
         raise ValidationError(detail="Could not resolve the URL hostname.")
 
+    resolved_ip = None
     for addr_info in ips:
         ip_str = addr_info[4][0]
         try:
@@ -283,6 +300,62 @@ def validate_file_url(url: str) -> None:
             if ip in net:
                 logger.warning("url_ip_in_forbidden_network", ip=ip_str, network=str(net), host=hostname, url=url)
                 raise ValidationError(detail=f"URL resolves to a blocked IP range ({ip_str}).")
+
+        if resolved_ip is None:
+            resolved_ip = ip_str
+
+    if resolved_ip is None:
+        raise ValidationError(detail="Could not resolve the URL to a valid IP address.")
+
+    return PinnedUrl(
+        scheme=parsed.scheme,
+        hostname=hostname,
+        port=port,
+        path=path,
+        ip=resolved_ip,
+    )
+
+
+class _PinnedResponse:
+    """Minimal response wrapper returned by fetch_url_safe."""
+    def __init__(self, status_code: int, headers: dict, content: bytes):
+        self.status_code = status_code
+        self.headers = headers
+        self.content = content
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests as _req
+            exc = _req.HTTPError(f"HTTP {self.status_code}")
+            exc.response = self
+            raise exc
+
+
+def fetch_url_safe(pinned: PinnedUrl, timeout: int = 30) -> _PinnedResponse:
+    """Fetch a URL using the pinned IP from validate_file_url, preventing DNS rebinding."""
+    import urllib3
+    headers = {"Host": pinned.hostname, "User-Agent": "LegalAssist-AI/1.0"}
+    if pinned.scheme == "https":
+        conn = urllib3.HTTPSConnection(
+            host=pinned.ip,
+            port=pinned.port,
+            server_hostname=pinned.hostname,
+            assert_hostname=pinned.hostname,
+            timeout=timeout,
+        )
+    else:
+        conn = urllib3.HTTPConnection(
+            host=pinned.ip,
+            port=pinned.port,
+            timeout=timeout,
+        )
+    conn.request("GET", pinned.path, headers=headers)
+    http_response = conn.getresponse()
+    content = http_response.data
+    resp_headers = dict(http_response.getheaders())
+    status = http_response.status
+    conn.close()
+    return _PinnedResponse(status_code=status, headers=resp_headers, content=content)
 
 
 def validate_text_input(text: str, max_length: Optional[int] = None) -> None:

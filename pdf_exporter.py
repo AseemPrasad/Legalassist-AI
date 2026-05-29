@@ -746,3 +746,17 @@ def generate_anonymized_pdf(
         return None
     finally:
         db.close()
+
+
+def calculate_optimal_font_size(text: str, container_width: float, max_font_size: float = 12.0) -> float:
+    """
+    Dynamically scales down the font size for longer table headers 
+    to prevent text wrapping and clipping in PDF generation.
+    """
+    estimated_char_width = 6.0
+    text_length = len(text)
+    required_width = text_length * estimated_char_width
+    if required_width > container_width:
+        ratio = container_width / required_width
+        return max(6.0, min(max_font_size, max_font_size * ratio))
+    return max_font_size

@@ -662,6 +662,7 @@ class CaseSimilarityCalculator:
         candidate_case: CaseRecord,
         user_id: Optional[str] = None,
         query_signature: Optional[str] = None,
+        prefetched_feedback: Optional[List[SimilarityFeedback]] = None,
     ) -> float:
         """Return a small ranking adjustment from similarity feedback.
 
@@ -674,20 +675,30 @@ class CaseSimilarityCalculator:
             candidate_case: Case being ranked.
             user_id: Optional user scope for feedback rows.
             query_signature: Optional query signature scope for feedback rows.
+            prefetched_feedback: Optional pre-fetched feedback list for this candidate.
 
         Returns:
             A bounded adjustment in the range ``[-0.03, 0.03]``.
         """
-        query = db.query(SimilarityFeedback).filter(
-            SimilarityFeedback.candidate_case_id == candidate_case.id,
-        )
+        if prefetched_feedback is not None:
+            feedback_rows = prefetched_feedback
+            if user_id is not None:
+                feedback_rows = [row for row in feedback_rows if row.user_id == str(user_id)]
+            if query_signature is not None:
+                feedback_rows = [row for row in feedback_rows if row.query_signature == query_signature]
+            feedback_rows = feedback_rows[:50]
+        else:
+            query = db.query(SimilarityFeedback).filter(
+                SimilarityFeedback.candidate_case_id == candidate_case.id,
+            )
 
-        if user_id is not None:
-            query = query.filter(SimilarityFeedback.user_id == str(user_id))
-        if query_signature is not None:
-            query = query.filter(SimilarityFeedback.query_signature == query_signature)
+            if user_id is not None:
+                query = query.filter(SimilarityFeedback.user_id == str(user_id))
+            if query_signature is not None:
+                query = query.filter(SimilarityFeedback.query_signature == query_signature)
 
-        feedback_rows = query.limit(50).all()
+            feedback_rows = query.limit(50).all()
+
         if not feedback_rows:
             return 0.0
 
@@ -1741,3 +1752,18 @@ def generate_anonymous_case_id(case_data: str) -> str:
         case_data.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()[:16]
+
+
+def calculate_statistical_metrics(values: list[float]) -> dict[str, float]:
+    """
+    Calculates essential descriptive statistics for analytical telemetry 
+    purposes including mean, median, and variance.
+    """
+    if not values:
+        return {"mean": 0.0, "median": 0.0, "variance": 0.0}
+    sorted_vals = sorted(values)
+    n = len(values)
+    mean = sum(values) / n
+    median = sorted_vals[n // 2] if n % 2 != 0 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+    variance = sum((x - mean) ** 2 for x in values) / n
+    return {"mean": mean, "median": median, "variance": variance}

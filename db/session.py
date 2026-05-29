@@ -3,9 +3,10 @@ import logging
 from contextlib import contextmanager
 from typing import Optional
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import orm
 
 try:
     from fastapi import Request
@@ -53,6 +54,44 @@ def init_db():
     except Exception as exc:
         logger.warning("Failed to create notification_logs index", error=str(exc))
 
+    try:
+        with engine.begin() as connection:
+            if _is_sqlite:
+                cursor = connection.execute(text("PRAGMA table_info(user_preferences)"))
+                cols = [row[1] for row in cursor.fetchall()]
+            else:
+                cursor = connection.execute(text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name='user_preferences' AND column_name='reminder_thresholds'"
+                ))
+                cols = [row[0] for row in cursor.fetchall()]
+            
+            if "reminder_thresholds" not in cols:
+                logger.info("Adding column reminder_thresholds to user_preferences table")
+                connection.execute(text("ALTER TABLE user_preferences ADD COLUMN reminder_thresholds TEXT"))
+    except Exception as exc:
+        logger.warning("Failed to migrate user_preferences schema", error=str(exc))
+
+    try:
+        with engine.begin() as connection:
+            if _is_sqlite:
+                cursor = connection.execute(text("PRAGMA table_info(case_deadlines)"))
+                cols = [row[1] for row in cursor.fetchall()]
+            else:
+                cursor = connection.execute(text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name='case_deadlines' AND column_name='status'"
+                ))
+                cols = [row[0] for row in cursor.fetchall()]
+            
+            if "status" not in cols:
+                logger.info("Adding column status to case_deadlines table")
+                connection.execute(text("ALTER TABLE case_deadlines ADD COLUMN status VARCHAR(50) DEFAULT 'active'"))
+                # Migrate existing completed deadlines
+                connection.execute(text("UPDATE case_deadlines SET status = 'completed' WHERE is_completed = 1"))
+    except Exception as exc:
+        logger.warning("Failed to migrate case_deadlines schema", error=str(exc))
+
     if _is_sqlite or _is_postgres:
         try:
             import scripts.apply_immutability as imm
@@ -81,6 +120,10 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
@@ -99,10 +142,31 @@ def clear_rls_context(db: Session) -> None:
 
 def get_db_with_rls(request: "Request") -> Session:
     db = SessionLocal()
-    if _is_postgres:
-        user_id = getattr(request.state, "db_rls_user_id", None) or getattr(request.state, "user_id", None)
-        if user_id and str(user_id).isdigit():
-            apply_rls_context(db, int(user_id))
+    user_id = getattr(request.state, "db_rls_user_id", None) or getattr(request.state, "user_id", None)
+    # Normalize common identifier shapes ("user:123", numeric strings, ints)
+    normalized = None
+    try:
+        if isinstance(user_id, int):
+            normalized = int(user_id)
+        elif isinstance(user_id, str):
+            if user_id.isdigit():
+                normalized = int(user_id)
+            elif user_id.startswith("user:"):
+                parts = user_id.split(":", 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    normalized = int(parts[1])
+    except Exception:
+        normalized = None
+
+    if normalized is not None:
+        # Apply DB-level RLS if Postgres is used
+        if _is_postgres:
+            apply_rls_context(db, int(normalized))
+        # Also expose tenant_id on the session.info for application-level filtering
+        db.info["tenant_id"] = int(normalized)
+    else:
+        # Ensure tenant_id not set if unknown
+        db.info.pop("tenant_id", None)
     return db
 
 
@@ -122,3 +186,36 @@ class RLSSession:
 def rls_db(request: "Request") -> RLSSession:
     db = get_db_with_rls(request)
     return RLSSession(db)
+
+
+# Apply application-level tenant scoping for ORM SELECT statements.
+# This uses SQLAlchemy's with_loader_criteria to automatically add
+# a `user_id = :tenant` predicate for mapped classes that include
+# a `user_id` attribute. It only applies when `session.info['tenant_id']`
+# is present and the statement is a SELECT.
+@event.listens_for(Session, "do_orm_execute")
+def _apply_tenant_criteria(execute_state):
+    try:
+        tenant = execute_state.session.info.get("tenant_id")
+    except Exception:
+        tenant = None
+    if tenant is None:
+        return
+
+    # Only apply to SELECT operations
+    if not execute_state.is_select:
+        return
+
+    # Import Base lazily to avoid circular imports
+    try:
+        from db.base import Base
+    except Exception:
+        return
+
+    # For each mapped class, if it has a `user_id` attribute, add a loader criteria
+    for mapper in Base.registry.mappers:
+        cls = mapper.class_
+        if hasattr(cls, "user_id"):
+            execute_state.statement = execute_state.statement.options(
+                orm.with_loader_criteria(cls, lambda cls_, tid=tenant: cls_.user_id == tid, include_aliases=True)
+            )

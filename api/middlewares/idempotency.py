@@ -149,7 +149,7 @@ async def idempotency_middleware(request: Request, call_next: Callable):
         path=request.url.path,
         idempotency_key=idempotency_key,
         principal=principal,
-        body=body,
+        body_fingerprint=body_fingerprint,
     )
 
     cached = http_idempotency_manager.get_http_response(key)

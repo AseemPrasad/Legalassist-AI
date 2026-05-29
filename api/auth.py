@@ -40,6 +40,14 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 # Configure Bcrypt password hashing with cost factor of 14 for security
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=14)
 
+# PBKDF2 iterations for API key hashing (OWASP 2023 minimum for SHA-256)
+API_KEY_HASH_ITERATIONS = 600000
+
+# Auth rate limiting thresholds — explicitly bridged from APISettings so any
+# direct import of these constants (e.g. from api.auth import AUTH_RATE_LIMIT_REQUESTS) resolves.
+AUTH_RATE_LIMIT_REQUESTS = settings.AUTH_RATE_LIMIT_REQUESTS
+AUTH_RATE_LIMIT_WINDOW = settings.AUTH_RATE_LIMIT_WINDOW
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plain password against a bcrypt hash."""
     return pwd_context.verify(plain_password, hashed_password)
@@ -71,8 +79,8 @@ def generate_api_key() -> str:
 
 
 def hash_api_key(key: str, salt: str) -> str:
-    """Hash API key for storage with salt"""
-    return hashlib.sha256((salt + key).encode()).hexdigest()
+    """Hash API key for storage with salt using PBKDF2-HMAC-SHA256"""
+    return hashlib.pbkdf2_hmac('sha256', key.encode(), salt.encode(), API_KEY_HASH_ITERATIONS).hex()
 
 
 def verify_api_key(key: str, salt: str, key_hash: str) -> bool:
@@ -92,7 +100,7 @@ def create_api_key_record(
     and saves the APIKey record with the hashed secret and user association.
     """
     secret = generate_api_key()
-    salt = secrets.token_hex(16)
+    salt = "1:" + secrets.token_hex(14)
     key_hash = hash_api_key(secret, salt)
     created_at = datetime.now(timezone.utc)
     expires_at = None

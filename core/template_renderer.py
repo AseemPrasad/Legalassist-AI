@@ -1,9 +1,13 @@
+import re
 from string import Formatter
 from typing import Dict, Set, Tuple, List
 import logging
 
 
 logger = logging.getLogger(__name__)
+
+TEMPLATE_MAX_LENGTH = 10000
+ALLOWED_FORMAT_SPEC_RE = re.compile(r"^[<>=^]?\d*(\.\d+)?[sdcfge%]?$")
 
 
 ALLOWED_VARS: Set[str] = {
@@ -31,6 +35,13 @@ class _SafeFormatter(Formatter):
                 f"Attribute or index access is not allowed in templates: '{field_name}'"
             )
         return super().get_field(field_name, args, kwargs)
+
+    def format_field(self, value, format_spec):
+        if format_spec and not ALLOWED_FORMAT_SPEC_RE.match(format_spec):
+            raise TemplateValidationError(
+                f"Unsupported format specifier: '{format_spec}'"
+            )
+        return super().format_field(value, format_spec)
 
 
 def _has_traversal(field_name: str) -> bool:
@@ -64,6 +75,9 @@ def render_template(template: str, values: Dict[str, str], allowed: Set[str] = A
     - Validates that all placeholders are in allowed set.
     - If missing_as_empty, missing keys are replaced with empty string; else raises TemplateValidationError.
     """
+    if len(template) > TEMPLATE_MAX_LENGTH:
+        raise TemplateValidationError(f"Template exceeds maximum length of {TEMPLATE_MAX_LENGTH} characters")
+
     is_valid, unknown = validate_template(template, allowed)
     if not is_valid:
         raise TemplateValidationError(f"Template contains unknown variables: {unknown}")

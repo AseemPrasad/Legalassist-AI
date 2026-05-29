@@ -86,4 +86,24 @@ async def request_size_limit_middleware(request: Request, call_next: Callable):
             },
         )
 
+    body_bytes = bytearray()
+    async for chunk in request.stream():
+        body_bytes.extend(chunk)
+        if len(body_bytes) > max_size:
+            logger.warning(
+                "request_body_exceeded_limit_during_stream",
+                path=request.url.path,
+                max_size=max_size,
+                attempted_bytes=len(body_bytes),
+            )
+            return JSONResponse(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                content={
+                    "error_code": "PAYLOAD_TOO_LARGE",
+                    "message": f"Request body exceeded maximum allowed size of {round(max_size / 1024 / 1024, 2)} MB",
+                },
+            )
+
+    request._body = bytes(body_bytes)
+
     return await call_next(request)

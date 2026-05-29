@@ -1,9 +1,13 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, Dict
 from core.efiling import EfilingClient
+from api.auth import get_current_user, CurrentUser
 
 router = APIRouter(prefix="/api/efiling", tags=["efiling"])
+
+# Track ownership of tracking_ids per user (POC — replace with DB in production)
+_user_filings: Dict[str, set[str]] = {}
 
 
 class SubmitRequest(BaseModel):
@@ -13,16 +17,22 @@ class SubmitRequest(BaseModel):
 
 
 @router.post("/submit")
-async def submit_document(req: SubmitRequest):
+async def submit_document(req: SubmitRequest, current_user: CurrentUser = Depends(get_current_user)):
     try:
         res = EfilingClient.submit(req.court, req.file_base64, metadata=req.metadata or {})
+        tid = res.get("tracking_id")
+        if tid:
+            _user_filings.setdefault(str(current_user.user_id), set()).add(tid)
         return res
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/status/{tracking_id}")
-async def status(tracking_id: str):
+async def status(tracking_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    uid = str(current_user.user_id)
+    if tracking_id not in _user_filings.get(uid, set()):
+        raise HTTPException(status_code=404, detail="tracking id not found")
     try:
         res = EfilingClient.get_status(tracking_id)
         return res
