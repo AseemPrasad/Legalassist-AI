@@ -181,7 +181,24 @@ def _get_or_create_user(email: str, name: str, provider: str, provider_id: str) 
         db.close()
 
 
-def _build_token_response(user: User, provider: str) -> RedirectResponse:
+def _validate_redirect_uri(uri: str) -> bool:
+    """Check that the redirect URI origin matches an allowed host."""
+    from urllib.parse import urlparse
+    from api.config import get_settings
+    _sso_settings = get_settings()
+    parsed = urlparse(uri)
+    if not parsed.netloc:
+        return True  # relative path is always safe
+    allowed = list(_sso_settings.CORS_ORIGINS) + [
+        f"https://{h}" for h in _sso_settings.ALLOWED_HOSTS
+    ] + [
+        f"http://{h}" for h in _sso_settings.ALLOWED_HOSTS
+    ]
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    return origin in allowed
+
+
+def _build_token_response(user: User, provider: str, redirect_uri: str = "") -> RedirectResponse:
     from api.config import get_settings
     _sso_settings = get_settings()
     role = user.role.value if user.role else "client"
@@ -189,7 +206,8 @@ def _build_token_response(user: User, provider: str) -> RedirectResponse:
         data={"sub": str(user.id), "email": user.email, "role": role, "provider": provider}
     )
     token_max_age = _sso_settings.JWT_ACCESS_TOKEN_MINUTES * 60
-    response = RedirectResponse(url="/", status_code=302)
+    redirect_to = redirect_uri if (redirect_uri and _validate_redirect_uri(redirect_uri)) else "/"
+    response = RedirectResponse(url=redirect_to, status_code=302)
     response.set_cookie(
         key="access_token",
         value=token,
@@ -278,7 +296,7 @@ async def sso_google_callback(request: Request, code: str = Query(...), state: s
     provider_id = userinfo.get("sub", "")
 
     user = _get_or_create_user(email, name, "google", provider_id)
-    return _build_token_response(user, "google")
+    return _build_token_response(user, "google", ctx["redirect_uri"])
 
 
 @router.get("/microsoft")
@@ -320,7 +338,7 @@ async def sso_microsoft_callback(request: Request, code: str = Query(...), state
     provider_id = userinfo.get("sub", "")
 
     user = _get_or_create_user(email, name, "microsoft", provider_id)
-    return _build_token_response(user, "microsoft")
+    return _build_token_response(user, "microsoft", ctx["redirect_uri"])
 
 
 @router.get("/config")
