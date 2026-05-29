@@ -216,7 +216,15 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         access_token = request.cookies.get(ACCESS_TOKEN_COOKIE_NAME)
         csrf_cookie = request.cookies.get(CSRF_COOKIE_NAME)
 
-        if request.method in SAFE_METHODS and not csrf_cookie:
+        if request.method in SAFE_METHODS and (not csrf_cookie or access_token):
+            if user_id is None and access_token:
+                try:
+                    from api.jwt_auth import verify_token
+                    payload = verify_token(access_token)
+                    user_id = int(payload.get("sub", 0))
+                    request.state.csrf_user_id = user_id
+                except Exception:
+                    user_id = 0
             session_id = secrets.token_urlsafe(16)
             token = generate_csrf_token(int(user_id) if str(user_id).isdigit() else 0, session_id)
             response.set_cookie(
