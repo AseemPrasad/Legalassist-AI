@@ -10,6 +10,7 @@ import re
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 import secrets
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, Form, Request, Query
 from fastapi.encoders import jsonable_encoder
@@ -727,11 +728,12 @@ async def upload_case_document_endpoint(
 
     from case_manager import upload_case_document_file
 
+    safe_filename = Path(file.filename).name
     stored = upload_case_document_file(
         user_id=user_id_int,
         case_id=case_id_int,
         file_bytes=file_bytes,
-        filename=file.filename,
+        filename=safe_filename,
         document_type=getattr(DocumentType, document_type.upper(), DocumentType.OTHER),
         content_type=file.content_type,
     )
@@ -746,7 +748,7 @@ async def upload_case_document_endpoint(
         case_id=str(case_id_int),
         attachment_id=str(stored["attachment"]["id"]),
         document_id=str(stored["document"]["id"]),
-        original_filename=file.filename,
+        original_filename=safe_filename,
     )
 
     return {
@@ -756,7 +758,7 @@ async def upload_case_document_endpoint(
         "attachment_id": stored["attachment"]["id"],
         "document_id": stored["document"]["id"],
         "document_type": stored["document"]["document_type"],
-        "filename": file.filename,
+        "filename": safe_filename,
     }
 
 
