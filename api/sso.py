@@ -28,6 +28,7 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import quote, unquote
 
 import structlog
 from authlib.integrations.starlette_client import OAuth
@@ -97,7 +98,8 @@ def _generate_state(provider: str, redirect_uri: str) -> str:
     token so no shared storage is needed across workers.
     """
     exp = int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp())
-    payload = f"{exp}:{provider}:{redirect_uri}"
+    quoted_uri = quote(redirect_uri, safe="")
+    payload = f"{exp}:{provider}:{quoted_uri}"
     sig = hmac.new(_get_state_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
     return f"{payload}:{sig}"
 
@@ -111,14 +113,15 @@ def _consume_state(state: str) -> Optional[dict]:
         parts = state.rsplit(":", 3)
         if len(parts) != 4:
             return None
-        exp_str, provider, redirect_uri, sig = parts
+        exp_str, provider, quoted_uri, sig = parts
         exp = int(exp_str)
         if datetime.now(timezone.utc).timestamp() > exp:
             return None
-        payload = f"{exp_str}:{provider}:{redirect_uri}"
+        payload = f"{exp_str}:{provider}:{quoted_uri}"
         expected_sig = hmac.new(_get_state_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
         if not hmac.compare_digest(expected_sig, sig):
             return None
+        redirect_uri = unquote(quoted_uri)
         return {"provider": provider, "redirect_uri": redirect_uri, "exp": datetime.fromtimestamp(exp, tz=timezone.utc)}
     except (ValueError, IndexError):
         return None
