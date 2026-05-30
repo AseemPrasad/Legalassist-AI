@@ -805,14 +805,15 @@ def reserve_idempotency_key(db: Session, key: str, method: str, path: str) -> Tu
 
     ik = IdempotencyKey(key=key, method=method, path=path, status=IdempotencyKeyStatus.IN_PROGRESS)
     try:
-        db.add(ik)
+        with db.begin_nested():
+            db.add(ik)
+    except IntegrityError:
+        existing = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
+        return existing, False
+    else:
         db.commit()
         db.refresh(ik)
         return ik, True
-    except IntegrityError:
-        db.rollback()
-        existing = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
-        return existing, False
 
 def set_idempotency_response(db: Session, key: str, status_code: int, headers: dict, body: str) -> IdempotencyKey:
     ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).with_for_update(read=True).first()
@@ -864,18 +865,19 @@ def reserve_notification(
         message_preview=message_preview,
     )
     try:
-        db.add(log)
-        db.commit()
-        db.refresh(log)
-        return log, True
+        with db.begin_nested():
+            db.add(log)
     except IntegrityError:
-        db.rollback()
         existing = db.query(NotificationLog).filter(
             NotificationLog.deadline_id == deadline_id,
             NotificationLog.days_before == days_before,
             NotificationLog.channel == channel,
         ).first()
         return existing, False
+    else:
+        db.commit()
+        db.refresh(log)
+        return log, True
 
 def update_notification_result(
     db: Session,
