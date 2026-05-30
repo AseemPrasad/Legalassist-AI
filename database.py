@@ -975,6 +975,8 @@ def get_similarity_feedback(
     if candidate_case_id is not None:
         query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
 
+    return query.limit(limit).all()
+
 def create_case_comment(
     db: Session,
     case_id: int,
