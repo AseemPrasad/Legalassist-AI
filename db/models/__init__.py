@@ -1,5 +1,5 @@
 from .notifications import NotificationStatus, NotificationChannel, NotificationLog, NotificationTemplate, UserPreference
-from .scheduler import SchedulerRun
+from .scheduler import SchedulerRun, SchedulerJobStatus
 from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote, CaseNoteVersion, AnonymizedShareToken, CaseStatus, DocumentType
 from .auth import User, OTPVerification, APIKey, APIKey
 from .audit import AuditEvent
@@ -21,7 +21,7 @@ from .analytics import (
     KnowledgeGraphEdge,
     PrecedentMatch,
 )
-from .usage_log import UsageLog
+from .exports import ExportJob, ExportChunk
 from .knowledge import KnowledgeInvalidation, KnowledgeInvalidationStatus
 
 __all__ = [
@@ -63,9 +63,11 @@ __all__ = [
     "CaseArgument",
     "KnowledgeGraphEdge",
     "PrecedentMatch",
+    "ExportJob",
+    "ExportChunk",
     "KnowledgeInvalidation",
     "KnowledgeInvalidationStatus",
     "SchedulerRun",
-    "UsageLog",
+    "SchedulerJobStatus",
 ]
 

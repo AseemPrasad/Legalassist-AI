@@ -98,7 +98,23 @@ async def logging_middleware(request: Request, call_next: Callable):
     bind_request_context(request_id=request_id, user_id=user_id_attr)
 
     if apply_rls_context and _is_postgres and user_id_attr not in (None, "anonymous", ""):
-        request.state.db_rls_user_id = user_id_attr
+        # Normalize common identifier shapes ("user:123", numeric strings, ints)
+        rls_id = None
+        try:
+            if isinstance(user_id_attr, int):
+                rls_id = int(user_id_attr)
+            elif isinstance(user_id_attr, str):
+                if user_id_attr.isdigit():
+                    rls_id = int(user_id_attr)
+                elif user_id_attr.startswith("user:"):
+                    parts = user_id_attr.split(":", 1)
+                    if len(parts) == 2 and parts[1].isdigit():
+                        rls_id = int(parts[1])
+        except Exception:
+            rls_id = None
+
+        if rls_id is not None:
+            request.state.db_rls_user_id = rls_id
 
     response = None
     error_occurred = False

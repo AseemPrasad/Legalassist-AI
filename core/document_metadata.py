@@ -171,17 +171,61 @@ def _dedupe(values) -> List[str]:
 
 
 def extract_case_document_metadata(text: str, *, filename: Optional[str] = None) -> Dict[str, Any]:
-    """Extract lightweight structured metadata from a case document."""
-    parties = _extract_party_candidates(text)
-    dates = _extract_date_candidates(text)
-    claims = _extract_claim_candidates(text)
-    statutes = _extract_statute_candidates(text)
+    """Extract lightweight structured metadata from a case document.
+
+    On any unexpected extraction failure the function returns a *partial* result
+    dictionary populated with whichever fields were successfully computed before
+    the error, rather than re-raising and returning nothing to the caller.
+    Fields that could not be computed are substituted with empty-list defaults.
+
+    Args:
+        text: Raw plain-text content of the legal document.
+        filename: Optional original filename used as a title hint fallback.
+
+    Returns:
+        Dict with keys: title_hint, parties, dates, claims, statutes, confidence,
+        and (on error) partial_result=True plus an error_hint string.
+    """
+    partial: Dict[str, Any] = {
+        "parties": [],
+        "dates": [],
+        "claims": [],
+        "statutes": [],
+    }
+
+    try:
+        partial["parties"] = _extract_party_candidates(text)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        partial["dates"] = _extract_date_candidates(text)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        partial["claims"] = _extract_claim_candidates(text)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        partial["statutes"] = _extract_statute_candidates(text)
+    except Exception:  # noqa: BLE001
+        pass
+
+    parties = partial["parties"]
+    dates = partial["dates"]
+    claims = partial["claims"]
+    statutes = partial["statutes"]
 
     title_hint = None
-    if parties:
-        title_hint = " v. ".join(parties[:2]) if len(parties) >= 2 else parties[0]
-    elif filename:
-        title_hint = Path(filename).stem
+    try:
+        if parties:
+            title_hint = " v. ".join(parties[:2]) if len(parties) >= 2 else parties[0]
+        elif filename:
+            title_hint = Path(filename).stem
+    except Exception:  # noqa: BLE001
+        pass
 
     return {
         "title_hint": title_hint,
@@ -196,3 +240,4 @@ def extract_case_document_metadata(text: str, *, filename: Optional[str] = None)
             "statutes": 0.5 if statutes else 0.0,
         },
     }
+

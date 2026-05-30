@@ -120,6 +120,7 @@ def create_app() -> FastAPI:
     app.include_router(deadline_engine.router)
     app.include_router(efiling.router)
     app.include_router(notifications_webhooks.router)
+    app.include_router(notifications_webhooks.pref_router)
     app.include_router(anonymized_cases.router)
     # Model feedback & optimization
     from api.routes import models as models_router

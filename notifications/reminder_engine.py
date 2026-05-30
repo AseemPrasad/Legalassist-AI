@@ -14,14 +14,21 @@ from db.models.notifications import UserPreference
 
 
 def should_process_threshold(days_left: int) -> bool:
-    """Return True when the days_left value matches configured thresholds."""
-    return days_left in (30, 10, 3, 1)
+    """Return True when the days_left value matches configured thresholds.
+    Note: For dynamic user-configurable thresholds, this now acts as a broad
+    check but is overridden by the user's specific thresholds during dispatch.
+    """
+    return True
 
 
 def is_notify_enabled(days_left: int, user_preference: UserPreference) -> bool:
     """Return True if the user has enabled reminders for this threshold."""
     if user_preference is None:
         return False
+    if hasattr(user_preference, "get_reminder_thresholds"):
+        thresholds = user_preference.get_reminder_thresholds()
+        return days_left in thresholds
+
     if days_left == 30:
         return bool(user_preference.notify_30_days)
     if days_left == 10:
@@ -117,7 +124,7 @@ def get_reminder_dispatch_candidates(
         microsecond=999999,
     )
     deadlines = db.query(CaseDeadline).filter(
-        CaseDeadline.is_completed.is_(False),
+        CaseDeadline.status == "active",
         CaseDeadline.deadline_date <= target_utc,
         CaseDeadline.deadline_date > now_utc,
     ).all()

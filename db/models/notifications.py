@@ -1,6 +1,6 @@
 import datetime as dt
 import enum
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, Enum as SQLEnum, Index, UniqueConstraint
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, Enum as SQLEnum, Index, UniqueConstraint, JSON
 from sqlalchemy.orm import relationship
 from db.base import Base
 
@@ -37,10 +37,38 @@ class UserPreference(Base):
     holiday_country = Column(String(255), nullable=True)
     holiday_region = Column(String(255), nullable=True)
     holiday_calendar_json = Column(Text, nullable=True)
+    reminder_thresholds = Column(JSON, default=lambda: [30, 10, 3, 1], nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     user = relationship("db.models.auth.User", back_populates="preferences")
+
+    def get_reminder_thresholds(self) -> list[int]:
+        if self.reminder_thresholds is not None:
+            if isinstance(self.reminder_thresholds, list):
+                return [int(x) for x in self.reminder_thresholds]
+            elif isinstance(self.reminder_thresholds, str):
+                try:
+                    import json
+                    parsed = json.loads(self.reminder_thresholds)
+                    if isinstance(parsed, list):
+                        return [int(x) for x in parsed]
+                except Exception:
+                    pass
+                try:
+                    return [int(x.strip()) for x in self.reminder_thresholds.split(",") if x.strip().isdigit()]
+                except Exception:
+                    pass
+        thresholds = []
+        if getattr(self, "notify_30_days", True):
+            thresholds.append(30)
+        if getattr(self, "notify_10_days", True):
+            thresholds.append(10)
+        if getattr(self, "notify_3_days", True):
+            thresholds.append(3)
+        if getattr(self, "notify_1_day", True):
+            thresholds.append(1)
+        return thresholds
 
 
 class NotificationTemplate(Base):
@@ -66,6 +94,7 @@ class NotificationLog(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     channel = Column(SQLEnum(NotificationChannel), nullable=False)
     status = Column(SQLEnum(NotificationStatus), default=NotificationStatus.PENDING, index=True)
+    attempted_channels = Column(JSON, nullable=True)
     recipient = Column(String(255), nullable=False)
     days_before = Column(Integer, nullable=False)
     message_id = Column(String(255), nullable=True)

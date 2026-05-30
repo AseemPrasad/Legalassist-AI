@@ -60,7 +60,6 @@ import os
 import uuid
 import subprocess
 import shlex
-import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -68,7 +67,6 @@ from contextlib import contextmanager
 
 import pytz
 import structlog
-from db.models import SchedulerRun, SchedulerJobStatus
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.schedulers.blocking import BlockingScheduler
@@ -94,10 +92,15 @@ from db import (
     engine,
     init_db,
     SessionLocal,
+    get_upcoming_deadlines,
+    get_prefs_by_user_ids,
+    UserPreference,
 )
 from db.crud.knowledge import process_due_knowledge_invalidations
 from notifications.reminder_engine import (
-    get_reminder_dispatch_candidates,
+    plan_eligible_reminders,
+    should_process_threshold,
+    is_notify_enabled,
     is_reminder_time_for_user,
 )
 from notification_service import NotificationService
@@ -112,8 +115,43 @@ logger = structlog.get_logger(__name__)
 _scheduler: Optional[BackgroundScheduler] = None
 _notification_service_instance: Optional[NotificationService] = None
 _instance_id = str(uuid.uuid4())[:8]
-_in_memory_locks: dict[str, float] = {}
-_in_memory_lock_lock = threading.Lock()
+
+
+def _is_truthy_env(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+ENABLE_MAINTENANCE_TASKS = _is_truthy_env("ENABLE_MAINTENANCE_TASKS")
+MAINTENANCE_TASK_COMMAND = os.getenv("MAINTENANCE_TASK_COMMAND", "").strip()
+
+
+class _LazyNotificationService:
+    """Lazy proxy that initializes NotificationService on first attribute access."""
+
+    def _ensure(self) -> NotificationService:
+        global _notification_service_instance
+        if _notification_service_instance is None:
+            _notification_service_instance = NotificationService()
+        return _notification_service_instance
+
+    def __getattr__(self, name):
+        return getattr(self._ensure(), name)
+
+
+notification_service = _LazyNotificationService()
+
+
+def get_notification_service() -> NotificationService:
+    """Lazily initialize the notification service singleton."""
+    return notification_service._ensure()
+
+
+# Lock configuration
+LOCK_KEY = "legalassist:scheduler:lock"
+LOCK_TTL_SECONDS = 55 * 60  # 55 minutes to allow hourly job to complete
+KNOWLEDGE_LOCK_KEY = "legalassist:knowledge:lock"
+KNOWLEDGE_LOCK_TTL_SECONDS = 10 * 60
 
 
 def _get_redis_client():
@@ -147,20 +185,7 @@ def distributed_lock(lock_key: str, ttl_seconds: int = 300, lock_id: Optional[st
     """
     redis_client = _get_redis_client()
     if redis_client is None:
-        now = time.monotonic()
-        with _in_memory_lock_lock:
-            stale = [k for k, v in _in_memory_locks.items() if v < now]
-            for s in stale:
-                del _in_memory_locks[s]
-            if lock_key in _in_memory_locks:
-                yield False
-                return
-            _in_memory_locks[lock_key] = now + ttl_seconds
-        try:
-            yield True
-        finally:
-            with _in_memory_lock_lock:
-                _in_memory_locks.pop(lock_key, None)
+        yield True
         return
 
     acquired = False
@@ -172,10 +197,9 @@ def distributed_lock(lock_key: str, ttl_seconds: int = 300, lock_id: Optional[st
         yield acquired
     finally:
         if acquired:
-            redis_client.eval(
-                """if redis.call("GET",KEYS[1])==ARGV[1] then return redis.call("DEL",KEYS[1]) end return 0""",
-                1, lock_key, lock_id,
-            )
+            current_holder = redis_client.get(lock_key)
+            if current_holder == lock_id:
+                redis_client.delete(lock_key)
 
 
 def _shutdown_scheduler_instance(scheduler, *, wait: bool = True):
@@ -205,6 +229,9 @@ def _send_deadline_reminders_safe(db, deadline, user_preference, days_left):
             exc_info=True,
         )
         return []
+
+
+# Reminder time logic moved to notifications.reminder_engine.build_reminder_jobs
 
 
 def check_and_send_reminders():
@@ -274,21 +301,18 @@ def check_and_send_reminders():
 
         logger.info("scheduler_reminder_lock_acquired")
 
+        sent_count = 0
+
         logger.info("scheduler_reminder_job_started", check_time=datetime.now(timezone.utc).isoformat())
 
         # Ensure tables exist when running from a fresh DB.
         init_db()
 
         db = SessionLocal()
-        sent_count = 0
         try:
-            candidates = get_reminder_dispatch_candidates(
-                db,
-                days_before=31,
-                now_utc=datetime.now(timezone.utc),
-                reminder_time_checker=is_reminder_time_for_user,
-            )
-            logger.info("scheduler_reminder_candidates_found", count=len(candidates))
+            # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
+            upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
+            logger.info("scheduler_upcoming_deadlines_found", count=len(upcoming_deadlines))
 
             # Prefetch user preferences for eligible deadlines to avoid N+1 queries
             eligible = []
@@ -320,6 +344,7 @@ def check_and_send_reminders():
 
                 logger.info("scheduler_processing_deadline", case_id=deadline.case_id, days_left=days_left)
 
+                # Send reminders using the notification service
                 results = _send_deadline_reminders_safe(db, deadline, user_preference, days_left)
 
                 for res in results:
@@ -340,30 +365,8 @@ def check_and_send_reminders():
 
             logger.info("scheduler_reminder_job_completed", reminders_sent=sent_count)
 
-            # Persist run metrics
-            run = SchedulerRun(
-                job_name="reminder_job",
-                started_at=datetime.now(timezone.utc),
-                finished_at=datetime.now(timezone.utc),
-                sent_count=sent_count,
-                status=SchedulerJobStatus.SUCCESS,
-                error_code=None,
-            )
-            db.add(run)
-            db.commit()
         except Exception as e:
             logger.error("scheduler_reminder_job_failed", error=sanitize_log_text(str(e)), exc_info=True)
-            # Persist failure metrics
-            run = SchedulerRun(
-                job_name="reminder_job",
-                started_at=datetime.now(timezone.utc),
-                finished_at=datetime.now(timezone.utc),
-                sent_count=sent_count if 'sent_count' in locals() else 0,
-                status=SchedulerJobStatus.FAILED,
-                error_code=str(e),
-            )
-            db.add(run)
-            db.commit()
         finally:
             db.close()
 
@@ -385,31 +388,8 @@ def recompute_due_knowledge_invalidations():
         try:
             processed = process_due_knowledge_invalidations(db)
             logger.info("scheduler_knowledge_recompute_completed", processed=len(processed))
-            
-            # Persist run metrics
-            run = SchedulerRun(
-                job_name="knowledge_job",
-                started_at=datetime.now(timezone.utc),
-                finished_at=datetime.now(timezone.utc),
-                sent_count=len(processed),
-                status=SchedulerJobStatus.SUCCESS,
-                error_code=None,
-            )
-            db.add(run)
-            db.commit()
         except Exception as exc:
             logger.error("scheduler_knowledge_recompute_failed", error=sanitize_log_text(str(exc)), exc_info=True)
-            
-            run = SchedulerRun(
-                job_name="knowledge_job",
-                started_at=datetime.now(timezone.utc),
-                finished_at=datetime.now(timezone.utc),
-                sent_count=0,
-                status=SchedulerJobStatus.FAILED,
-                error_code=str(exc),
-            )
-            db.add(run)
-            db.commit()
         finally:
             db.close()
 
@@ -666,7 +646,7 @@ def setup_scheduler(scheduler_class):
         else:
             logger.info("scheduler_maintenance_job_disabled")
         
-        logger.info("scheduler_configured", scheduler_class=scheduler_class.__name__, job_store="sqlalchemy")
+        logger.info("scheduler_configured", scheduler_class=getattr(scheduler_class, "__name__", str(scheduler_class)), job_store="sqlalchemy")
         
         return scheduler
         
@@ -806,20 +786,25 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
     
     try:
         logger.info("scheduler_sync_reminder_check_started", target_days=target_days)
-        candidates = get_reminder_dispatch_candidates(
-            db,
-            days_before=31,
-            now_utc=datetime.now(timezone.utc),
+        upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
+        prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
+        prefs_by_user = {pref.user_id: pref for pref in prefs}
+        candidates = plan_eligible_reminders(
+            upcoming_deadlines,
+            prefs_by_user,
             reminder_time_checker=is_reminder_time_for_user,
         )
         
         sent_count = 0
-        for deadline, days_left, user_preference in candidates:
+        for candidate in candidates:
+            deadline = candidate.deadline
+            days_left = candidate.days_left
 
             if target_days and days_left != target_days:
                 continue
 
-            results = _send_deadline_reminders_safe(db, deadline, user_preference, days_left)
+            # Send reminders
+            results = _send_deadline_reminders_safe(db, deadline, candidate.user_preference, days_left)
             sent_count += len([r for r in results if r.success])
 
         logger.info("scheduler_sync_reminder_check_completed", reminders_sent=sent_count)
@@ -833,17 +818,3 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
 if __name__ == "__main__":
     # If run directly, start the worker
     run_worker()
-
-
-def safe_cancel_scheduled_task(scheduler, task_id: str) -> bool:
-    """
-    Safely cancels a scheduled cron task using its ID, checking for existence 
-    and thread locks to prevent deadlocks.
-    """
-    logger.info("scheduler_cancellation_requested", task_id=task_id)
-    try:
-        scheduler.remove_job(task_id)
-        return True
-    except Exception as e:
-        logger.error("scheduler_cancellation_failed", task_id=task_id, error=str(e))
-        return False
