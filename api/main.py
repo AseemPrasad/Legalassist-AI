@@ -269,94 +269,99 @@ def create_app() -> FastAPI:
         """Prometheus metrics endpoint."""
         return Response(content=get_metrics(), media_type="text/plain; version=0.0.4; charset=utf-8")
     
-    return app
+    # Conditional WebSocket endpoint
+    if settings.ENABLE_WEBSOCKET:
+        from fastapi import WebSocket
+        from api.jwt_auth import verify_token, InvalidTokenError
+        from api.job_registry import get_job_owner
 
+        @app.websocket("/ws/progress/{job_id}")
+        async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
+            """
+            WebSocket endpoint for real-time job progress
 
-# Create app instance
-app = create_app()
-
-
-# ============================================================================
-# WebSocket Support (Optional)
-# ============================================================================
-
-if get_settings().ENABLE_WEBSOCKET:
-    from fastapi import WebSocket
-    from api.jwt_auth import verify_token, InvalidTokenError
-    from api.job_registry import get_job_owner
-    
-    @app.websocket("/ws/progress/{job_id}")
-    async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
-        """
-        WebSocket endpoint for real-time job progress
-        
-        Usage:
-        ws = new WebSocket('ws://localhost:8000/ws/progress/job_id')
-        ws.onmessage = (event) => console.log(event.data)
-        """
-        # Extract token from subprotocol or query parameter
-        auth_token = None
-        if "sec-websocket-protocol" in websocket.headers:
-            protocols = [p.strip() for p in websocket.headers["sec-websocket-protocol"].split(",")]
-            if "access_token" in protocols:
-                idx = protocols.index("access_token")
-                if idx + 1 < len(protocols):
-                    auth_token = protocols[idx + 1]
-        if not auth_token:
-            auth_token = websocket.query_params.get("token")
-        if not auth_token:
-            await websocket.close(code=4001, reason="Authentication required")
-            return
-
-        # Verify token
-        try:
-            payload = verify_token(auth_token)
-            user_id = payload.get("sub")
-            if not user_id:
-                await websocket.close(code=4003, reason="Invalid token")
+            Usage:
+            ws = new WebSocket('ws://localhost:8000/ws/progress/job_id')
+            ws.onmessage = (event) => console.log(event.data)
+            """
+            auth_token = None
+            if "sec-websocket-protocol" in websocket.headers:
+                protocols = [p.strip() for p in websocket.headers["sec-websocket-protocol"].split(",")]
+                if "access_token" in protocols:
+                    idx = protocols.index("access_token")
+                    if idx + 1 < len(protocols):
+                        auth_token = protocols[idx + 1]
+            if not auth_token:
+                auth_token = websocket.query_params.get("token")
+            if not auth_token:
+                await websocket.close(code=4001, reason="Authentication required")
                 return
-        except InvalidTokenError:
-            await websocket.close(code=4001, reason="Invalid or expired token")
-            return
 
-        # Verify job ownership
-        owner = get_job_owner(job_id)
-        if owner is not None and str(owner) != str(user_id):
-            await websocket.close(code=1008, reason="Forbidden: job not owned by user")
-            return
+            try:
+                payload = verify_token(auth_token)
+                user_id = payload.get("sub")
+                if not user_id:
+                    await websocket.close(code=4003, reason="Invalid token")
+                    return
+            except InvalidTokenError:
+                await websocket.close(code=4001, reason="Invalid or expired token")
+                return
 
-        await websocket.accept()
-        
-        try:
-            from celery_app import TaskStatus
-            
-            while True:
-                import asyncio
-                
-                status_info = TaskStatus.get_task_status(job_id)
-                
-                await websocket.send_json({
-                    "job_id": job_id,
-                    "status": status_info["status"],
-                    "progress": status_info["info"].get("progress", 0),
-                    "timestamp": status_info["timestamp"]
-                })
-                
-                # Update every 2 seconds
-                await asyncio.sleep(2)
-                
-                # Stop if completed
-                if status_info["status"] in ["completed", "failed", "cancelled"]:
+            owner = get_job_owner(job_id)
+            if owner is not None and str(owner) != str(user_id):
+                await websocket.close(code=1008, reason="Forbidden: job not owned by user")
+                return
+
+            await websocket.accept()
+
+            try:
+                from celery_app import TaskStatus
+
+                while True:
+                    import asyncio
+
+                    status_info = TaskStatus.get_task_status(job_id)
+
                     await websocket.send_json({
                         "job_id": job_id,
                         "status": status_info["status"],
-                        "message": "Job completed"
+                        "progress": status_info["info"].get("progress", 0),
+                        "timestamp": status_info["timestamp"]
                     })
-                    break
-        
-        except Exception as e:
-            logger.error("WebSocket error", job_id=job_id, error=str(e))
-            await websocket.close(code=1011)
+
+                    await asyncio.sleep(2)
+
+                    if status_info["status"] in ["completed", "failed", "cancelled"]:
+                        await websocket.send_json({
+                            "job_id": job_id,
+                            "status": status_info["status"],
+                            "message": "Job completed"
+                        })
+                        break
+
+            except Exception as e:
+                logger.error("WebSocket error", job_id=job_id, error=str(e))
+                await websocket.close(code=1011)
+
+    return app
+
+
+# Lazy app instance — created on first access so tests can call
+# create_app() directly with fresh configuration.
+_app = None
+
+
+def get_app() -> FastAPI:
+    global _app
+    if _app is None:
+        _app = create_app()
+    return _app
+
+
+def __getattr__(name):
+    if name == "app":
+        return get_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":
