@@ -69,11 +69,11 @@ def archive_expired_cases(db: Session, cutoff_days: int, dry_run: bool = False) 
         ids = [r.id for r in records]
         return ids, len(ids)
 
-    ids = [r.id for r in q.all()]
+    cases = q.all()
+    ids = [r.id for r in cases]
+    for case in cases:
+        case.status = CaseStatus.CLOSED
     if ids:
-        db.query(Case).filter(Case.id.in_(ids)).update(
-            {Case.status: CaseStatus.CLOSED}, synchronize_session="fetch"
-        )
         db.commit()
     logger.info(f"Archived {len(ids)} cases (cutoff={cutoff_days} days)")
     return ids, len(ids)
