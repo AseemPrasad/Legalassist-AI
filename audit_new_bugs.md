@@ -1,468 +1,468 @@
-# Security & Correctness Audit — 32 New Advanced Bugs
+# Database Layer Security & Correctness Audit — NEW Findings
 
-**Scope:** Full codebase audit excluding issues from earlier fix branches.  
-**Methodology:** Source code static analysis with dependency-graph tracing.  
-**Total bugs found:** 32  
+*Audited files: `database.py`, `database_resolved.py`, `db_shim_clean.py`, `db/session.py`, `db/base.py`, `db/case_service.py`, `db/attachments_service.py`, `db/notifications_service.py`, `db/otp_service.py`, `db/immutable_audit_log.py`, `db/retention_models.py`, `db/retention_service.py`, `db/crud/*.py`, `db/repositories/*.py`, `db/models/*.py`*
 
 ---
 
-## Subsystem: Core Deadline Engine
+## BUG 1 — CRITICAL: `append_audit_entry` references undefined variable `db`
 
-### Bug 1 — Weekend Detection Ignores Jurisdiction Parameter
-
-**File:** `core/deadline_engine.py:24-25`
-
-The `calculate_deadline()` function accepts a `jurisdiction` parameter but `_is_weekend()` always treats Saturday (5) and Sunday (6) as weekends. In jurisdictions like Israel (Sunday–Thursday), Bangladesh (Friday–Saturday), or UAE (Friday half-day), the weekend days differ. The `jurisdiction` parameter is only used for filing-cutoff logic (lines 78-89), never for weekend computation. A deadline calculated for these jurisdictions lands on the wrong day.
-
-**Impact:** Incorrect deadline dates for non-Western jurisdictions, potentially causing missed court deadlines.
-
----
-
-### Bug 2 — Zero Business Days Skips Weekend/Holiday Adjustment
-
-**File:** `core/deadline_engine.py:28-103`
-
-When `business_days=0`, the while loop body never executes and `current` stays at the start date. Weekend/holiday skipping is only done inside the loop. Meanwhile, `jurisdiction_adjustment` (lines 84-89) and `emergency_extension_days` (line 91) ARE applied even for zero-day deadlines. A zero-business-day deadline on a Saturday reports the Saturday as the deadline date instead of rolling to Monday.
-
-**Impact:** Deadlines on weekends are not corrected when no business days are added.
-
----
-
-### Bug 3 — Jurisdiction Adjustment and Emergency Extension Are Additive on the Same Axis
-
-**File:** `core/deadline_engine.py:91`
+**File:** `db/immutable_audit_log.py:101`
+**Type:** Runtime NameError / Broken immutable audit chain
 
 ```python
-final = adjusted_for_weekends_holidays + timedelta(days=jurisdiction_adjustment + int(emergency_extension_days))
-```
-
-Jurisdiction adjustments (e.g., late-filing +1 day) and emergency extensions (e.g., 7-day court order) are summed into a single offset from the same base date. Jurisdiction rules should extend from the ORIGINAL calculated deadline, while emergency extensions should stack sequentially. If both apply, the misordered offsets produce a wrong calendar date.
-
-**Impact:** Emergency extensions and jurisdiction penalties produce incorrect dates when both are present.
-
----
-
-### Bug 4 — `fromisoformat` Crashes on Python 3.10 with SQLite Date Format
-
-**File:** `core/deadline_engine.py:13`
-
-```python
-dt = datetime.fromisoformat(str(value))
-```
-
-If `value` is a naive `datetime` from SQLite (stored as `"2026-05-28 14:30:00"`), `datetime.fromisoformat()` in **Python 3.10** raises `ValueError` because the space-separated format without `T` is not ISO-8601 compliant. Python 3.11+ accepts this format. The project targets Python 3.10 (per `pyproject.toml`).
-
-**Impact:** Code crashes on Python 3.10 when processing deadlines from SQLite (the default dev database).
-
----
-
-### Bug 5 — Holiday List Strings Are Never Validated
-
-**File:** `core/deadline_engine.py:51`
-
-```python
-holidays_set = set(holidays or [])
-```
-
-The `holidays` parameter is `Optional[List[str]]` with no validation. If an entry is in an unexpected format (e.g., `"2026/01/01"` instead of `"2026-01-01"`), the comparison `d.isoformat() in holidays_set` silently returns `False`, so the holiday is never skipped.
-
-**Impact:** Holidays in incorrect format are silently ignored, causing deadlines to land on actual holidays.
-
----
-
-## Subsystem: Notification Service
-
-### Bug 6 — `send_sms_reminder` No Transaction Boundary Between Reservation and Update
-
-**File:** `notification_service.py:611-641`
-
-`reserve_notification()` creates a PENDING notification log entry with its own internal commit, then `send_sms()` is called (line 626), then `update_notification_result()` (line 631). There is no DB transaction wrapping these operations. If the process crashes between the SMS being sent and `update_notification_result`, the DB record remains PENDING even though the SMS was delivered. The reverse: if the SMS fails but `update_notification_result` raises, the PENDING record is orphaned with no retry mechanism.
-
-**Impact:** Lost SMS deliveries or orphaned PENDING notification records.
-
----
-
-### Bug 7 — `db.commit()` Race in Email Dispatch with Celery Worker
-
-**File:** `notification_service.py:733-741`
-
-After dispatching the Celery task (line 721), `db.commit()` runs at line 739 to set `message_id`. The Celery worker (`send_email_task`) starts IMMEDIATELY. If the worker executes `update_notification_result` before line 739's commit, the worker queries for a notification log row that does not yet exist (uncommitted). The worker fails silently. Conversely, if the commit runs first, there is a window where the caller returns success but the DB still has `message_id=NULL` (commit after task dispatch).
-
-**Impact:** Lost notification status updates and duplicate sends from un-tracked delivery.
-
----
-
-### Bug 8 — Tenacity Retry Uses String-Matched Error Messages Instead of HTTP Status Codes
-
-**File:** `notification_service.py:123, 188`
-
-```python
-retry=tenacity.retry_if_exception(lambda e: '503' in str(e) or '429' in str(e))
-```
-
-The retry predicate searches for the substrings `"503"` or `"429"` inside `str(e)`. If the third-party library raises an `HTTPError` where the error message is `"Service Unavailable"` (no `"503"` in the string), or if the exception type is `TwilioRestException` with `status=503` but a human-readable message, the retry never fires. Real 503/429 responses are silently treated as permanent failures.
-
-**Impact:** Transient Twilio/SendGrid outages cause permanent notification failures instead of graceful retries.
-
----
-
-### Bug 9 — `deadline.case_title` Accessed Without Attribute Guarantee
-
-**File:** `notification_service.py:414, 479, 595`
-
-The code accesses `deadline.case_title` freely across multiple functions. If the `CaseDeadline` ORM model does not have a `case_title` column (some schemas store only the FK `case_id` and derive the title via a join), accessing it produces `AttributeError: 'CaseDeadline' object has no attribute 'case_title'`. SQLAlchemy queries that do not eagerly load joined fields will crash.
-
-**Impact:** Runtime `AttributeError` crashes on notification dispatch when the ORM model lacks a direct `case_title` field.
-
----
-
-### Bug 10 — Hardcoded Reminder Thresholds `[30, 10, 3, 1]` Are Inextensible
-
-**File:** `notification_service.py:772`
-
-```python
-if days_left not in [30, 10, 3, 1]:
-    return results
-```
-
-The reminder thresholds are hardcoded. There is no configuration, no DB-driven rule, and no per-jurisdiction customization. A jurisdiction that requires 60-day, 45-day, 7-day, and 2-day reminders cannot be supported. The only way to change thresholds is to modify source code.
-
-**Impact:** Rigid notification scheduling — jurisdictions with different legal timeline requirements cannot customize reminders.
-
----
-
-## Subsystem: Celery Background Tasks
-
-### Bug 11 — `cleanup_old_tasks` Is a Permanent No-Op
-
-**File:** `celery_app.py:1500-1517`
-
-```python
-backend = getattr(celery_app, "backend", None)
-cleanup_fn = getattr(backend, "cleanup", None)
-if callable(cleanup_fn):
-    cleanup_fn()
-```
-
-The standard Celery Redis backend (`RedisBackend`) does NOT have a `cleanup()` method. Only the `filesystem` and `cache` backends support this. The task runs every 24 hours (line 326) and always logs "noop". Old task results accumulate in Redis indefinitely, consuming memory with no cleanup mechanism.
-
-**Impact:** Unbounded Redis memory growth from stale task results that are never pruned.
-
----
-
-### Bug 12 — `export_data_task` Returns Null Instead of Raising on Invalid Format
-
-**File:** `celery_app.py:1039-1048`
-
-```python
-if format not in ("csv", "json"):
-    return {
-        "export_id": None,
-        "file_path": None,
-        "file_size_bytes": 0,
-        "format": format,
-        "expires_in_hours": None,
-        ...
-    }
-```
-
-When an unsupported format is requested, the task returns a dict with `None` values rather than raising a `ValueError`. Celery marks this as SUCCESS. The caller sees `status="completed"` with all null fields and cannot distinguish between "export succeeded" and "format was rejected." Downstream code receiving `file_path=None` would crash with `AttributeError`.
-
-**Impact:** Silent data corruption — the caller believes export succeeded, then crashes on the null file path.
-
----
-
-### Bug 13 — `generate_report_task` Idempotency Key Excludes `report_id`
-
-**File:** `celery_app.py:856`
-
-```python
-idempotency_key = f"report:{user_id}:{case_id}:{report_type}:{format}:{privacy_profile}"
-```
-
-Two different `report_id` values for the same user/case/type/format/profile are treated as duplicates. The second request silently returns the cached result of the first. The second report is never generated, the second `report_id` has no DB record, and the caller receives a report with the wrong `report_id` and stale timestamps.
-
-**Impact:** Lost report generation — users receive reports with incorrect `report_id` and stale data.
-
----
-
-### Bug 14 — Export `mask_recipient` Misaligned with Phone Formatting Characters
-
-**File:** `celery_app.py:1081-1086`
-
-```python
-digits = [c for c in recipient if c.isdigit()]
-if len(digits) >= 7:
-    return recipient[:3] + "*" * (len(recipient) - 7) + recipient[-4:]
-```
-
-For a phone `+1 (555) 123-4567` (11 digits, 17 chars with formatting):
-- `len(digits) == 11 >= 7` → true
-- `recipient[:3]` = `"+1 "`, stars count = `17 - 7 = 10`, `recipient[-4:]` = `"4567"`
-- Output: `"+1 **********4567"` — 10 stars consume formatting characters, not just digits
-
-Phone numbers with different formatting produce inconsistently masked outputs, and the actual digit content is obscured unpredictably.
-
-**Impact:** Inconsistent PII masking — phone numbers with different formatting produce non-deterministic output; legitimate legal references get corrupted.
-
----
-
-### Bug 15 — Content Hash Missing for `file_path` and `file_url` Sources in Analyzer
-
-**File:** `celery_app.py:511-516`
-
-```python
-content_parts = []
-if file_bytes:
-    content_parts.append(hashlib.sha256(file_bytes).hexdigest())
-if text:
-    content_parts.append(hashlib.sha256(text.encode("utf-8")).hexdigest())
-content_hash = ... if content_parts else ""
-```
-
-When a document is loaded via `file_path` or `file_url` (without `file_bytes` or `text` being set simultaneously), `content_parts` is empty and `content_hash` is `""`. Multiple different files loaded by path or URL produce the same idempotency key `f"analyze:{user_id}:{document_id}:"`, causing one analysis to silently replace or block another.
-
-**Impact:** File-path-based or URL-based document analysis is not uniquely content-keyed — re-analyzing different files returns stale cached results.
-
----
-
-### Bug 16 — Idempotency Lock TTL Shorter Than Real Analysis Time
-
-**File:** `celery_app.py:520`
-
-```python
-if not idemp.acquire(idempotency_key, ttl=300):
-```
-
-The idempotency lock expires after 300 seconds (5 minutes). Document analysis involving LLM calls can easily exceed 5 minutes for large documents. When the lock expires, a second request for the same document acquires the lock and starts duplicate processing. Worse, `idemp.mark_completed()` overwrites the first worker's result with the second worker's (possibly still-running) result.
-
-**Impact:** Duplicate document analysis for long-running tasks, potential data corruption from overlapping writes.
-
----
-
-### Bug 17 — `send_notification_task` Opens Two Separate DB Sessions
-
-**File:** `celery_app.py:1377-1381, 1447-1452`
-
-The email path opens a session to look up User (line 1377) and closes it (line 1381). The SMS path opens a second session to look up UserPreference (line 1447). Both could be loaded in a single session via a relationship join. Two sessions means two connection pool checkouts, two backend round-trips, and potential read-consistency issues if the user's data changes between the two queries.
-
-**Impact:** Inefficient connection pool usage and potential read-consistency issues for notification sends.
-
----
-
-### Bug 18 — `send_notification_task` Duplicate Retry Mechanism Conflicts with Celery's Built-in Retry
-
-**File:** `celery_app.py:1349-1355, 1431-1432, 1463-1464`
-
-The decorator declares `max_retries=3` AND `default_retry_delay=60`. Inside the task, the code manually calls `self.retry()` at lines 1432/1464. When `self.retry()` is called, Celery counts it as one of the `max_retries` attempts. The `default_retry_delay=60` conflicts with the exponential backoff logic used elsewhere (`send_email_task` line 328: `(2 ** self.request.retries) * 60`). The inconsistent retry strategies create unpredictable delivery delays.
-
-**Impact:** Notification retry timing is unpredictable — some retries use fixed 60s delay, others use exponential backoff, making SLAs impossible to guarantee.
-
----
-
-### Bug 19 — No Transaction Boundary on `process_case_document_upload_task`
-
-**File:** `celery_app.py:743-819`
-
-`update_case_document()` (line 781) commits internally, then `attachment.document_id = doc.id` (line 791), then `session.commit()` (line 792). If the process crashes between lines 791-792, the `update_case_document` write persists but `attachment.document_id` does not. The database is left with a document that has no attachment reference, causing broken FK relationships.
-
-**Impact:** Database inconsistency — documents updated but attachment references missing.
-
----
-
-## Subsystem: API & Authentication
-
-### Bug 20 — CSRF Cookie Is Never Refreshed After Auth State Change
-
-**File:** `api/csrf.py:218`
-
-```python
-if request.method in SAFE_METHODS and not csrf_cookie:
-    session_id = secrets.token_urlsafe(16)
-    token = generate_csrf_token(int(user_id) if str(user_id).isdigit() else 0, session_id)
-```
-
-The CSRF cookie is only set on safe methods when it does not already exist. If a user visits as anonymous → gets CSRF cookie bound to `user_id=0` → then logs in, the CSRF cookie is still bound to `user_id=0`. The bound CSRF token for `user_id=0` cannot validate requests for the authenticated user. Similarly, if user A logs in and gets a CSRF token, then user B logs in on the same browser, user B inherits user A's CSRF token bound to user A's ID.
-
-**Impact:** CSRF token binding is stale after login/logout — unsafe requests from authenticated sessions may be erroneously rejected.
-
----
-
-### Bug 21 — CSRF Exempt Path Matching Is Exact, Fails for Trailing Slashes
-
-**File:** `api/csrf.py:198`
-
-```python
-if path in self.exempt_paths:
-    return await call_next(request)
-```
-
-Routes like `/docs/` (with trailing slash) do not match `/docs`. FastAPI normalizes routes, but if a reverse proxy or client sends `/docs/`, the CSRF middleware rejects it with a 403 StructuredAPIError instead of passing through.
-
-**Impact:** CSRF middleware incorrectly blocks routes that have trailing slashes, including OpenAPI docs accessed via certain proxies.
-
----
-
-### Bug 22 — CSRF Origin Validation `is_same_origin` Does Not Verify Scheme
-
-**File:** `api/csrf.py:96-115`
-
-The function compares `parsed.hostname == host` but never checks the SCHEME (`http` vs `https`). The same-origin policy is defined as scheme + host + port. An attacker serving HTTP content at `http://evil.example.com` would pass the origin check for a target served at `https://example.com`. The scheme is lost after `urlparse()` if only `hostname` is compared.
-
-**Impact:** CSRF same-origin check is incomplete — HTTP-origin pages can forge requests against HTTPS endpoints on the same hostname.
-
----
-
-### Bug 23 — `get_db_rls` Non-Digit User ID Check Silently Skips RLS
-
-**File:** `api/dependencies.py:75-76`
-
-```python
-user_id_str = str(current_user.user_id)
-if user_id_str.isdigit():
-    apply_rls_context(db, int(user_id_str))
-```
-
-If the system ever migrates to UUID or ULID user IDs (e.g., for GDPR-compliant pseudonymous identifiers or horizontal sharding), `isdigit()` returns `False` and RLS is silently skipped. PostgreSQL RLS with no `app.current_user_id` set may either block nothing or block everything, depending on policy. Either way, data isolation is broken.
-
-**Impact:** Complete RLS bypass for non-integer user IDs — security vulnerability that activates the moment user IDs stop being integers.
-
----
-
-### Bug 24 — Analytics Endpoints Return Hardcoded Mock Data
-
-**File:** `api/routes/analytics.py:46-67, 84-106, 134-149`
-
-Three endpoints (`/costs`, `/overview`, `/usage`) return hardcoded values:
-
-```python
-total_cost=125.50,
-llm_api_cost=75.00,
-...
-api_calls=5432,
-```
-
-These values never reflect actual usage and are identical for all users. A user seeing "5 active cases" when they have 0, or "5432 API calls" when they have never used the API, receives fabricated information.
-
-**Impact:** Fraudulent analytics data — users (including legal professionals) make case strategy decisions based on fabricated metrics.
-
----
-
-### Bug 25 — `upload_document_file` Reads File Twice; Second Read Returns Empty Bytes
-
-**File:** `api/routes/documents.py:265-279`
-
-```python
-bytes_read = await validate_file_upload_streaming(file, ...)  # consumes the file stream
-# ...
-file_content = await file.read()  # cursor at EOF → returns b""
-```
-
-`validate_file_upload_streaming()` reads the entire file to validate size. After that, the file's cursor is at EOF. `file.read()` returns `b""`. For text files: `text = file_content.decode("utf-8")` → `""`, so the analysis receives empty content. For binary files: `file_bytes = file_content` → `b""`.
-
-**Impact:** All uploaded documents are analyzed with zero content — every analysis result is empty.
-
----
-
-### Bug 26 — `file_path` Documents Loaded Without Ownership Verification
-
-**File:** `api/routes/documents.py:119` → `celery_app.py:566-574`
-
-When a user submits a `file_path` for analysis, `validate_file_path()` only checks that the path is within allowed directories. It does NOT verify that `current_user` OWNS the file or its associated case. User A can analyze user B's documents by guessing the file path within `/attachments/`.
-
-**Impact:** Path-traversal-like information disclosure — a user can analyze another user's documents by guessing the file path within the allowed directory.
-
----
-
-### Bug 27 — `cancel_analysis` Endpoint Has No Ownership Check
-
-**File:** `api/routes/documents.py:216-230`
-
-```python
-async def cancel_analysis(
-    job_id: str,
-    current_user: CurrentUser = Depends(get_current_user)
+def append_audit_entry(
+    event_type: str,
+    action: str,
+    ...
 ) -> dict:
-    success = TaskStatus.revoke_task(job_id)
+    from db.session import db_session, _is_sqlite
+
+    db.commit()  # <-- NameError: `db` is not defined anywhere in this scope
 ```
 
-The endpoint accepts any `job_id` from any authenticated user. It calls `celery_app.control.revoke(task_id, terminate=True)` with no check that `current_user` owns the job. User A can cancel user B's running analysis or report generation by guessing their `job_id`.
+**Description:** The function has no `db` parameter, no `db` local variable, and no `db` import. Line 101 calls `db.commit()` on an undefined name. This is immediately reached at the start of the function, before the inner `with db_session() as db:` block (line 103) creates a local `db`. The `from db.session import ...` on line 84 does not import `db`.
 
-**Impact:** Arbitrary task cancellation — any authenticated user can disrupt another user's background jobs.
+**Impact:** Any call to `append_audit_entry()` (which is called from `record_audit_event()` → `record_immutable_audit_event()` → `append_audit_entry()`) raises `NameError: name 'db' is not defined`. In `record_audit_event` (`db/crud/audit.py:118`), this is caught and logged but silently swallowed. Result: **every audit event silently fails to write to the immutable audit chain**, breaking the entire tamper-evident audit integrity guarantee. The chain becomes permanently broken on first call.
+
+**Exploit/Trigger:** Any audited action (case creation, user login, document upload, etc.) triggers `record_audit_event`, which triggers the broken chain append. Always fails.
+
+**Severity:** CRITICAL — Zero immutable audit records are ever written. All integrity verification is completely disabled without any error reaching the caller.
 
 ---
 
-### Bug 28 — Request Size Middleware Requires Content-Length for ALL Requests Including GET/DELETE
+## BUG 2 — CRITICAL: `IdempotencyKey` model and `IdempotencyKeyStatus` enum do not exist
 
-**File:** `api/middlewares/request_size.py:50-57`
+**File:** `database.py:390,394,402,406-407,409,413,422`
+**Type:** Missing model definition → NameError at runtime
 
 ```python
-if content_length is None:
-    return JSONResponse(status_code=status.HTTP_411_LENGTH_REQUIRED, ...)
+def reserve_idempotency_key(db: Session, key: str, method: str, path: str) -> Tuple[IdempotencyKey, bool]:
+    from sqlalchemy.exc import IntegrityError
+    ik = IdempotencyKey(key=key, method=method, path=path, status=IdempotencyKeyStatus.IN_PROGRESS)
+    ...
+    existing = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
+    ...
+
+def set_idempotency_response(db: Session, key: str, ...) -> IdempotencyKey:
+    ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key)...first()
+    ...
+    ik.status = IdempotencyKeyStatus.COMPLETED
+
+def get_idempotency_response(db: Session, key: str):
+    ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key, IdempotencyKey.status == IdempotencyKeyStatus.COMPLETED).first()
 ```
 
-This check runs for EVERY request not in `SKIP_PATHS` (which only contains 5 paths: health, ready, live, metrics, root). HTTP GET, DELETE, OPTIONS, and HEAD requests typically do NOT send a `Content-Length` header. The middleware rejects them with 411 "Length Required." Every GET endpoint — `/api/v1/analytics/overview`, `/api/v1/cases/search`, `/api/v1/deadlines/upcoming` — returns 411. Additionally, chunked transfer encoding (common for streaming uploads) is also rejected (line 41-48).
+**Description:** The identifiers `IdempotencyKey` and `IdempotencyKeyStatus` are used as if they were SQLAlchemy model and enum classes but **neither is defined anywhere in the codebase**. There is no `class IdempotencyKey(Base)` or `class IdempotencyKeyStatus(enum.Enum)` definition in any model file, nor are they imported from any third-party library. The closest thing is `api/idempotency.py` which has `IdempotencyManager` (a Redis client, not an SQLAlchemy model).
 
-**Impact:** Complete API unavailability for GET/DELETE/OPTIONS requests — effectively all read endpoints are broken.
+**Impact:** Any import path that triggers `database.py` module loading will not fail at import time (Python resolves names lazily in function bodies). But the first HTTP request to any endpoint using `reserve_idempotency_key`, `set_idempotency_response`, or `get_idempotency_response` will raise `NameError`. The `idempotency_middleware.py` imports all three and uses them on every POST/PUT/PATCH/DELETE request — **every such request crashes**.
 
----
+**Exploit/Trigger:** Send any POST/PUT/PATCH/DELETE request to the API. The idempotency middleware (`api/idempotency_middleware.py:20`) calls `reserve_idempotency_key()` → `NameError` → HTTP 500.
 
-## Subsystem: Infrastructure & Configuration
-
-### Bug 29 — Module-Level Settings Evaluated at Import Time
-
-**File:** `celery_app.py:130, 134`, `api/main.py:267`, `database.py:171, 197`
-
-Multiple modules evaluate `Config` values at IMPORT TIME rather than at function call time:
-
-- `celery_app.py:130`: `settings = get_settings()` at module level
-- `celery_app.py:134`: `initialize_observability_for_environment()` at import time
-- `database.py:171`: `engine = create_engine(DATABASE_URL, ...)` at import time
-- `api/main.py:267`: `app = create_app()` at import time
-
-If environment variables change at runtime (e.g., pytest fixtures that set different DB URLs), the stale import-time values persist. Pytest `@pytest.fixture(autouse)` that sets env vars may not execute before these modules are imported during test collection.
-
-**Impact:** Tests that change env vars see stale configuration; cannot test against multiple databases without reloading modules.
+**Severity:** CRITICAL — All mutating HTTP requests fail with 500. The entire write path of the API is broken.
 
 ---
 
-### Bug 30 — `init_db` Creates Tables But Is Never Called by API or Streamlit
+## BUG 3 — CRITICAL: `OTPToken` model does not exist
 
-**File:** `database.py:196-199`
+**File:** `db/retention_service.py:176-182`
+**Type:** ImportError at runtime
 
 ```python
-def init_db():
-    Base.metadata.create_all(bind=engine)
+def purge_expired_otl_tokens(db: Session, cutoff_days: int, dry_run: bool = False) -> tuple[list, int]:
+    from db.models.auth import OTPToken  # <-- No such model!
+    ...
+    q = db.query(OTPToken).filter(...)
 ```
 
-This function is defined, but its only caller is in `cli.py`. The FastAPI app (via `api/main.py`) and the Streamlit app (via `app.py`) never call `init_db()` on startup. If the database has not been pre-initialized by the CLI or Alembic migration, the first endpoint that accesses a table gets `sqlalchemy.exc.OperationalError: no such table: cases`.
+**Description:** Line 178 imports `OTPToken` from `db.models.auth`. The `auth.py` model file defines `UserRole`, `User`, `OTPVerification`, and `APIKey`. There is no `OTPToken` class anywhere in the codebase. The correct model for OTP is `OTPVerification`.
 
-**Impact:** Fresh deployments crash on first request because database tables do not exist.
+**Impact:** The first time any retention job scheduler calls `purge_expired_otl_tokens()` (or when the function is imported during module loading depending on Python version), an `ImportError` is raised. This prevents the entire retention service from running, causing expired OTP tokens to accumulate indefinitely.
+
+**Severity:** CRITICAL — Unfixable ImportError blocks all retention enforcement for OTP records. OTP records leak PII forever.
 
 ---
 
-### Bug 31 — `validate_file_path` Does Not Check File Existence
+## BUG 4 — HIGH: `get_db()` in `database.py` silently discards all writes
 
-**File:** `api/routes/documents.py:36-77`
+**File:** `database.py:218-227`
+**Type:** Missing commit/rollback → silent data loss
 
 ```python
-resolved = raw.resolve(strict=False)
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 ```
 
-Uses `strict=False`, so the path is resolved WITHOUT checking if it exists. A non-existent file path passes validation. The Celery task then fails at `celery_app.py:567` with `os.path.getsize(file_path)` → `FileNotFoundError`, but only after the request is accepted and a `job_id` returned. The user sees "analysis pending" followed by "analysis failed" with no clear error.
+**Compare with identical function in `db/session.py:80-89` (the correct version):**
+```python
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+```
 
-**Impact:** Users receive task failures instead of immediate 400 errors when providing non-existent file paths.
+**Description:** The `database.py` version of `get_db` never commits or rolls back the session. `db.close()` at line 227 rolls back any uncommitted transaction (SQLAlchemy default behavior). Any code importing `get_db` from `database` (e.g., `from database import get_db`) uses the broken version. `api/sso.py:42` imports it this way.
+
+**Impact:** All database writes made within the `get_db` context are silently rolled back on `close()`. Data that the caller believes was committed is silently discarded. No error is raised.
+
+**Exploit/Trigger:** Call any endpoint that uses `from database import get_db` and performs writes. Data appears to succeed but is gone on next read.
+
+**Severity:** HIGH — Silent data loss in production for all code paths importing `get_db` from `database.py`.
 
 ---
 
-### Bug 32 — `app = create_app()` Called at Module Level, Cannot Be Re-created with Different Settings
+## BUG 5 — HIGH: `log_notification` in `db/crud/notifications.py` never commits
 
-**File:** `api/main.py:267`
+**File:** `db/crud/notifications.py:269-298`
+**Type:** Missing commit → data never persisted
 
 ```python
-app = create_app()
+def log_notification(...) -> NotificationLog:
+    log = NotificationLog(...)
+    db.add(log)
+    db.flush()       # <-- only flush, no commit!
+    db.refresh(log)
+    return log
 ```
 
-The FastAPI application instance is created at module import time. There is no factory function that accepts parameters. Every test that imports `api.main` gets the same app instance. Integration tests that need a different configuration (e.g., different DB, different rate limits) cannot create a fresh app. This also means `ValidationConfig.from_settings()` is called once and never re-initialized.
+**Compare with `log_notification` in `database.py:359-387` (the correct version):**
+```python
+    db.add(log)
+    db.commit()      # <-- correct
+    db.refresh(log)
+```
 
-**Impact:** Integration tests cannot reconfigure the API; all tests share the same global app state.
+**Description:** This function uses `flush()` instead of `commit()`. `flush()` synchronizes the ORM session state to the database connection buffer but does NOT commit the transaction. The data is only visible to the current transaction and is rolled back when the session closes unless an outer scope commits.
+
+**Impact:** The `database_resolved.py` re-exports `log_notification` from this module (line 64: `from db.crud.notifications import log_notification`). All callers that switched to `database_resolved` or explicitly import from `db.crud.notifications` get the broken version. Notification logs are silently swallowed.
+
+**Exploit/Trigger:** Any code path that calls `log_notification` from `db.crud.notifications` — notification history appears empty despite ostensibly successful delivery.
+
+**Severity:** HIGH — GDPR-relevant notification delivery logs are silently lost.
+
+---
+
+## BUG 6 — HIGH: `get_similarity_feedback` missing return statement
+
+**File:** `database.py:1178-1193`
+**Type:** Missing return → function returns `None`
+
+```python
+def get_similarity_feedback(
+    db: Session,
+    user_id: Optional[str] = None,
+    query_signature: Optional[str] = None,
+    candidate_case_id: Optional[int] = None,
+    limit: int = 100,
+) -> List[SimilarityFeedback]:
+    query = db.query(SimilarityFeedback)
+    if user_id is not None:
+        query = query.filter(SimilarityFeedback.user_id == str(user_id))
+    if query_signature is not None:
+        query = query.filter(SimilarityFeedback.query_signature == query_signature)
+    if candidate_case_id is not None:
+        query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
+
+def create_case_comment(
+```
+
+**Description:** The function builds the query object but never calls `.all()` or has a `return` statement. It flows directly into the `create_case_comment` function definition. Python implicitly returns `None`.
+
+**Impact:** Any caller expecting a `List[SimilarityFeedback]` gets `None`, causing `AttributeError: 'NoneType' object has no attribute '...'` or similar downstream crashes. Similarity feedback retrieval is completely broken.
+
+**Exploit/Trigger:** Call `get_similarity_feedback()` from `database` — always returns `None`.
+
+**Severity:** HIGH — Completely broken function signature, type-unsafe.
+
+---
+
+## BUG 7 — HIGH: Duplicate `get_user_stats` overwrites working version
+
+**File:** `database.py:963-985` (first definition) and `database.py:1295-1297` (second, broken definition)
+**Type:** Overwritten function → returns `None`
+
+```python
+# First definition (lines 963-985) - COMPLETE
+def get_user_stats(db: Session, user_id: int) -> dict:
+    """Calculate high-level stats for user dashboard"""
+    cases = get_user_cases(db, user_id)
+    ...
+    return { ... }   # <-- returns dict
+
+# Second definition (lines 1295-1297) - INCOMPLETE
+def get_user_stats(db: Session, user_id: int) -> dict:
+    """Get statistics for a user's cases"""
+    cases = get_user_cases(db, user_id)
+    # NO RETURN - falls through to register_slow_query_listener
+```
+
+**Description:** Due to code duplication in this compatibility shim, `get_user_stats` is defined twice. The second definition at line 1295 overwrites the first. The second definition only has `cases = get_user_cases(db, user_id)` and then falls off without a return, so it implicitly returns `None`.
+
+**Impact:** Any caller of `get_user_stats` from `database` gets `None` instead of the expected dictionary. Dashboard pages that call this function crash with `TypeError: 'NoneType' object is not subscriptable` when trying to access keys like `["total_cases"]`.
+
+**Exploit/Trigger:** Call `get_user_stats()` from `database` — always returns `None`.
+
+**Severity:** HIGH — Dashboard analytics completely broken for all users.
+
+---
+
+## BUG 8 — HIGH: SQLite does not enforce foreign keys (missing PRAGMA)
+
+**File:** `db/session.py:23-24`
+**Type:** Missing database configuration → silent FK violation
+
+```python
+if _is_sqlite:
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+```
+
+**No `PRAGMA foreign_keys = ON` anywhere in the codebase.**
+
+**Description:** SQLite by default does NOT enforce foreign key constraints. `PRAGMA foreign_keys = ON` must be set per-connection. This is missing entirely from the engine configuration, connection setup, and `init_db()`. All FK-level `ondelete="CASCADE"` definitions become dead letter — deleting a `Case` does NOT cascade-delete related records. The relationship-level `cascade="all, delete-orphan"` relies on SQLAlchemy loading the related objects first, which is unreliable for bulk operations.
+
+**Impact:** Orphaned records accumulate in `case_documents`, `case_deadlines`, `attachments`, `case_timeline`, `case_notes`, `anonymized_share_tokens`, `case_comments`, `case_presence`, `audit_events`, `knowledge_invalidations`, `case_embeddings`, `case_issues`, `case_arguments`, `precedent_matches`, `user_feedback`, and `notification_logs` tables when a parent `Case` or `User` is deleted. Data integrity violation: referential integrity is completely absent for SQLite environments.
+
+**Exploit/Trigger:** Deploy with SQLite (default for local dev/testing). Delete a user or case. All related records become orphans.
+
+**Severity:** HIGH — Systematic referential integrity violation across the entire database schema. Data retention and GDPR compliance are compromised.
+
+---
+
+## BUG 9 — HIGH: `reserve_notification` and `reserve_idempotency_key` roll back caller's entire transaction
+
+**File:** `db/crud/notifications.py:139-151` and `database.py:390-403,432-469`
+**Type:** Transaction scope corruption → silent data loss
+
+```python
+# db/crud/notifications.py:139-151
+def reserve_notification(...):
+    try:
+        db.add(log)
+        db.commit()
+        return log, True
+    except IntegrityError:
+        db.rollback()   # <-- ROLLBACKS CALLER'S TRANSACTION!
+        existing = db.query(NotificationLog).filter(...).first()
+        return existing, False
+```
+
+**Description:** When a unique constraint violation occurs (concurrent duplicate notification reservation), the `except IntegrityError: db.rollback()` rolls back the **entire database session transaction**, not just the failed INSERT. Any pending changes the caller made before calling `reserve_notification` are silently discarded.
+
+**Impact:** If a caller does:
+```python
+doc = create_case_document(db, ...)
+reserve_notification(db, ...)  # fails with IntegrityError due to race
+```
+→ `db.rollback()` in `reserve_notification` also rolls back the `create_case_document` insert! The case document is silently lost.
+
+**Exploit/Trigger:** Race condition where two concurrent workers try to send the same notification. One wins, the other's IntegrityError rolls back all caller-side changes.
+
+**Severity:** HIGH — Transaction corruption pattern replicated in 3 separate functions across the codebase.
+
+---
+
+## BUG 10 — HIGH: Bulk UPDATE in `archive_expired_cases` bypasses optimistic locking
+
+**File:** `db/retention_service.py:72-76`
+**Type:** Stale write via skipped version_id_col
+
+```python
+if ids:
+    db.query(Case).filter(Case.id.in_(ids)).update(
+        {Case.status: CaseStatus.CLOSED}, synchronize_session="fetch"
+    )
+    db.commit()
+```
+
+**Description:** The `Case` model uses SQLAlchemy's `version_id_col` for optimistic concurrency control (`cases.py:81,88-90`). This mechanism automatically adds `WHERE version = :old_version` to individual UPDATE statements and increments the version. Bulk `update()` bypasses this entirely — no version check is performed and no version increment occurs.
+
+**Impact:** A concurrent write to a Case that is being archived can silently overwrite the user's changes. For example:
+1. User edits case title → version checked, OK
+2. Retention job bulk-sets status to CLOSED on same case → no version check
+3. User's edit is saved → version check succeeds because version was never incremented in step 2
+4. But the status was reverted to ACTIVE by the user → the bulk CLOSED status is silently overwritten
+
+**Exploit/Trigger:** Run retention archival while a user is actively editing their case. User's changes survive but the archival status is lost.
+
+**Severity:** HIGH — Optimistic locking guarantee is violated, enabling stale writes and data races.
+
+---
+
+## BUG 11 — HIGH: `archive_expired_cases` deletes wrong cases (logic error in status filter)
+
+**File:** `db/retention_service.py:55-79`
+**Type:** Wrong WHERE clause → deletes wrong records
+
+```python
+def archive_expired_cases(db, cutoff_days, dry_run=False):
+    ...
+    active_statuses = {CaseStatus.ACTIVE, CaseStatus.PENDING, CaseStatus.APPEALED}
+    q = (
+        db.query(Case)
+        .filter(Case.status.notin_(active_statuses))   # <-- INVERTED LOGIC
+        .filter(Case.updated_at < cutoff)
+    )
+```
+
+**Description:** The variable is named `active_statuses` and contains statuses considered "active" (`ACTIVE`, `PENDING`, `APPEALED`). The filter uses `.notin_(active_statuses)` — it selects cases whose status is NOT in this set. This means cases that are **already** `CLOSED` (the only non-active status) are selected for archival. But the UPDATE then sets status to... `CLOSED` (line 75: `{Case.status: CaseStatus.CLOSED}`). The function should be selecting `ACTIVE/PENDING/APPEALED` cases older than the cutoff and archiving them, but instead it selects already-closed cases and redundantly re-sets their status to CLOSED.
+
+**Impact:** The filter logic is inverted. Active cases that should be archived are skipped. Already-closed cases are redundantly touched each run. The archive function is completely ineffective at its intended purpose.
+
+**Exploit/Trigger:** Run the retention archival job. It archives zero active cases and wastes cycles on already-closed cases.
+
+**Severity:** HIGH — Retention archival for cases is entirely non-functional. Expired data is never transitioned to archived state.
+
+---
+
+## BUG 12 — MEDIUM: `Report.case_id` has no FK — string column, no referential integrity
+
+**File:** `db/models/reports.py:31-32` and `db/crud/reports.py:45`
+**Type:** No foreign key → data integrity violation
+
+```python
+class Report(Base):
+    __tablename__ = "reports"
+    ...
+    case_id = Column(String(255), nullable=False)   # <-- No ForeignKey!
+```
+
+**While every other model uses:** `Column(Integer, ForeignKey("cases.id", ...))`
+
+**Description:** `Report.case_id` is a plain `String(255)` with no `ForeignKey` constraint. It can reference non-existent cases, contain arbitrary string values, and cannot enforce referential integrity. Reports can be created with `case_id=None` (the function signature says `int` but Rust-style type narrowing doesn't apply — the column happily accepts `None` or strings). The `create_report` function passes it as `case_id: int` but writes it to a `String` column — type coercion is database-dependent.
+
+**Impact:** Database-level referential integrity is missing for reports. Queries joining reports to cases produce incorrect results. Reports can be orphaned. Type mismatch between Python `int` and DB `String` causes hidden type coercion on every write.
+
+**Exploit/Trigger:** Create a report with a missing case — no error is raised. The report points to nothing.
+
+**Severity:** MEDIUM — Referential integrity gap, potential data corruption in reporting.
+
+---
+
+## BUG 13 — MEDIUM: `fetch_next_deadlines_per_case` may return multiple deadlines per case
+
+**File:** `db/repositories/case_queries.py:74-103`
+**Type:** Non-deterministic results on date ties
+
+```python
+subquery = (
+    db.query(
+        CaseDeadline.case_id,
+        func.min(CaseDeadline.deadline_date).label("next_deadline_date"),
+    )
+    ...
+    .group_by(CaseDeadline.case_id)
+    .subquery()
+)
+
+next_deadlines = db.query(CaseDeadline).join(
+    subquery,
+    and_(
+        CaseDeadline.case_id == subquery.c.case_id,
+        CaseDeadline.deadline_date == subquery.c.next_deadline_date,
+    ),
+).all()
+```
+
+**Description:** If two deadlines for the same case share the exact same `deadline_date` (same day, different times), `func.min()` returns the earlier one, but the join on `deadline_date == next_deadline_date` matches BOTH rows. The function's contract says it returns "the next upcoming deadline" (singular) per case, but the join can return multiple.
+
+**Impact:** Downstream code that expects exactly one `CaseDeadline` per case may see duplicates, causing UI rendering issues or incorrect deadline counts.
+
+**Exploit/Trigger:** Create two deadlines for the same case with the same date → `fetch_next_deadlines_per_case` returns both.
+
+**Severity:** MEDIUM — Non-deterministic behavior under edge condition.
+
+---
+
+## BUG 14 — MEDIUM: `set_idempotency_response` race when row doesn't exist
+
+**File:** `database.py:406-416`
+**Type:** TOCTOU race on idempotency key update
+
+```python
+def set_idempotency_response(db, key, ...):
+    ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).with_for_update(read=True).first()
+    if not ik:
+        ik = IdempotencyKey(key=key, method="POST", path="unknown")
+    ...
+```
+
+**Description:** The `with_for_update(read=True)` only locks an existing row. If `reserve_idempotency_key` was NOT called first (e.g., if a caller skips it), two concurrent `set_idempotency_response` calls both get `None`, both create a new `IdempotencyKey` object, and both try to commit. The second commit hits a unique constraint violation or silently overwrites. Note: this is contingent on `IdempotencyKey` model existing (Bug 2), which it doesn't, but if fixed, this race remains.
+
+**Impact:** Idempotency guarantee broken under concurrent requests when the reservation step is bypassed.
+
+**Exploit/Trigger:** Send concurrent requests with the same idempotency key for a path that doesn't call `reserve_idempotency_key` first.
+
+**Severity:** MEDIUM — Idempotency violation under concurrency, but requires the reservation step to be skipped.
+
+---
+
+## BUG 15 — MEDIUM: `update_notification_result` creates log with `recipient="unknown"` as fallback
+
+**File:** `db/crud/notifications.py:183-191`
+
+```python
+return get_or_create_notification_log(
+    db=db,
+    ...
+    recipient="unknown",   # <-- Hardcoded placeholder
+    ...
+)[0]
+```
+
+**And `database.py:506-517`:**
+```python
+return log_notification(
+    db=db,
+    ...
+    recipient="unknown",
+    ...
+)
+```
+
+**Description:** When `update_notification_result` doesn't find an existing notification log (the race condition path), it creates a new log with `recipient="unknown"`. This hardcoded string is stored in the database as the actual recipient. If the notification was an email, `recipient="unknown"` means the delivery address is lost forever.
+
+**Impact:** Notification delivery records with missing recipient information. Compliance issue for audit trails that need to track exactly where notifications were sent.
+
+**Severity:** MEDIUM — Audit trail completeness issue for notification delivery.
+
+---
+
+## BUG 16 — MEDIUM: `purge_expired_notifications` uses `sent_at` instead of `created_at`
+
+**File:** `db/retention_service.py:162`
+
+```python
+q = db.query(NotificationLog).filter(NotificationLog.sent_at < cutoff)
+```
+
+**Description:** `sent_at` is `NULL` for notifications that were never sent (still `PENDING` or `FAILED`). The SQL comparison `NULL < cutoff` evaluates to `false` (actually NULL in SQL). Notifications with `sent_at IS NULL` are never purged, even if they're years old.
+
+**Impact:** `PENDING`/`FAILED` notification logs with `sent_at IS NULL` accumulate indefinitely, never subject to retention. The function should use `created_at` or `COALESCE(sent_at, created_at)`.
+
+**Severity:** MEDIUM — Retention policy enforcement gap for unsent notifications.
+
+---
+
+## BUG 17 — LOW: `retention_service.py:180` minutes vs days confusion
+
+**File:** `db/retention_service.py:176,180`
+
+```python
+def purge_expired_otl_tokens(db, cutoff_days, dry_run=False):
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=cutoff_days)
+```
+
+**Description:** Parameter is named `cutoff_days` but the implementation uses `timedelta(minutes=...)`. This is likely a copy-paste error. For the default call with `cutoff_days=7`, it purges tokens older than 7 minutes instead of 7 days. Combined with the `OTPToken` model existing bug, this function is doubly broken.
+
+**Severity:** LOW (already broken by Bug 3)
+
+---
