@@ -307,6 +307,9 @@ def verify_audit_chain(start_id: int = 1, end_id: int | None = None) -> dict:
                 break
             prev_hash = entry.integrity_hash
 
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
