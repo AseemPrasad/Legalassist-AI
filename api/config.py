@@ -37,8 +37,14 @@ class APISettings(BaseSettings):
     RATE_LIMIT_REQUESTS: int = 100  # requests
     RATE_LIMIT_WINDOW: int = 60  # seconds
     RATE_LIMIT_BURST: int = 200  # max burst
+<<<<<<< fix/profduction
     AUTH_RATE_LIMIT_REQUESTS: int = 5  # auth-specific limit
     AUTH_RATE_LIMIT_WINDOW: int = 60  # auth-specific window (seconds)
+=======
+    RATE_LIMIT_ABUSE_THRESHOLD: int = 3  # consecutive denials before a temporary block
+    RATE_LIMIT_ABUSE_WINDOW: int = 60  # seconds for abuse counter window
+    RATE_LIMIT_ABUSE_BLOCK_SECONDS: int = 300  # block duration after abuse threshold
+>>>>>>> main
     
     # Authentication
     AUTH_ENABLED: bool = True

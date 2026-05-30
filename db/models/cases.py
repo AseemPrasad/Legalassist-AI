@@ -35,6 +35,13 @@ class DocumentType(str, enum.Enum):
     OTHER = "Other"
 
 
+class DeadlineStatus(str, enum.Enum):
+    """Status of a case deadline"""
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    OVERDUE = "overdue"
+
+
 class CaseDeadline(Base):
     __tablename__ = "case_deadlines"
 
@@ -48,6 +55,7 @@ class CaseDeadline(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
     is_completed = Column(Boolean, default=False, index=True)
+    status = Column(String(50), default="active", nullable=False, index=True)
 
     case = relationship("Case", back_populates="deadlines")
     notifications = relationship("db.models.notifications.NotificationLog", back_populates="deadline")

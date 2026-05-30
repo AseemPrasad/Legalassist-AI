@@ -162,3 +162,84 @@ async def sendgrid_delivery_webhook(request: Request, db: Session = Depends(get_
     return {"ok": True, "events": processed, "updated": updated}
 
 
+# ============================================================================
+# User Notification Preferences Router
+# ============================================================================
+
+from api.auth import get_current_user, CurrentUser
+from api.models import UserPreferenceUpdate, UserPreferenceResponse
+from db.notifications_service import create_or_update_user_preference
+from db.models.notifications import UserPreference, NotificationChannel
+
+pref_router = APIRouter(prefix="/api/v1/notifications", tags=["notifications"])
+
+@pref_router.get("/preferences", response_model=UserPreferenceResponse)
+async def get_user_preferences(
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db_rls),
+) -> UserPreferenceResponse:
+    """Get the current authenticated user's notification preferences."""
+    pref = db.query(UserPreference).filter(UserPreference.user_id == current_user.user_id).first()
+    if not pref:
+        # Create default preferences
+        pref = create_or_update_user_preference(
+            db=db,
+            user_id=current_user.user_id,
+            email=current_user.email,
+        )
+    
+    return UserPreferenceResponse(
+        user_id=pref.user_id,
+        email=pref.email,
+        phone_number=pref.phone_number,
+        notification_channel=pref.notification_channel.value if hasattr(pref.notification_channel, "value") else str(pref.notification_channel),
+        timezone=pref.timezone,
+        reminder_thresholds=pref.get_reminder_thresholds(),
+        holiday_aware_reminders=pref.holiday_aware_reminders,
+        holiday_country=pref.holiday_country,
+        holiday_region=pref.holiday_region,
+        holiday_calendar_json=pref.holiday_calendar_json,
+        updated_at=pref.updated_at,
+    )
+
+@pref_router.put("/preferences", response_model=UserPreferenceResponse)
+async def update_user_preferences(
+    payload: UserPreferenceUpdate,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db_rls),
+) -> UserPreferenceResponse:
+    """Create or update the current authenticated user's notification preferences."""
+    try:
+        channel_enum = NotificationChannel(payload.notification_channel.lower())
+    except ValueError:
+        channel_enum = NotificationChannel.BOTH
+
+    pref = create_or_update_user_preference(
+        db=db,
+        user_id=current_user.user_id,
+        email=payload.email,
+        phone_number=payload.phone_number,
+        notification_channel=channel_enum,
+        timezone=payload.timezone,
+        holiday_aware_reminders=payload.holiday_aware_reminders,
+        holiday_country=payload.holiday_country,
+        holiday_region=payload.holiday_region,
+        holiday_calendar_json=payload.holiday_calendar_json,
+        reminder_thresholds=payload.reminder_thresholds,
+    )
+
+    return UserPreferenceResponse(
+        user_id=pref.user_id,
+        email=pref.email,
+        phone_number=pref.phone_number,
+        notification_channel=pref.notification_channel.value if hasattr(pref.notification_channel, "value") else str(pref.notification_channel),
+        timezone=pref.timezone,
+        reminder_thresholds=pref.get_reminder_thresholds(),
+        holiday_aware_reminders=pref.holiday_aware_reminders,
+        holiday_country=pref.holiday_country,
+        holiday_region=pref.holiday_region,
+        holiday_calendar_json=pref.holiday_calendar_json,
+        updated_at=pref.updated_at,
+    )
+
+

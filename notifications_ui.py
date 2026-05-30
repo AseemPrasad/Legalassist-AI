@@ -141,36 +141,37 @@ def page_notification_preferences():
 
         st.subheader("Reminder Schedule")
         st.markdown(
-            "Your reminders will be sent at **8 AM** in your local timezone on these days:"
+            "Your reminders will be sent at **8 AM** in your local timezone on these days. "
+            "Enter custom threshold days separated by commas (e.g., `45, 15, 7`):"
         )
 
-        col1, col2 = st.columns(2)
-        with col1:
-            notify_30 = st.checkbox(
-                "30 days before deadline",
-                value=user_pref.notify_30_days if user_pref else True,
-                key="notify_30",
-            )
-            notify_3 = st.checkbox(
-                "3 days before deadline",
-                value=user_pref.notify_3_days if user_pref else True,
-                key="notify_3",
-            )
+        default_thresholds = "30, 10, 3, 1"
+        if user_pref:
+            thresholds_list = user_pref.get_reminder_thresholds()
+            default_thresholds = ", ".join(str(t) for t in thresholds_list)
 
-        with col2:
-            notify_10 = st.checkbox(
-                "10 days before deadline",
-                value=user_pref.notify_10_days if user_pref else True,
-                key="notify_10",
-            )
-            notify_1 = st.checkbox(
-                "1 day before deadline",
-                value=user_pref.notify_1_day if user_pref else True,
-                key="notify_1",
-            )
+        reminder_days_input = st.text_input(
+            "Reminder Days",
+            value=default_thresholds,
+            key="reminder_days_input",
+            help="Comma-separated integers, e.g., 45, 15, 7",
+        )
 
         # Save preferences
         if st.button("💾 Save Preferences", use_container_width=True):
+            try:
+                thresholds_parsed = [
+                    int(x.strip())
+                    for x in reminder_days_input.split(",")
+                    if x.strip()
+                ]
+                if not all(t > 0 for t in thresholds_parsed):
+                    st.error("❌ All reminder days must be positive integers.")
+                    st.stop()
+            except ValueError:
+                st.error("❌ Please enter a valid comma-separated list of numbers (e.g., 45, 15, 7).")
+                st.stop()
+
             try:
                 create_or_update_user_preference(
                     db=db,
@@ -179,22 +180,12 @@ def page_notification_preferences():
                     phone_number=phone_input if phone_input else None,
                     notification_channel=channel_options[selected_channel],
                     timezone=timezone,
+                    reminder_thresholds=thresholds_parsed,
                 )
-
-                # Update the preference object to reflect new values
-                user_pref = db.query(UserPreference).filter(
-                    UserPreference.user_id == int(user_id)
-                ).first()
-                
-                # Update boolean fields
-                user_pref.notify_30_days = notify_30
-                user_pref.notify_10_days = notify_10
-                user_pref.notify_3_days = notify_3
-                user_pref.notify_1_day = notify_1
-                db.commit()
 
                 st.success("✅ Preferences saved successfully!")
                 logger.info(f"Preferences updated for user {user_id}")
+                st.rerun()
             except Exception as e:
                 st.error(f"❌ Error saving preferences: {str(e)}")
                 logger.error(f"Error saving preferences: {str(e)}")
@@ -289,12 +280,9 @@ def page_notification_preferences():
         """
         ### How Deadline Reminders Work
         
-        - **30-day reminder**: Initial alert to prepare for the deadline
-        - **10-day reminder**: Action required soon
-        - **3-day reminder**: Critical - urgent action needed
-        - **1-day reminder**: Last chance warning
+        - **Custom reminder schedule**: Reminders are sent dynamically based on your configured threshold days.
         
-        All reminders are sent at **8 AM** in your timezone to ensure you see them
+        All reminders are sent at **8 AM** in your timezone to ensure you see them.
         """
     )
 

@@ -161,6 +161,8 @@ def update_notification_result(
     message_id: Optional[str] = None,
     error_message: Optional[str] = None,
     message_preview: Optional[str] = None,
+    recipient: Optional[str] = None,
+    attempted_channels: Optional[List[str]] = None,
 ) -> NotificationLog:
     """Upsert a notification log after a delivery attempt."""
     existing = db.query(NotificationLog).filter(
@@ -171,6 +173,10 @@ def update_notification_result(
 
     if existing:
         existing.status = status
+        if recipient is not None:
+            existing.recipient = recipient
+        if attempted_channels is not None:
+            existing.attempted_channels = attempted_channels
         existing.message_id = message_id or existing.message_id
         existing.error_message = error_message or existing.error_message
         existing.message_preview = message_preview or existing.message_preview
@@ -186,7 +192,7 @@ def update_notification_result(
         deadline_id=deadline_id,
         user_id=user_id,
         channel=channel,
-        recipient="unknown",
+        recipient=recipient or "unknown",
         days_before=days_before,
     )[0]
 

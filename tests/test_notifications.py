@@ -606,6 +606,62 @@ class TestNotificationService:
         # Verify the email contains the case information
         assert "Appeal Filing" in result.recipient or result.message_id is not None
 
+    def test_send_with_fallback_uses_email_when_sms_fails(self, test_db):
+        """Test fallback from SMS to email and log the attempted channel chain."""
+        case = Case(
+            user_id=1,
+            case_number="CASE-FALLBACK",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Fallback Case",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
+        deadline = create_case_deadline(
+            test_db,
+            1,
+            case.id,
+            "Fallback Case",
+            datetime.now(timezone.utc) + timedelta(days=10),
+            "appeal",
+        )
+
+        pref = create_or_update_user_preference(
+            test_db,
+            1,
+            "user@example.com",
+            phone_number="+91-9876543210",
+            notification_channel=NotificationChannel.BOTH,
+        )
+
+        sms_client = Mock()
+        sms_client.send_sms.return_value = (False, None, "Twilio is down")
+        email_client = Mock()
+        email_client.send_email.return_value = (True, "email_123", None)
+
+        service = NotificationService(sms_client=sms_client, email_client=email_client)
+        result = service.send_with_fallback(test_db, deadline, pref, 10)
+
+        assert result.success is True
+        assert result.channel == NotificationChannel.EMAIL
+        assert result.attempted_channels == ["sms", "email"]
+        assert result.message_id == "email_123"
+
+        log = test_db.query(NotificationLog).filter(
+            NotificationLog.deadline_id == deadline.id,
+            NotificationLog.days_before == 10,
+            NotificationLog.channel == NotificationChannel.EMAIL,
+        ).first()
+
+        assert log is not None
+        assert log.status == NotificationStatus.SENT
+        assert log.attempted_channels == ["sms", "email"]
+        assert log.message_id == "email_123"
+        assert log.recipient == "user@example.com"
+
     def test_mock_mode_sms(self, test_db):
         """Test SMS in mock mode (no credentials)"""
         # Owned case required for ownership validation
@@ -803,7 +859,7 @@ class TestScheduler:
         # Mock the notification service to count calls
         with patch("scheduler.notification_service") as mock_service, \
              patch("scheduler.SessionLocal", return_value=test_db):
-            mock_service.send_reminders.return_value = []
+            mock_service.send_with_fallback.return_value = Mock(success=True)
             check_reminders_sync(target_days=30, db=test_db)
 
     def test_sync_reminder_respects_preferences(self, test_db):

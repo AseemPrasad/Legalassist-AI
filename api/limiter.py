@@ -1,10 +1,11 @@
-"""Redis-backed sliding-window rate limiting for the API.
+"""Redis-backed rate limiting for the API.
 
 This module provides:
-- strict identifier resolution from verified JWTs or IPs,
-- atomic Redis Lua sliding-window enforcement,
+- strict identifier resolution from verified JWTs, API keys, or IPs,
+- atomic Redis Lua token-bucket enforcement with burst smoothing,
 - per-path limit presets for sensitive endpoints,
-- fail-closed behavior on Redis/Lua errors for protected API routes.
+- fail-closed behavior on Redis/Lua errors for protected API routes,
+- Redis-backed abuse counters and admin reporting hooks.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import hashlib
 import secrets
 import time
 import uuid
+import math
 from dataclasses import dataclass
 from typing import Optional, Callable
 
@@ -28,24 +30,74 @@ logger = structlog.get_logger(__name__)
 verify_token = None
 
 
-SLIDING_WINDOW_SCRIPT = """
+TOKEN_BUCKET_SCRIPT = """
 local key = KEYS[1]
+local abuse_key = KEYS[2]
+local block_key = KEYS[3]
+local stats_key = KEYS[4]
+
 local now = tonumber(ARGV[1])
-local window = tonumber(ARGV[2])
-local limit = tonumber(ARGV[3])
-local member = ARGV[4]
-local clear_before = now - window
+local refill_rate = tonumber(ARGV[2])
+local capacity = tonumber(ARGV[3])
+local cost = tonumber(ARGV[4])
+local abuse_window = tonumber(ARGV[5])
+local abuse_threshold = tonumber(ARGV[6])
+local block_ttl = tonumber(ARGV[7])
+local identifier = ARGV[8]
 
-redis.call('ZREMRANGEBYSCORE', key, 0, clear_before)
-local current_count = redis.call('ZCARD', key)
-
-if current_count < limit then
-    redis.call('ZADD', key, now, member)
-    redis.call('PEXPIRE', key, window)
-    return {1, current_count + 1}
-else
-    return {0, current_count}
+local blocked_ttl = redis.call('PTTL', block_key)
+if blocked_ttl and blocked_ttl > 0 then
+    local state = redis.call('HMGET', key, 'tokens', 'ts')
+    local tokens = tonumber(state[1]) or capacity
+    return {0, blocked_ttl, math.floor(tokens), 0, 1, 0}
 end
+
+local state = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(state[1])
+local ts = tonumber(state[2])
+
+if tokens == nil then
+    tokens = capacity
+end
+if ts == nil then
+    ts = now
+end
+
+local delta = math.max(0, now - ts)
+tokens = math.min(capacity, tokens + (delta * refill_rate))
+
+local allowed = 0
+local retry_after = 0
+if tokens >= cost then
+    tokens = tokens - cost
+    allowed = 1
+else
+    retry_after = math.ceil((cost - tokens) / refill_rate)
+end
+
+redis.call('HMSET', key, 'tokens', tokens, 'ts', now)
+redis.call('PEXPIRE', key, math.max(abuse_window, math.ceil((capacity / refill_rate) + 1000)))
+
+local violations = tonumber(redis.call('GET', abuse_key) or '0')
+local block_active = 0
+if allowed == 0 then
+    violations = redis.call('INCR', abuse_key)
+    redis.call('PEXPIRE', abuse_key, abuse_window)
+    if identifier ~= '' then
+        redis.call('ZINCRBY', stats_key, 1, identifier)
+        redis.call('PEXPIRE', stats_key, math.max(abuse_window * 10, block_ttl))
+    end
+    if violations >= abuse_threshold then
+        redis.call('SET', block_key, tostring(violations), 'PX', block_ttl)
+        block_active = 1
+    end
+end
+
+if blocked_ttl and blocked_ttl > 0 then
+    block_active = 1
+end
+
+return {allowed, retry_after, math.floor(tokens), violations, block_active, math.max(0, redis.call('PTTL', block_key))}
 """
 
 
@@ -94,6 +146,10 @@ class DistributedRateLimiter:
         self._script = None
         self.enabled = settings.RATE_LIMIT_ENABLED
         self.redis_url = settings.REDIS_URL
+        self.default_burst = max(1, int(getattr(settings, "RATE_LIMIT_BURST", settings.RATE_LIMIT_REQUESTS)))
+        self.abuse_threshold = max(2, int(getattr(settings, "RATE_LIMIT_ABUSE_THRESHOLD", 3)))
+        self.abuse_window = max(10, int(getattr(settings, "RATE_LIMIT_ABUSE_WINDOW", max(settings.RATE_LIMIT_WINDOW, 60))))
+        self.abuse_block_seconds = max(30, int(getattr(settings, "RATE_LIMIT_ABUSE_BLOCK_SECONDS", 300)))
 
     async def get_redis(self) -> redis.Redis:
         if self._redis is None:
@@ -102,12 +158,55 @@ class DistributedRateLimiter:
                 encoding="utf-8",
                 decode_responses=True,
             )
-            self._script = self._redis.register_script(SLIDING_WINDOW_SCRIPT)
+            self._script = self._redis.register_script(TOKEN_BUCKET_SCRIPT)
         return self._redis
 
     def _generate_key(self, identifier: str, endpoint: str) -> str:
         endpoint_hash = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:12]
         return f"ratelimit:v3:{endpoint_hash}:{identifier}"
+
+    def _abuse_key(self, identifier: str, endpoint: str) -> str:
+        endpoint_hash = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:12]
+        return f"ratelimit:abuse:v1:{endpoint_hash}:{identifier}"
+
+    def _block_key(self, identifier: str, endpoint: str) -> str:
+        endpoint_hash = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:12]
+        return f"ratelimit:block:v1:{endpoint_hash}:{identifier}"
+
+    def _stats_key(self, endpoint: str) -> str:
+        endpoint_hash = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:12]
+        return f"ratelimit:abuse:stats:v1:{endpoint_hash}"
+
+    def _burst_capacity(self, limit: int) -> int:
+        return max(limit, self.default_burst)
+
+    def _refill_rate(self, limit: int, window_seconds: int) -> float:
+        window_ms = max(1, window_seconds * 1000)
+        return float(limit) / float(window_ms)
+
+    def _api_key_identifier(self, request) -> Optional[str]:
+        api_key = request.headers.get(settings.API_KEY_HEADER) or request.headers.get("X-API-Key")
+        if not api_key:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header.removeprefix("Bearer ").strip()
+                if token.startswith("key_"):
+                    api_key = token
+        if not api_key or "." not in api_key:
+            return None
+        key_id = api_key.split(".", 1)[0].strip()
+        if not key_id:
+            return None
+        digest = hashlib.sha256(key_id.encode("utf-8")).hexdigest()[:24]
+        return f"api_key:{digest}"
+
+    async def _get_block_ttl(self, identifier: str, endpoint: str) -> int:
+        try:
+            client = await self.get_redis()
+            ttl = await client.pttl(self._block_key(identifier, endpoint))
+            return max(0, int(ttl))
+        except Exception:
+            return 0
 
     async def check_rate_limit(
         self,
@@ -123,14 +222,35 @@ class DistributedRateLimiter:
         try:
             await self.get_redis()
             key = self._generate_key(identifier, endpoint)
+            abuse_key = self._abuse_key(identifier, endpoint)
+            block_key = self._block_key(identifier, endpoint)
+            stats_key = self._stats_key(endpoint)
             now_ms = int(time.time() * 1000)
-            window_ms = window_seconds * 1000
-            member = request_id or secrets.token_hex(16)
-            result = await self._script(keys=[key], args=[now_ms, window_ms, limit, member])
+            capacity = self._burst_capacity(limit)
+            refill_rate = self._refill_rate(limit, window_seconds)
+            result = await self._script(
+                keys=[key, abuse_key, block_key, stats_key],
+                args=[
+                    now_ms,
+                    refill_rate,
+                    capacity,
+                    1,
+                    window_seconds * 1000,
+                    self.abuse_threshold,
+                    self.abuse_block_seconds * 1000,
+                    identifier,
+                ],
+            )
             allowed = bool(int(result[0]))
-            current_count = int(result[1])
+            retry_after_ms = int(float(result[1]))
+            remaining_tokens = int(float(result[2]))
+            abuse_count = int(float(result[3]))
+            block_active = bool(int(result[4]))
+            block_ttl_ms = int(float(result[5]))
+            current_count = max(0, capacity - remaining_tokens)
 
             if not allowed:
+                retry_after = max(1, int(math.ceil(max(retry_after_ms, block_ttl_ms) / 1000)))
                 logger.warning(
                     "rate_limit_triggered",
                     identifier=identifier,
@@ -138,6 +258,12 @@ class DistributedRateLimiter:
                     limit=limit,
                     window_seconds=window_seconds,
                     current_count=current_count,
+                    burst_capacity=capacity,
+                    remaining_tokens=remaining_tokens,
+                    abuse_count=abuse_count,
+                    blocked=block_active,
+                    retry_after=retry_after,
+                    request_id=request_id,
                 )
 
             return allowed
@@ -151,21 +277,55 @@ class DistributedRateLimiter:
             )
             return False
 
-    async def get_remaining_ttl(self, identifier: str, endpoint: str, window_seconds: int) -> int:
+    async def get_remaining_ttl(
+        self,
+        identifier: str,
+        endpoint: str,
+        window_seconds: int,
+        limit: Optional[int] = None,
+    ) -> int:
         try:
             client = await self.get_redis()
-            key = self._generate_key(identifier, endpoint)
-            oldest = await client.zrange(key, 0, 0, withscores=True)
-            if not oldest:
-                return window_seconds
+            block_ttl = await client.pttl(self._block_key(identifier, endpoint))
+            if block_ttl and int(block_ttl) > 0:
+                return max(1, int(math.ceil(int(block_ttl) / 1000)))
 
-            oldest_ts = oldest[0][1]
-            now_ms = int(time.time() * 1000)
-            window_ms = window_seconds * 1000
-            expires_in = int((oldest_ts + window_ms - now_ms) / 1000)
-            return max(1, expires_in)
+            key = self._generate_key(identifier, endpoint)
+            state = await client.hmget(key, "tokens", "ts")
+            effective_limit = int(limit or settings.RATE_LIMIT_REQUESTS)
+            tokens = float(state[0]) if state and state[0] is not None else float(self._burst_capacity(effective_limit))
+            if tokens >= 1:
+                return 1
+            refill_rate = self._refill_rate(effective_limit, window_seconds)
+            return max(1, int(math.ceil((1 - tokens) / refill_rate)))
         except Exception:
             return window_seconds
+
+    async def record_abuse_event(self, identifier: str, endpoint: str) -> int:
+        try:
+            client = await self.get_redis()
+            abuse_key = self._abuse_key(identifier, endpoint)
+            count = await client.incr(abuse_key)
+            await client.expire(abuse_key, self.abuse_window)
+            await client.zincrby(self._stats_key(endpoint), 1, identifier)
+            await client.expire(self._stats_key(endpoint), max(self.abuse_window * 10, self.abuse_block_seconds))
+            if count >= self.abuse_threshold:
+                await client.set(self._block_key(identifier, endpoint), str(count), px=self.abuse_block_seconds * 1000)
+            return int(count)
+        except Exception as exc:
+            logger.error("abuse_tracking_failed", identifier=identifier, endpoint=endpoint, error=str(exc))
+            return 0
+
+    async def get_abuse_report(self, endpoint: str, limit: int = 10) -> list[dict[str, object]]:
+        try:
+            client = await self.get_redis()
+            entries = await client.zrevrange(self._stats_key(endpoint), 0, max(0, limit - 1), withscores=True)
+            return [{"identifier": identifier, "events": int(score)} for identifier, score in entries]
+        except Exception:
+            return []
+
+    async def is_blocked(self, identifier: str, endpoint: str) -> bool:
+        return (await self._get_block_ttl(identifier, endpoint)) > 0
 
 
 limiter = DistributedRateLimiter()
@@ -176,7 +336,26 @@ def is_whitelisted(identifier: str) -> bool:
 
 
 def resolve_rate_limit_identifier(request: Request) -> str:
-    """Prefer verified JWT user_id; otherwise use source IP."""
+    """Return a per-identity rate-limit key.
+
+    Resolution order:
+    1. Valid JWT ``sub`` / ``user_id`` claim  → ``user:<id>``
+    2. Direct client IP from ASGI transport   → ``ip:<addr>``
+    3. ``X-Forwarded-For`` first hop          → ``ip:<addr>``
+       (only used when the direct client is a known trusted proxy)
+    4. Unique per-request token               → ``anon:<uuid>``
+
+    The function NEVER returns a shared literal such as ``"anonymous"``.
+    Returning a shared key would allow a single attacker to exhaust the
+    entire unauthenticated quota and lock out all other unauthenticated
+    users (login, OTP, password-reset) — a targeted DoS vector.
+    """
+    """Prefer API key identity, then verified JWT user_id; otherwise use source IP."""
+
+    api_key_identifier = limiter._api_key_identifier(request)
+    if api_key_identifier:
+        return api_key_identifier
+
     authorization = request.headers.get("Authorization")
     if authorization:
         token = authorization.removeprefix("Bearer ").strip()
@@ -193,18 +372,22 @@ def resolve_rate_limit_identifier(request: Request) -> str:
             except HTTPException:
                 pass
 
+    # Prefer the direct transport-layer IP — it cannot be spoofed by the client.
     if request.client and request.client.host:
         return f"ip:{request.client.host}"
 
-    # Use X-Forwarded-For as fallback if present (trusted proxy)
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        client_ip = forwarded.split(",")[0].strip()
-        if client_ip:
-            return f"ip:{client_ip}"
+    # Only trust X-Forwarded-For when the direct peer is a known proxy/load-balancer.
+    # Accepting it unconditionally would let any client forge their IP.
+    direct_host = request.client.host if request.client else None
+    if direct_host in WHITELIST:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            client_ip = forwarded.split(",")[0].strip()
+            if client_ip:
+                return f"ip:{client_ip}"
 
     # Last resort: unique per-request identifier so unknown clients
-    # do not share a single bucket that can be exhausted by one attacker.
+    # never share a single bucket that can be exhausted by one attacker.
     return f"anon:{uuid.uuid4().hex}"
 
 
@@ -240,6 +423,13 @@ def build_rate_limit_response(retry_after: int, message: str) -> JSONResponse:
 
 
 async def enforce_rate_limit(identifier: str, endpoint: str, limit: int, window_seconds: int) -> None:
+    if await limiter.is_blocked(identifier, endpoint):
+        retry_after = await limiter.get_remaining_ttl(identifier, endpoint, window_seconds)
+        raise RateLimitExceeded(
+            retry_after=retry_after,
+            message=f"Too many requests. Limit is {limit} per {window_seconds} seconds.",
+        )
+
     allowed = await limiter.check_rate_limit(
         identifier=identifier,
         endpoint=endpoint,
@@ -247,7 +437,7 @@ async def enforce_rate_limit(identifier: str, endpoint: str, limit: int, window_
         window_seconds=window_seconds,
     )
     if not allowed:
-        retry_after = await limiter.get_remaining_ttl(identifier, endpoint, window_seconds)
+        retry_after = await limiter.get_remaining_ttl(identifier, endpoint, window_seconds, limit=limit)
         raise RateLimitExceeded(
             retry_after=retry_after,
             message=f"Too many requests. Limit is {limit} per {window_seconds} seconds.",
@@ -272,6 +462,13 @@ def RateLimit(
             return True
 
         endpoint = request.url.path if scope == "endpoint" else "GLOBAL"
+        if await limiter.is_blocked(identifier, endpoint):
+            retry_after = await limiter.get_remaining_ttl(identifier, endpoint, limit_win, limit=limit_req)
+            raise RateLimitExceeded(
+                retry_after=retry_after,
+                message=f"Too many requests. Limit is {limit_req} per {limit_win} seconds.",
+            )
+
         allowed = await limiter.check_rate_limit(
             identifier=identifier,
             endpoint=endpoint,
@@ -281,7 +478,7 @@ def RateLimit(
         )
 
         if not allowed:
-            retry_after = await limiter.get_remaining_ttl(identifier, endpoint, limit_win)
+            retry_after = await limiter.get_remaining_ttl(identifier, endpoint, limit_win, limit=limit_req)
             raise RateLimitExceeded(
                 retry_after=retry_after,
                 message=f"Too many requests. Limit is {limit_req} per {limit_win} seconds.",
