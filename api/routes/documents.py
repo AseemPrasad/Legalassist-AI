@@ -28,7 +28,7 @@ from api.validation import (
     ValidationConfig,
     PayloadTooLargeError,
 )
-from api.job_registry import register_job_owner
+from api.job_registry import register_job_owner, get_job_owner
 from config import Config
 import structlog
 
@@ -234,6 +234,13 @@ async def cancel_analysis(
     current_user: CurrentUser = Depends(get_current_user)
 ) -> dict:
     """Cancel an analysis job"""
+    
+    owner_id = get_job_owner(job_id)
+    if owner_id is not None and owner_id != int(current_user.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to cancel this job",
+        )
     
     success = TaskStatus.revoke_task(job_id)
     
