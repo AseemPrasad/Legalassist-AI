@@ -1320,6 +1320,13 @@ def cleanup_revoked_tokens(self) -> Dict[str, Any]:
     """
     from database import SessionLocal, cleanup_expired_revoked_tokens
 
-        return data.get("result", {"status": "pending"})
+    db = SessionLocal()
+    try:
+        deleted = cleanup_expired_revoked_tokens(db)
+        return {"status": "completed", "deleted_tokens": deleted}
+    except Exception as e:
+        db.rollback()
+        logger.error("cleanup_revoked_tokens_failed", error=str(e))
+        return {"status": "failed", "error": str(e)}
     finally:
         db.close()
