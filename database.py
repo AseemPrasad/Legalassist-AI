@@ -552,13 +552,12 @@ def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> bool
 
 def get_user_stats(db: Session, user_id: int) -> dict:
     """Calculate high-level stats for a user dashboard"""
-    cases = get_user_cases(db, user_id)
+    cases = get_user_cases(db, user_id) or []
 
     active_count = len([c for c in cases if c.status == CaseStatus.ACTIVE])
     appealed_count = len([c for c in cases if c.status == CaseStatus.APPEALED])
     closed_count = len([c for c in cases if c.status == CaseStatus.CLOSED])
 
-    # Get upcoming deadlines count
     now = dt.datetime.now(dt.timezone.utc)
     upcoming_deadlines = db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
@@ -795,14 +794,15 @@ def reserve_idempotency_key(db: Session, key: str, method: str, path: str) -> Tu
 
     ik = IdempotencyKey(key=key, method=method, path=path, status=IdempotencyKeyStatus.IN_PROGRESS)
     try:
-        db.add(ik)
+        with db.begin_nested():
+            db.add(ik)
+    except IntegrityError:
+        existing = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
+        return existing, False
+    else:
         db.commit()
         db.refresh(ik)
         return ik, True
-    except IntegrityError:
-        db.rollback()
-        existing = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
-        return existing, False
 
 def set_idempotency_response(db: Session, key: str, status_code: int, headers: dict, body: str) -> IdempotencyKey:
     ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).with_for_update(read=True).first()

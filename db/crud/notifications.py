@@ -141,12 +141,9 @@ def reserve_notification(
         message_preview=sanitize_log_text(message_preview),
     )
     try:
-        db.add(log)
-        db.commit()
-        db.refresh(log)
-        return log, True
+        with db.begin_nested():
+            db.add(log)
     except IntegrityError:
-        db.rollback()
         existing = db.query(NotificationLog).filter(
             NotificationLog.user_id == user_id,
             NotificationLog.deadline_id == deadline_id,
@@ -154,6 +151,10 @@ def reserve_notification(
             NotificationLog.channel == channel,
         ).first()
         return existing, False
+    else:
+        db.commit()
+        db.refresh(log)
+        return log, True
 
 
 def update_notification_result(
