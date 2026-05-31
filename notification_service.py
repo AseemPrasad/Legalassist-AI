@@ -316,9 +316,7 @@ def send_email_task(
     
     logger.info("background_email_delivery_started", recipient=mask_recipient(to_email), task_id=self.request.id)
     
-    # Initialize the EmailClient. We do this inside the task to ensure 
-    # that any environment-specific configuration is picked up correctly 
-    # by the worker process.
+    # Initialize the EmailClient inside the task
     client = EmailClient()
     
     # Execute the actual network request to SendGrid
@@ -609,6 +607,7 @@ class NotificationService:
         
         return subject, html_content
 
+
     def send_sms_reminder(
         self,
         db: Session,
@@ -688,7 +687,10 @@ class NotificationService:
                 recipient=user_preference.phone_number,
                 message_id=message_id,
                 error=error,
+
             )
+        except Exception:
+            logger.exception("Failed to annotate reserved SMS with task id")
 
         # Offload SMS delivery to background task
         logger.info(
@@ -796,7 +798,7 @@ class NotificationService:
         )
 
         if not created:
-            logger.debug("Email reservation already exists; skipping send", deadline_id=deadline.id, days_before=days_left)
+
             return NotificationResult(success=False, channel=NotificationChannel.EMAIL, recipient=user_preference.email, error="Already sent")
 
         if not _should_use_celery(send_email_task):

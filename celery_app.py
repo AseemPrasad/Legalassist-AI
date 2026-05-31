@@ -147,7 +147,6 @@ settings = get_settings()
 logger = structlog.get_logger(__name__)
 
 
-
 def build_task_context_headers(
     request_id: Optional[str] = None,
     context_user_id: Optional[str] = None,
@@ -333,6 +332,7 @@ else:
 # This includes serialization settings, time limits, and worker behavior.
 
 
+
 celery_app.conf.update(
     # Data Serialization
     # Using JSON for interoperability and security
@@ -356,6 +356,7 @@ celery_app.conf.update(
     # Max tasks per child prevents memory leaks in long-lived worker processes
     worker_max_tasks_per_child=1000,
     # Beat Schedule Configuration for periodic tasks
+ain
 
 
 # ============================================================================
@@ -688,7 +689,6 @@ def analyze_document_task(
             "remedies_evidence_spans": remedies_data.get("evidence_spans", []),
             "analysis_time_seconds": analysis_time,
             "processed_at": datetime.now(timezone.utc).isoformat()
-
         }
 
         logger.info(
@@ -837,7 +837,7 @@ def generate_report_task(
             db_report.job_id = self.request.id
             db.commit()
 
-    # Idempotency: avoid regenerating same report repeatedly
+    # Anonymization / Idempotency: avoid regenerating same report repeatedly
     idemp = IdempotencyManager()
     idempotency_key = f"report:{user_id}:{case_id}:{report_type}:{format}:{privacy_profile}"
     if not idemp.acquire(idempotency_key, ttl=600):
@@ -1389,10 +1389,6 @@ def cleanup_old_tasks() -> Dict[str, str]:
     cleanup_fn = getattr(backend, "cleanup", None)
     backend_name = backend.__class__.__name__ if backend else "unknown"
 
-    if callable(cleanup_fn):
-        cleanup_fn()
-        logger.info("cleanup_old_tasks_completed", backend=backend_name)
-        return {"status": "completed", "action": "cleanup", "backend": backend_name}
 
     logger.info("cleanup_old_tasks_noop", backend=backend_name, reason="backend_cleanup_not_supported")
     return {"status": "noop", "action": "cleanup", "backend": backend_name}
