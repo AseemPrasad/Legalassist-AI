@@ -306,7 +306,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
         if otp_record.is_locked():
             locked_until = otp_record.locked_until
             if locked_until and locked_until.tzinfo is None:
-                locked_until = locked_until.astimezone(timezone.utc)
+                locked_until = locked_until.replace(tzinfo=timezone.utc)
             
             remaining_time = (locked_until - datetime.now(timezone.utc)).total_seconds() / 60
             logger.warning(
