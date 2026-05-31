@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from db.models import CaseDeadline, CaseTimeline
+from core.deadline_engine import get_deadline_first_action
 from .timeline_service import timeline_service
 
 
@@ -212,8 +213,10 @@ def auto_create_deadlines_from_remedies(
         user_id=user_id,
         case_id=case_id,
         case_title=case_title,
+        court_name=validated_remedies.appeal_court,
         deadline_date=deadline_date,
         deadline_type="appeal",
+        first_action=get_deadline_first_action("appeal"),
         description=f"Appeal deadline - {validated_remedies.appeal_court or 'Unknown court'}",
     )
     db.add(deadline)

@@ -462,15 +462,15 @@ def build_case_export_artifact(
     if format_name == "json":
         data = _json_bytes(payload)
         mime_type = "application/json"
-        file_name = f"{base_name}.json"
+        file_name = f"case_{case_id}_export.json"
     elif format_name == "pdf":
         data = _pdf_bytes(payload)
         mime_type = "application/pdf"
-        file_name = f"{base_name}.pdf"
+        file_name = f"case_{case_id}_export.pdf"
     else:
         data = _docx_bytes(payload)
         mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        file_name = f"{base_name}.docx"
+        file_name = f"case_{case_id}_export.docx"
 
     with SessionLocal() as db:
         record_audit_event(
@@ -575,6 +575,8 @@ def build_case_export_bundle(
                     )
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
 
+    case_label = "_".join(str(case_id) for case_id in unique_case_ids)
+
     with SessionLocal() as db:
         record_audit_event(
             db,
@@ -590,7 +592,6 @@ def build_case_export_bundle(
             },
         )
 
-    case_label = "_".join(str(case_id) for case_id in unique_case_ids)
     file_name = _safe_filename(f"case_export_bundle_{case_label}.zip")
     return ExportArtifact(
         file_name=file_name,

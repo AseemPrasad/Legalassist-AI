@@ -109,10 +109,13 @@ class RateLimitRule:
 
 RATE_LIMIT_RULES: list[tuple[str, str, str, RateLimitRule]] = [
     ("POST", "/api/v1/auth/token", "exact", RateLimitRule(5, 60)),
+    ("POST", "/api/v1/deadlines", "exact", RateLimitRule(20, 60)),
     ("POST", "/api/v1/reports/generate", "exact", RateLimitRule(5, 60)),
     ("GET", "/api/v1/reports/", "prefix", RateLimitRule(30, 60)),
     ("POST", "/api/v1/analyze/upload", "exact", RateLimitRule(5, 300)),
     ("POST", "/api/v1/analyze/document", "exact", RateLimitRule(10, 300)),
+    ("POST", "/api/v1/webhooks/twilio", "exact", RateLimitRule(60, 60)),
+    ("POST", "/api/v1/webhooks/sendgrid", "exact", RateLimitRule(60, 60)),
     ("GET", "/api/cases/search/text", "exact", RateLimitRule(30, 60)),
     ("GET", "/api/cases/", "prefix", RateLimitRule(20, 60)),
     ("GET", "/api/v1/analytics/", "prefix", RateLimitRule(20, 60)),

@@ -707,7 +707,7 @@ def parse_timeline(raw_text: str) -> List[Dict[str, str]]:
                     try: return datetime.strptime(date_str, fmt)
                     except: continue
                 return datetime(9999, 12, 31)
-            except:
+    except Exception:
                 return datetime(9999, 12, 31)
 
         return sorted(events, key=lambda x: parse_date(x.get('date')))
