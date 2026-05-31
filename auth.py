@@ -123,8 +123,8 @@ OTP_EXPIRY_MINUTES = Config.OTP_EXPIRY_MINUTES
 # OTP Verification Security - Failed Attempt Lockout
 OTP_MAX_FAILED_ATTEMPTS = int(os.getenv("OTP_MAX_FAILED_ATTEMPTS", "5"))  # Max failed verification attempts
 OTP_LOCKOUT_MINUTES = int(os.getenv("OTP_LOCKOUT_MINUTES", "15"))  # Lockout duration after max attempts
-OTP_REQUEST_RATE_LIMIT_MAX = int(os.getenv("OTP_REQUEST_RATE_LIMIT_MAX", str(Config.OTP_REQUEST_RATE_LIMIT_MAX)))
-OTP_REQUEST_RATE_LIMIT_HOURS = int(os.getenv("OTP_REQUEST_RATE_LIMIT_HOURS", str(Config.OTP_REQUEST_RATE_LIMIT_HOURS)))
+OTP_REQUEST_RATE_LIMIT_MAX = int(os.getenv("OTP_REQUEST_RATE_LIMIT_MAX", str(getattr(Config, "OTP_REQUEST_RATE_LIMIT_MAX", "5"))))
+OTP_REQUEST_RATE_LIMIT_HOURS = int(os.getenv("OTP_REQUEST_RATE_LIMIT_HOURS", str(getattr(Config, "OTP_REQUEST_RATE_LIMIT_HOURS", "1"))))
 
 
 OTP_HASH_ITERATIONS = 100000
