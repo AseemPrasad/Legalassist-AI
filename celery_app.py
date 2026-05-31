@@ -536,9 +536,9 @@ def analyze_document_task(
                     raise ValueError(f"Downloaded file too large: {len(response.content)} bytes exceeds limit of {ValidationConfig.MAX_TEXT_LENGTH} bytes.")
                 content_type = response.headers.get("Content-Type", "")
                 if "application/pdf" in content_type or file_url.lower().endswith(".pdf"):
-                    extracted_text = extract_text_from_pdf(io.BytesIO(response.content))
+                    extracted_text = extract_text_from_pdf(io.BytesIO(resp.content))
                 else:
-                    extracted_text = response.content.decode("utf-8", errors="ignore")
+                    extracted_text = resp.content.decode("utf-8", errors="ignore")
             elif file_path:
                 # Ownership verification: the user must own an Attachment for this path
                 session = SessionLocal()
