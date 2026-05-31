@@ -44,6 +44,7 @@ from database import (
     CaseDocument,
     Attachment,
     AnonymizedShareToken,
+    SimilarityFeedback,
     get_db,
 )
 from api.dependencies import get_db_rls
