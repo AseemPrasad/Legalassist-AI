@@ -49,6 +49,7 @@ class CaseDeadline(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
     case_title = Column(String(255), nullable=False)
+    court_name = Column(String(255), nullable=True)
     deadline_date = Column(DateTime(timezone=True), nullable=False, index=True)
     deadline_type = Column(String(255), nullable=False)
     first_action = Column(String(255), nullable=True)

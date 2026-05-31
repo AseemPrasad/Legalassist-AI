@@ -850,6 +850,7 @@ def add_manual_deadline(
     deadline_date: datetime,
     deadline_type: str,
     description: Optional[str] = None,
+    court_name: Optional[str] = None,
 ) -> Optional[CaseDeadline]:
     """Add a manual deadline to a case"""
     if deadline_date.tzinfo is None:
@@ -866,6 +867,7 @@ def add_manual_deadline(
             user_id=user_id,
             case_id=case_id,
             case_title=case_title,
+            court_name=court_name,
             deadline_date=deadline_date,
             deadline_type=deadline_type,
             first_action=get_deadline_first_action(deadline_type),

@@ -213,6 +213,7 @@ def auto_create_deadlines_from_remedies(
         user_id=user_id,
         case_id=case_id,
         case_title=case_title,
+        court_name=validated_remedies.appeal_court,
         deadline_date=deadline_date,
         deadline_type="appeal",
         first_action=get_deadline_first_action("appeal"),
