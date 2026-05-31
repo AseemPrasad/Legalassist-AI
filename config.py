@@ -110,6 +110,8 @@ class Config:
     JWT_EXPIRY_HOURS = _get_int_env("JWT_EXPIRY_HOURS", 7 * 24)
     OTP_EXPIRY_MINUTES = _get_int_env("OTP_EXPIRY_MINUTES", 10)
     OTP_MAX_ATTEMPTS = _get_int_env("OTP_MAX_ATTEMPTS", 3)
+    JWT_ISSUER = _get_val("JWT_ISSUER", "legalassist.ai")
+    JWT_AUDIENCE = _get_val("JWT_AUDIENCE", "legalassist-users")
     
     @classmethod
     def get_jwt_secret(cls):
@@ -146,10 +148,13 @@ class Config:
     # --- Notification Settings (SMS) ---
     TWILIO_ACCOUNT_SID = _get_val("TWILIO_ACCOUNT_SID", "")
     TWILIO_FROM_NUMBER = _get_val("TWILIO_FROM_NUMBER", "")
+    TWILIO_AUTH_TOKEN = None
 
     @classmethod
     def get_twilio_auth_token(cls) -> str:
         """Return the Twilio auth token, retrieved on demand to limit exposure."""
+        if cls.TWILIO_AUTH_TOKEN is not None:
+            return cls.TWILIO_AUTH_TOKEN
         # Prefer centralized secret manager
         try:
             from utils.secret_manager import get_secret
@@ -160,10 +165,13 @@ class Config:
 
     # --- Notification Settings (Email) ---
     SENDGRID_FROM_EMAIL = _get_val("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
+    SENDGRID_API_KEY = None
 
     @classmethod
     def get_sendgrid_api_key(cls) -> str:
         """Return the SendGrid API key, retrieved on demand to limit exposure."""
+        if cls.SENDGRID_API_KEY is not None:
+            return cls.SENDGRID_API_KEY
         try:
             from utils.secret_manager import get_secret
             val = get_secret("sendgrid_api_key") or _get_val("SENDGRID_API_KEY", "")
