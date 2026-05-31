@@ -29,48 +29,12 @@ from api.validation import (
     ValidationError,
     PayloadTooLargeError,
 )
+from database import init_db
 
 # Import routes
 from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech, document_verification, argument_strength, deadline_engine, efiling, notifications as notifications_webhooks, anonymized_cases
 
-settings = get_settings()
 logger = structlog.get_logger(__name__)
-
-
-# ============================================================================
-# Middleware Configuration
-# ============================================================================
-
-# Force explicit origins when credentials are enabled — never allow *
-_origins = settings.CORS_ORIGINS
-had_wildcard = False
-if isinstance(_origins, str):
-    _origins = [o.strip() for o in _origins.split(",") if o.strip()]
-if "*" in _origins:
-    had_wildcard = True
-    _origins = [o for o in _origins if o != "*"]
-if not _origins:
-    _origins = ["http://localhost:8080"]
-if had_wildcard:
-    logging.getLogger(__name__).warning(
-        "Removed wildcard '*' from CORS_ORIGINS because allow_credentials=True. "
-        "Explicit origins required: %s",
-        _origins,
-    )
-
-middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    ),
-    Middleware(
-        TrustedHostMiddleware,
-        allowed_hosts=["localhost", "127.0.0.1", "*.example.com"]
-    ),
-]
 
 
 # ============================================================================
@@ -79,7 +43,40 @@ middleware = [
 
 def create_app() -> FastAPI:
     """Create FastAPI application"""
-    
+
+    settings = get_settings()
+
+    # Force explicit origins when credentials are enabled — never allow *
+    _origins = settings.CORS_ORIGINS
+    had_wildcard = False
+    if isinstance(_origins, str):
+        _origins = [o.strip() for o in _origins.split(",") if o.strip()]
+    if "*" in _origins:
+        had_wildcard = True
+        _origins = [o for o in _origins if o != "*"]
+    if not _origins:
+        _origins = ["http://localhost:8080"]
+    if had_wildcard:
+        logging.getLogger(__name__).warning(
+            "Removed wildcard '*' from CORS_ORIGINS because allow_credentials=True. "
+            "Explicit origins required: %s",
+            _origins,
+        )
+
+    middleware = [
+        Middleware(
+            CORSMiddleware,
+            allow_origins=_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        ),
+        Middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=["localhost", "127.0.0.1", "*.example.com"]
+        ),
+    ]
+
     app = FastAPI(
         title=settings.API_TITLE,
         description="Comprehensive legal case analysis and deadline management API",
@@ -189,6 +186,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup_event():
         """Initialize on startup"""
+        init_db()
         initialize_observability_for_environment()
         # Attempt to instrument FastAPI with OpenTelemetry (if available)
         try:
@@ -283,7 +281,7 @@ app = create_app()
 # WebSocket Support (Optional)
 # ============================================================================
 
-if settings.ENABLE_WEBSOCKET:
+if get_settings().ENABLE_WEBSOCKET:
     from fastapi import WebSocket
     from api.jwt_auth import verify_token, InvalidTokenError
     from api.job_registry import get_job_owner
@@ -367,8 +365,8 @@ if __name__ == "__main__":
     
     uvicorn.run(
         "api.main:app",
-        host=settings.API_HOST,
-        port=settings.API_PORT,
-        workers=settings.API_WORKERS,
+        host=get_settings().API_HOST,
+        port=get_settings().API_PORT,
+        workers=get_settings().API_WORKERS,
         reload=True
     )
