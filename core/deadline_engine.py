@@ -12,6 +12,7 @@ def _parse_date(value: Any, tz: str) -> datetime:
         try:
             dt = datetime.fromisoformat(str(value))
         except ValueError:
+            # Fall back to space-separated SQLite datetimes for Python 3.10
             dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
 
     if dt.tzinfo is None:
@@ -41,6 +42,7 @@ _JURISDICTION_WEEKENDS = {
 
 
 def _is_weekend(dt: date, jurisdiction: Optional[str] = None) -> bool:
+    # Check jurisdiction-specific weekend days mapped in dictionary
     weekend_days = _JURISDICTION_WEEKENDS.get(jurisdiction.upper() if jurisdiction else "", {5, 6})
     return dt.weekday() in weekend_days
 
@@ -72,6 +74,7 @@ def calculate_deadline(
     if holidays:
         for h in holidays:
             try:
+                # Confirm holiday date matches ISO YYYY-MM-DD pattern
                 date.fromisoformat(h)
             except (ValueError, TypeError):
                 raise ValueError(
@@ -103,6 +106,7 @@ def calculate_deadline(
 
     # Normalize even when business_days==0 (e.g. start is a weekend/holiday)
     if int(business_days) == 0:
+        # Perform rolling forward adjustment for weekends and holidays
         current = _roll_forward(current)
 
     adjusted_for_weekends_holidays = current
@@ -127,6 +131,7 @@ def calculate_deadline(
     # Apply adjustments sequentially so each step normalizes independently.
     final = adjusted_for_weekends_holidays
     if jurisdiction_adjustment:
+        # Sequentially apply the filing cutoff adjustments first
         final += timedelta(days=jurisdiction_adjustment)
         final = _roll_forward(final)
     if emergency_extension_days:

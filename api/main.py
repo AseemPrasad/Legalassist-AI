@@ -29,48 +29,12 @@ from api.validation import (
     ValidationError,
     PayloadTooLargeError,
 )
+from database import init_db
 
 # Import routes
 from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech, document_verification, argument_strength, deadline_engine, efiling, notifications as notifications_webhooks, anonymized_cases
 
-settings = get_settings()
 logger = structlog.get_logger(__name__)
-
-
-# ============================================================================
-# Middleware Configuration
-# ============================================================================
-
-# Force explicit origins when credentials are enabled — never allow *
-_origins = settings.CORS_ORIGINS
-had_wildcard = False
-if isinstance(_origins, str):
-    _origins = [o.strip() for o in _origins.split(",") if o.strip()]
-if "*" in _origins:
-    had_wildcard = True
-    _origins = [o for o in _origins if o != "*"]
-if not _origins:
-    _origins = ["http://localhost:8080"]
-if had_wildcard:
-    logging.getLogger(__name__).warning(
-        "Removed wildcard '*' from CORS_ORIGINS because allow_credentials=True. "
-        "Explicit origins required: %s",
-        _origins,
-    )
-
-middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    ),
-    Middleware(
-        TrustedHostMiddleware,
-        allowed_hosts=["localhost", "127.0.0.1", "*.example.com"]
-    ),
-]
 
 
 # ============================================================================
@@ -79,7 +43,40 @@ middleware = [
 
 def create_app() -> FastAPI:
     """Create FastAPI application"""
-    
+
+    settings = get_settings()
+
+    # Force explicit origins when credentials are enabled — never allow *
+    _origins = settings.CORS_ORIGINS
+    had_wildcard = False
+    if isinstance(_origins, str):
+        _origins = [o.strip() for o in _origins.split(",") if o.strip()]
+    if "*" in _origins:
+        had_wildcard = True
+        _origins = [o for o in _origins if o != "*"]
+    if not _origins:
+        _origins = ["http://localhost:8080"]
+    if had_wildcard:
+        logging.getLogger(__name__).warning(
+            "Removed wildcard '*' from CORS_ORIGINS because allow_credentials=True. "
+            "Explicit origins required: %s",
+            _origins,
+        )
+
+    middleware = [
+        Middleware(
+            CORSMiddleware,
+            allow_origins=_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        ),
+        Middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=["localhost", "127.0.0.1", "*.example.com"]
+        ),
+    ]
+
     app = FastAPI(
         title=settings.API_TITLE,
         description="Comprehensive legal case analysis and deadline management API",
@@ -189,6 +186,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup_event():
         """Initialize on startup"""
+        init_db()
         initialize_observability_for_environment()
         # Attempt to instrument FastAPI with OpenTelemetry (if available)
         try:
@@ -272,18 +270,45 @@ def create_app() -> FastAPI:
         """Prometheus metrics endpoint."""
         return Response(content=get_metrics(), media_type="text/plain; version=0.0.4; charset=utf-8")
     
-    return app
+    # Conditional WebSocket endpoint
+    if settings.ENABLE_WEBSOCKET:
+        from fastapi import WebSocket
+        from api.jwt_auth import verify_token, InvalidTokenError
+        from api.job_registry import get_job_owner
 
+        @app.websocket("/ws/progress/{job_id}")
+        async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
+            """
+            WebSocket endpoint for real-time job progress
 
-# Create app instance
-app = create_app()
+            Usage:
+            ws = new WebSocket('ws://localhost:8000/ws/progress/job_id')
+            ws.onmessage = (event) => console.log(event.data)
+            """
+            auth_token = None
+            if "sec-websocket-protocol" in websocket.headers:
+                protocols = [p.strip() for p in websocket.headers["sec-websocket-protocol"].split(",")]
+                if "access_token" in protocols:
+                    idx = protocols.index("access_token")
+                    if idx + 1 < len(protocols):
+                        auth_token = protocols[idx + 1]
+            if not auth_token:
+                auth_token = websocket.query_params.get("token")
+            if not auth_token:
+                await websocket.close(code=4001, reason="Authentication required")
+                return
 
+            try:
+                payload = verify_token(auth_token)
+                user_id = payload.get("sub")
+                if not user_id:
+                    await websocket.close(code=4003, reason="Invalid token")
+                    return
+            except InvalidTokenError:
+                await websocket.close(code=4001, reason="Invalid or expired token")
+                return
 
-# ============================================================================
-# WebSocket Support (Optional)
-# ============================================================================
-
-if settings.ENABLE_WEBSOCKET:
+if get_settings().ENABLE_WEBSOCKET:
     from fastapi import WebSocket
     from api.jwt_auth import verify_token, InvalidTokenError
     from api.job_registry import get_job_owner
@@ -318,48 +343,57 @@ if settings.ENABLE_WEBSOCKET:
             if not user_id:
                 await websocket.close(code=4003, reason="Invalid token")
                 return
-        except InvalidTokenError:
-            await websocket.close(code=4001, reason="Invalid or expired token")
-            return
 
-        # Verify job ownership
-        owner = get_job_owner(job_id)
-        if owner is not None and str(owner) != str(user_id):
-            await websocket.close(code=1008, reason="Forbidden: job not owned by user")
-            return
+            await websocket.accept()
 
-        await websocket.accept()
-        
-        try:
-            from celery_app import TaskStatus
-            
-            while True:
-                import asyncio
-                
-                status_info = TaskStatus.get_task_status(job_id)
-                
-                await websocket.send_json({
-                    "job_id": job_id,
-                    "status": status_info["status"],
-                    "progress": status_info["info"].get("progress", 0),
-                    "timestamp": status_info["timestamp"]
-                })
-                
-                # Update every 2 seconds
-                await asyncio.sleep(2)
-                
-                # Stop if completed
-                if status_info["status"] in ["completed", "failed", "cancelled"]:
+            try:
+                from celery_app import TaskStatus
+
+                while True:
+                    import asyncio
+
+                    status_info = TaskStatus.get_task_status(job_id)
+
                     await websocket.send_json({
                         "job_id": job_id,
                         "status": status_info["status"],
-                        "message": "Job completed"
+                        "progress": status_info["info"].get("progress", 0),
+                        "timestamp": status_info["timestamp"]
                     })
-                    break
-        
-        except Exception as e:
-            logger.error("WebSocket error", job_id=job_id, error=str(e))
-            await websocket.close(code=1011)
+
+                    await asyncio.sleep(2)
+
+                    if status_info["status"] in ["completed", "failed", "cancelled"]:
+                        await websocket.send_json({
+                            "job_id": job_id,
+                            "status": status_info["status"],
+                            "message": "Job completed"
+                        })
+                        break
+
+            except Exception as e:
+                logger.error("WebSocket error", job_id=job_id, error=str(e))
+                await websocket.close(code=1011)
+
+    return app
+
+
+# Lazy app instance — created on first access so tests can call
+# create_app() directly with fresh configuration.
+_app = None
+
+
+def get_app() -> FastAPI:
+    global _app
+    if _app is None:
+        _app = create_app()
+    return _app
+
+
+def __getattr__(name):
+    if name == "app":
+        return get_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":
@@ -367,8 +401,8 @@ if __name__ == "__main__":
     
     uvicorn.run(
         "api.main:app",
-        host=settings.API_HOST,
-        port=settings.API_PORT,
-        workers=settings.API_WORKERS,
+        host=get_settings().API_HOST,
+        port=get_settings().API_PORT,
+        workers=get_settings().API_WORKERS,
         reload=True
     )

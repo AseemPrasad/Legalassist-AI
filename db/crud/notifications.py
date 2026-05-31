@@ -37,7 +37,7 @@ def get_or_create_notification_log(
                 status=NotificationStatus.PENDING,
             )
             db.add(log)
-            db.flush()
+    db.commit()
         db.refresh(log)
         return log, True
     except IntegrityError:

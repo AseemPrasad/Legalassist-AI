@@ -1,4 +1,4 @@
-**Legalassist AI**
+**Legalassist AI (Unified Legal Information Platform)**
 
 The challenge is the Information Barrier in the Judiciary that prevents citizens from understanding their own legal outcomes. 
 Specifically: Court judgments are inaccessible to the public due to complex legal jargon and language diversity.

@@ -22,7 +22,9 @@ from .analytics import (
     PrecedentMatch,
 )
 from .exports import ExportJob, ExportChunk
+from .secrets import SecretEntry, SecretRotationLog
 from .knowledge import KnowledgeInvalidation, KnowledgeInvalidationStatus
+from .idempotency import IdempotencyKey, IdempotencyKeyStatus
 
 __all__ = [
     "NotificationStatus",
@@ -65,9 +67,13 @@ __all__ = [
     "PrecedentMatch",
     "ExportJob",
     "ExportChunk",
+    "SecretEntry",
+    "SecretRotationLog",
     "KnowledgeInvalidation",
     "KnowledgeInvalidationStatus",
     "SchedulerRun",
     "SchedulerJobStatus",
+    "IdempotencyKey",
+    "IdempotencyKeyStatus",
 ]
 
