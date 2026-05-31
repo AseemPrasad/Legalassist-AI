@@ -9,7 +9,7 @@ class UserFeedback(Base):
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=True, index=True)
 
     did_appeal = Column(Boolean, nullable=True)
     appeal_outcome = Column(String(255), nullable=True)

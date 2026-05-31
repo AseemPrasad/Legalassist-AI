@@ -9,7 +9,9 @@ working while the refactor continues.
 from __future__ import annotations
 
 import datetime as dt
+import threading
 from typing import Optional, List
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from db.base import Base
@@ -49,6 +51,8 @@ from db.models import (
     ReportStatus,
     ReportType,
     ReportFormat,
+    IdempotencyKey,
+    IdempotencyKeyStatus,
 )
 from db.crud.notifications import (
     create_case_deadline,
@@ -552,13 +556,12 @@ def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> bool
 
 def get_user_stats(db: Session, user_id: int) -> dict:
     """Calculate high-level stats for a user dashboard"""
-    cases = get_user_cases(db, user_id)
+    cases = get_user_cases(db, user_id) or []
 
     active_count = len([c for c in cases if c.status == CaseStatus.ACTIVE])
     appealed_count = len([c for c in cases if c.status == CaseStatus.APPEALED])
     closed_count = len([c for c in cases if c.status == CaseStatus.CLOSED])
 
-    # Get upcoming deadlines count
     now = dt.datetime.now(dt.timezone.utc)
     upcoming_deadlines = db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
@@ -723,28 +726,6 @@ from db.models import (
     RevokedToken,
     SimilarityFeedback
 )
-
-
-class IdempotencyKeyStatus(str, enum.Enum):
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-
-class IdempotencyKey(Base):
-    __tablename__ = "idempotency_keys"
-    id = Column(Integer, primary_key=True)
-    key = Column(String(255), unique=True, nullable=False, index=True)
-    method = Column(String(10), nullable=False)
-    path = Column(String(1024), nullable=False)
-    status = Column(SQLEnum(IdempotencyKeyStatus), default=IdempotencyKeyStatus.IN_PROGRESS)
-    response_status = Column(Integer, nullable=True)
-    response_headers = Column(JSON, nullable=True)
-    response_body = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    completed_at = Column(DateTime(timezone=True), nullable=True)
-
-    def __repr__(self):
-        return f"<IdempotencyKey(key={self.key}, status={self.status})>"
-
 class CaseComment(Base):
     """Threaded collaboration comment attached to a case."""
     __tablename__ = "case_comments"
@@ -795,19 +776,20 @@ def reserve_idempotency_key(db: Session, key: str, method: str, path: str) -> Tu
 
     ik = IdempotencyKey(key=key, method=method, path=path, status=IdempotencyKeyStatus.IN_PROGRESS)
     try:
-        db.add(ik)
+        with db.begin_nested():
+            db.add(ik)
+    except IntegrityError:
+        existing = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
+        return existing, False
+    else:
         db.commit()
         db.refresh(ik)
         return ik, True
-    except IntegrityError:
-        db.rollback()
-        existing = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
-        return existing, False
 
 def set_idempotency_response(db: Session, key: str, status_code: int, headers: dict, body: str) -> IdempotencyKey:
-    ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).with_for_update(read=True).first()
+    ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
     if not ik:
-        ik = IdempotencyKey(key=key, method="POST", path="unknown")
+        ik = IdempotencyKey(key=key, method="POST", path="unknown", status=IdempotencyKeyStatus.IN_PROGRESS)
     ik.response_status = status_code
     ik.response_headers = headers
     ik.response_body = body
@@ -965,6 +947,8 @@ def get_similarity_feedback(
         query = query.filter(SimilarityFeedback.query_signature == query_signature)
     if candidate_case_id is not None:
         query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
+
+    return query.limit(limit).all()
 
 def create_case_comment(
     db: Session,

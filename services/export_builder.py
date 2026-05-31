@@ -575,6 +575,8 @@ def build_case_export_bundle(
                     )
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
 
+    case_label = "_".join(str(case_id) for case_id in unique_case_ids)
+
     with SessionLocal() as db:
         record_audit_event(
             db,
@@ -590,7 +592,6 @@ def build_case_export_bundle(
             },
         )
 
-    case_label = "_".join(str(case_id) for case_id in unique_case_ids)
     file_name = _safe_filename(f"case_export_bundle_{case_label}.zip")
     return ExportArtifact(
         file_name=file_name,

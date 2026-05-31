@@ -5,7 +5,6 @@ from db.models.notifications import NotificationLog, NotificationStatus, Notific
 from db.models.cases import CaseDeadline, Case
 from sqlalchemy.exc import IntegrityError
 from core.deadline_engine import get_deadline_first_action
-from core.log_redaction import storage_safe_recipient, sanitize_log_text
 
 
 def get_or_create_notification_log(
@@ -19,7 +18,7 @@ def get_or_create_notification_log(
     """Atomically create a NotificationLog row under a savepoint.
 
     Uses a nested transaction (savepoint) so the unique constraint on
-    (deadline_id, days_before, channel) is enforced immediately via flush,
+    (user_id, deadline_id, days_before, channel) is enforced immediately via flush,
     and IntegrityError is caught within the function itself.  Without a
     savepoint, two concurrent readers can both flush() the same key under
     READ COMMITTED isolation and both observe a successful insert; the
@@ -42,6 +41,7 @@ def get_or_create_notification_log(
         return log, True
     except IntegrityError:
         existing = db.query(NotificationLog).filter(
+            NotificationLog.user_id == user_id,
             NotificationLog.deadline_id == deadline_id,
             NotificationLog.days_before == days_before,
             NotificationLog.channel == channel,
@@ -53,6 +53,7 @@ def get_or_create_notification_log(
 
 def update_notification_log_by_keys(
     db: Session,
+    user_id: int,
     deadline_id: int,
     days_before: int,
     channel: NotificationChannel,
@@ -62,6 +63,7 @@ def update_notification_log_by_keys(
     message_preview: Optional[str] = None,
 ) -> Optional[NotificationLog]:
     log = db.query(NotificationLog).filter(
+        NotificationLog.user_id == user_id,
         NotificationLog.deadline_id == deadline_id,
         NotificationLog.days_before == days_before,
         NotificationLog.channel == channel,
@@ -139,18 +141,20 @@ def reserve_notification(
         message_preview=sanitize_log_text(message_preview),
     )
     try:
-        db.add(log)
-        db.commit()
-        db.refresh(log)
-        return log, True
+        with db.begin_nested():
+            db.add(log)
     except IntegrityError:
-        db.rollback()
         existing = db.query(NotificationLog).filter(
+            NotificationLog.user_id == user_id,
             NotificationLog.deadline_id == deadline_id,
             NotificationLog.days_before == days_before,
             NotificationLog.channel == channel,
         ).first()
         return existing, False
+    else:
+        db.commit()
+        db.refresh(log)
+        return log, True
 
 
 def update_notification_result(
@@ -168,6 +172,7 @@ def update_notification_result(
 ) -> NotificationLog:
     """Upsert a notification log after a delivery attempt."""
     existing = db.query(NotificationLog).filter(
+        NotificationLog.user_id == user_id,
         NotificationLog.deadline_id == deadline_id,
         NotificationLog.days_before == days_before,
         NotificationLog.channel == channel,
@@ -264,8 +269,9 @@ def has_notification_been_sent(
     deadline_id: int,
     days_before: int,
     channel: NotificationChannel,
+    user_id: Optional[int] = None,
 ) -> bool:
-    return db.query(NotificationLog).filter(
+    query = db.query(NotificationLog).filter(
         NotificationLog.deadline_id == deadline_id,
         NotificationLog.days_before == days_before,
         NotificationLog.channel == channel,
@@ -274,7 +280,10 @@ def has_notification_been_sent(
             NotificationStatus.DELIVERED,
             NotificationStatus.OPENED,
         ]),
-    ).first() is not None
+    )
+    if user_id is not None:
+        query = query.filter(NotificationLog.user_id == user_id)
+    return query.first() is not None
 
 
 def log_notification(
@@ -304,7 +313,7 @@ def log_notification(
         failed_at=dt.datetime.now(dt.timezone.utc) if status == NotificationStatus.FAILED else None,
     )
     db.add(log)
-    db.flush()
+    db.commit()
     db.refresh(log)
     return log
 

@@ -63,11 +63,6 @@ _ANON_ID_RE = re.compile(r"^[0-9a-f]{12,64}$", re.IGNORECASE)
 async def get_anonymized_case(
     anonymized_id: str,
     request: Request,
-    # Use get_db_no_rls: this is a public capability-token endpoint.
-    # Setting an RLS context here would be misleading — the lookup is scoped
-    # by anonymized_id, not by user_id, so any RLS context set would be
-    # silently ignored by the raw-SQL query while creating a false impression
-    # of row-level isolation.
     db: Session = Depends(get_db_no_rls),
     current_user: CurrentUser | None = Depends(get_current_user_optional),
 ) -> dict:

@@ -94,6 +94,7 @@ from database import (
     get_notification_template_for_user,
     reserve_notification,
     update_notification_result,
+    SessionLocal,
 )
 from db.crud.notifications import (
     get_or_create_notification_log,
@@ -547,6 +548,7 @@ def send_sms_task(
             with db_session() as db:
                 update_notification_log_by_keys(
                     db=db,
+                    user_id=user_id,
                     deadline_id=deadline_id,
                     days_before=days_left,
                     channel=NotificationChannel.SMS,
@@ -684,7 +686,12 @@ class NotificationService:
                     <div class="description">
                         "{escaped_desc}"
                     </div>
- 
+
+                    <div class="next-action">
+                        <span class="next-action-label">Suggested Next Action</span>
+                        <span class="deadline-value">{escaped_action}</span>
+                    </div>
+
                     <div style="text-align: center;">
                         <a href="{self.base_url}/cases/{deadline.case_id}" class="cta-button">
                             View Case Dashboard
@@ -867,20 +874,7 @@ class NotificationService:
             logger.exception("Error rendering user SMS template; falling back to default")
 
         if message is None:
-            message = self.build_sms_message(deadline.case_title, days_left, deadline.deadline_date)
-        # Reserve a notification slot to avoid races
-        reserved_log, created = reserve_notification(
-            db=db,
-            deadline_id=deadline.id,
-            user_id=deadline.user_id,
-            channel=NotificationChannel.SMS,
-            recipient=user_preference.phone_number,
-            days_before=days_left,
-            message_preview=message,
-        )
-        if not created:
-            logger.debug("SMS reservation already exists; skipping send", deadline_id=deadline.id, days_before=days_left)
-            return NotificationResult(success=False, channel=NotificationChannel.SMS, recipient=user_preference.phone_number, error="Already sent")
+            message = self.build_sms_message(getattr(deadline, 'case_title', ''), days_left, deadline.deadline_date, _derive_first_action(deadline))
 
         if not _should_use_celery(send_sms_task):
             success, message_id, error = self.sms_client.send_sms(user_preference.phone_number, message)
@@ -1122,7 +1116,7 @@ class NotificationService:
 
         for channel in channels:
             # Check if reminder was already sent for this specific threshold and channel
-            if not has_notification_been_sent(db, deadline.id, days_left, channel):
+            if not has_notification_been_sent(db, deadline.id, days_left, channel, user_id=deadline.user_id):
                 if channel == NotificationChannel.SMS:
                     result = self.send_sms_reminder(db, deadline, user_preference, days_left, notification_language)
                     results.append(result)

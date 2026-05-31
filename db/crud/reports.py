@@ -43,10 +43,9 @@ def create_report(
         report_id=report_id,
         user_id=user_id,
         case_id=case_id,
-        celery_task_id=celery_task_id,
+        job_id=celery_task_id,
         report_type=ReportType(report_type),
         format=ReportFormat(format),
-        style=style,
         status=ReportStatus.PENDING,
     )
     db.add(report)
@@ -94,7 +93,7 @@ def get_report_by_celery_task_id(
         Report model or None if not found
     """
     return db.query(Report).filter(
-        Report.celery_task_id == celery_task_id
+        Report.job_id == celery_task_id
     ).first()
 
 
@@ -139,8 +138,6 @@ def update_report_status(
         report.started_at = started_at
     if completed_at is not None:
         report.completed_at = completed_at
-    
-    report.updated_at = dt.datetime.now(dt.timezone.utc)
     db.commit()
     db.refresh(report)
     return report

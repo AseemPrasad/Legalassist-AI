@@ -27,6 +27,14 @@ else:
     engine_kwargs["pool_size"] = 20
     engine_kwargs["max_overflow"] = 10
 engine = create_engine(DATABASE_URL, **engine_kwargs)
+
+if _is_sqlite:
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_fk_pragma(db_connection, connection_record):
+        cursor = db_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.close()
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
 
 
