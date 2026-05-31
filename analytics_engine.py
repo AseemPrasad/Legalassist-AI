@@ -1,8 +1,8 @@
 from typing import List, Dict, Optional, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import func, case as sql_case
 from sqlalchemy.orm import Session, joinedload
-from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback
+from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback, CaseDeadline, CaseTimeline, NotificationLog, NotificationStatus, NotificationChannel, Case
 import hashlib
 import hmac
 import os
@@ -64,6 +64,19 @@ def _summary_overlap(s1: Optional[str], s2: Optional[str]) -> float:
     if not s1_clean or not s2_clean:
         return 0.0
     return difflib.SequenceMatcher(None, s1_clean, s2_clean).ratio()
+
+
+def _utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _normalize_group_value(value: Optional[str]) -> str:
+    text = str(value or "").strip()
+    return text or "Not specified"
 
 
 class MemoryOptimizationMixin:
@@ -1725,6 +1738,232 @@ class AnalyticsAggregator:
             
         results.sort(key=lambda x: x["total_cases"], reverse=True)
         return results
+
+
+class ReminderInsightsEngine:
+    """Compute reminder effectiveness and drop-off metrics from deadlines and notification logs."""
+
+    ELIGIBLE_STATUSES = {
+        NotificationStatus.SENT,
+        NotificationStatus.DELIVERED,
+        NotificationStatus.OPENED,
+    }
+
+    @staticmethod
+    def _completion_map(db: Session) -> Dict[int, datetime]:
+        completion_map: Dict[int, datetime] = {}
+        events = db.query(CaseTimeline).filter(CaseTimeline.event_type == "deadline_completed").all()
+        for event in events:
+            metadata = event.event_metadata if isinstance(event.event_metadata, dict) else {}
+            deadline_id = metadata.get("deadline_id")
+            try:
+                deadline_id_int = int(deadline_id)
+            except (TypeError, ValueError):
+                continue
+
+            completed_at = _utc_datetime(event.event_date)
+            if completed_at is None:
+                continue
+
+            current = completion_map.get(deadline_id_int)
+            if current is None or completed_at < current:
+                completion_map[deadline_id_int] = completed_at
+
+        return completion_map
+
+    @staticmethod
+    def build_attribution_frame(
+        db: Session,
+        attribution_window_days: int = 14,
+        user_id: Optional[int] = None,
+        jurisdiction: Optional[str] = None,
+        court_name: Optional[str] = None,
+        deadline_type: Optional[str] = None,
+        channel: Optional[NotificationChannel | str] = None,
+    ) -> pd.DataFrame:
+        now = datetime.now(timezone.utc)
+        completion_map = ReminderInsightsEngine._completion_map(db)
+
+        query = db.query(NotificationLog, CaseDeadline, Case).join(
+            CaseDeadline,
+            NotificationLog.deadline_id == CaseDeadline.id,
+        ).join(
+            Case,
+            CaseDeadline.case_id == Case.id,
+        )
+
+        if user_id is not None:
+            query = query.filter(Case.user_id == user_id)
+
+        if jurisdiction:
+            query = query.filter(func.lower(Case.jurisdiction) == _normalize_text(jurisdiction))
+        if court_name:
+            query = query.filter(func.lower(func.coalesce(CaseDeadline.court_name, "")) == _normalize_text(court_name))
+        if deadline_type:
+            query = query.filter(func.lower(CaseDeadline.deadline_type) == _normalize_text(deadline_type))
+        if channel:
+            channel_enum = channel if isinstance(channel, NotificationChannel) else NotificationChannel(str(channel).strip().lower())
+            query = query.filter(NotificationLog.channel == channel_enum)
+
+        deadline_buckets: Dict[int, Dict[str, object]] = {}
+        window = timedelta(days=max(1, int(attribution_window_days)))
+
+        for log, deadline, case in query.all():
+            if log.status not in ReminderInsightsEngine.ELIGIBLE_STATUSES:
+                continue
+
+            sent_at = _utc_datetime(log.sent_at or log.created_at)
+            deadline_date = _utc_datetime(deadline.deadline_date)
+            completion_at = completion_map.get(deadline.id)
+            if sent_at is None or deadline_date is None:
+                continue
+
+            bucket = deadline_buckets.setdefault(
+                deadline.id,
+                {
+                    "deadline": deadline,
+                    "case": case,
+                    "completion_at": completion_at,
+                    "candidates": [],
+                },
+            )
+            candidates = bucket["candidates"]
+            if isinstance(candidates, list):
+                candidates.append(
+                    {
+                        "notification_log_id": log.id,
+                        "channel": log.channel.value if hasattr(log.channel, "value") else str(log.channel),
+                        "sent_at": sent_at,
+                    }
+                )
+
+        rows = []
+        for deadline_id, bucket in deadline_buckets.items():
+            deadline = bucket["deadline"]
+            case = bucket["case"]
+            completion_at = bucket["completion_at"]
+            candidates = bucket["candidates"] if isinstance(bucket["candidates"], list) else []
+            deadline_date = _utc_datetime(deadline.deadline_date)
+            if deadline_date is None:
+                continue
+
+            cutoff = completion_at or min(deadline_date, now)
+            eligible_candidates = [candidate for candidate in candidates if candidate["sent_at"] <= cutoff]
+            if not eligible_candidates:
+                continue
+
+            chosen = max(eligible_candidates, key=lambda candidate: candidate["sent_at"])
+            sent_at = chosen["sent_at"]
+
+            matured = completion_at is not None or deadline_date <= now
+            effective = bool(completion_at and sent_at <= completion_at <= sent_at + window)
+            drop_off = bool(matured and not effective)
+            if not (effective or drop_off):
+                continue
+
+            days_to_completion = None
+            if effective and completion_at is not None:
+                days_to_completion = round((completion_at - sent_at).total_seconds() / 86400.0, 2)
+
+            rows.append(
+                {
+                    "deadline_id": deadline_id,
+                    "notification_log_id": chosen["notification_log_id"],
+                    "jurisdiction": _normalize_group_value(case.jurisdiction),
+                    "court_name": _normalize_group_value(getattr(deadline, "court_name", None)),
+                    "deadline_type": _normalize_group_value(deadline.deadline_type),
+                    "channel": chosen["channel"],
+                    "sent_at": sent_at,
+                    "completion_at": completion_at,
+                    "deadline_date": deadline_date,
+                    "effective": effective,
+                    "drop_off": drop_off,
+                    "days_to_completion": days_to_completion,
+                }
+            )
+
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def summarize(frame: pd.DataFrame, attribution_window_days: int = 14) -> Dict[str, object]:
+        if frame.empty:
+            return {
+                "attribution_window_days": attribution_window_days,
+                "reminder_count": 0,
+                "effective_reminders": 0,
+                "drop_off_reminders": 0,
+                "effectiveness_rate": 0.0,
+                "drop_off_rate": 0.0,
+                "avg_days_to_completion": None,
+            }
+
+        reminder_count = int(len(frame))
+        effective_reminders = int(frame["effective"].sum())
+        drop_off_reminders = int(frame["drop_off"].sum())
+        completed_days = frame.loc[frame["effective"], "days_to_completion"].dropna()
+
+        return {
+            "attribution_window_days": attribution_window_days,
+            "reminder_count": reminder_count,
+            "effective_reminders": effective_reminders,
+            "drop_off_reminders": drop_off_reminders,
+            "effectiveness_rate": round((effective_reminders / reminder_count) * 100, 1) if reminder_count else 0.0,
+            "drop_off_rate": round((drop_off_reminders / reminder_count) * 100, 1) if reminder_count else 0.0,
+            "avg_days_to_completion": round(float(completed_days.mean()), 2) if not completed_days.empty else None,
+        }
+
+    @staticmethod
+    def breakdown(frame: pd.DataFrame, group_by: str) -> pd.DataFrame:
+        if frame.empty or group_by not in frame.columns:
+            return pd.DataFrame(columns=[group_by, "reminders", "effective_reminders", "drop_off_reminders", "effectiveness_rate", "drop_off_rate", "avg_days_to_completion"])
+
+        grouped = frame.groupby(group_by, dropna=False).agg(
+            reminders=("notification_log_id", "count"),
+            effective_reminders=("effective", "sum"),
+            drop_off_reminders=("drop_off", "sum"),
+            avg_days_to_completion=("days_to_completion", "mean"),
+        ).reset_index()
+
+        grouped["effectiveness_rate"] = grouped.apply(
+            lambda row: round((row["effective_reminders"] / row["reminders"]) * 100, 1) if row["reminders"] else 0.0,
+            axis=1,
+        )
+        grouped["drop_off_rate"] = grouped.apply(
+            lambda row: round((row["drop_off_reminders"] / row["reminders"]) * 100, 1) if row["reminders"] else 0.0,
+            axis=1,
+        )
+        grouped["avg_days_to_completion"] = grouped["avg_days_to_completion"].round(2)
+        grouped = grouped.sort_values(["effectiveness_rate", "reminders"], ascending=[False, False]).reset_index(drop=True)
+        return grouped
+
+    @staticmethod
+    def build_insights(
+        db: Session,
+        attribution_window_days: int = 14,
+        user_id: Optional[int] = None,
+        jurisdiction: Optional[str] = None,
+        court_name: Optional[str] = None,
+        deadline_type: Optional[str] = None,
+        channel: Optional[NotificationChannel | str] = None,
+    ) -> Dict[str, object]:
+        frame = ReminderInsightsEngine.build_attribution_frame(
+            db=db,
+            attribution_window_days=attribution_window_days,
+            user_id=user_id,
+            jurisdiction=jurisdiction,
+            court_name=court_name,
+            deadline_type=deadline_type,
+            channel=channel,
+        )
+
+        return {
+            "summary": ReminderInsightsEngine.summarize(frame, attribution_window_days=attribution_window_days),
+            "frame": frame,
+            "by_jurisdiction": ReminderInsightsEngine.breakdown(frame, "jurisdiction"),
+            "by_court": ReminderInsightsEngine.breakdown(frame, "court_name"),
+            "by_deadline_type": ReminderInsightsEngine.breakdown(frame, "deadline_type"),
+            "by_channel": ReminderInsightsEngine.breakdown(frame, "channel"),
+        }
 
 
 # Utility function to anonymize case ID

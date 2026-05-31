@@ -1,11 +1,13 @@
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, Dict
 from threading import Lock
 from core.efiling import EfilingClient
 from api.auth import get_current_user, CurrentUser
 
 router = APIRouter(prefix="/api/efiling", tags=["efiling"])
+
+_MAX_BASE64_BYTES = 10 * 1024 * 1024  # 10 MB
 
 # Track ownership of tracking_ids per user (POC — replace with DB in production)
 _user_filings: Dict[str, set[str]] = {}
@@ -16,6 +18,13 @@ class SubmitRequest(BaseModel):
     court: str
     file_base64: str
     metadata: Optional[Dict] = None
+
+    @field_validator("file_base64")
+    @classmethod
+    def _limit_base64_size(cls, v: str) -> str:
+        if len(v) > _MAX_BASE64_BYTES:
+            raise ValueError(f"file_base64 exceeds maximum size of {_MAX_BASE64_BYTES} bytes")
+        return v
 
 
 @router.post("/submit")

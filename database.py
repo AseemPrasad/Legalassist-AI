@@ -60,6 +60,8 @@ from db.crud.notifications import (
     has_notification_been_sent,
     log_notification,
     get_notification_history,
+    get_notification_template_for_user,
+    create_or_update_notification_template,
 )
 
 __all__ = [
@@ -109,6 +111,8 @@ __all__ = [
     "has_notification_been_sent",
     "log_notification",
     "get_notification_history",
+    "get_notification_template_for_user",
+    "create_or_update_notification_template",
     "create_or_update_user_preference",
     "create_user",
     "get_user_by_email",
