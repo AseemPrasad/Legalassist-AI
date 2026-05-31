@@ -212,6 +212,17 @@ def page_notification_preferences():
         sms_input = st.text_area("SMS Template", value=sms_val, height=120, key="sms_template_input")
         subj_input = st.text_input("Email Subject Template", value=subj_val, key="email_subject_input")
         html_input = st.text_area("Email HTML Template", value=html_val, height=220, key="email_html_input")
+        channel_scope = st.selectbox(
+            "Template Scope",
+            ["Default", "SMS", "Email"],
+            index=0,
+            help="Choose Default to keep the legacy single-template behavior, or target a specific channel.",
+        )
+        template_language = st.text_input(
+            "Template Language (optional)",
+            value="",
+            help="Use a locale tag like en or hi. Leave blank to store the default template.",
+        ).strip()
 
         col1, col2 = st.columns(2)
         with col1:
@@ -264,13 +275,33 @@ def page_notification_preferences():
             if st.button("Save Templates", use_container_width=True):
                 try:
                     from database import create_or_update_notification_template
-                    create_or_update_notification_template(
-                        db=db,
-                        user_id=int(user_id),
-                        sms_template=sms_input,
-                        email_subject_template=subj_input,
-                        email_html_template=html_input,
-                    )
+                    from db.models.notifications import NotificationChannel
+
+                    selected_channel = None
+                    if channel_scope == "SMS":
+                        selected_channel = NotificationChannel.SMS
+                    elif channel_scope == "Email":
+                        selected_channel = NotificationChannel.EMAIL
+
+                    selected_language = template_language or None
+                    if selected_channel is None and selected_language is None:
+                        create_or_update_notification_template(
+                            db=db,
+                            user_id=int(user_id),
+                            sms_template=sms_input,
+                            email_subject_template=subj_input,
+                            email_html_template=html_input,
+                        )
+                    else:
+                        create_or_update_notification_template(
+                            db=db,
+                            user_id=int(user_id),
+                            sms_template=sms_input,
+                            email_subject_template=subj_input,
+                            email_html_template=html_input,
+                            channel=selected_channel,
+                            language=selected_language,
+                        )
                     st.success("✅ Templates saved")
                 except Exception as e:
                     st.error(f"Failed to save templates: {str(e)}")

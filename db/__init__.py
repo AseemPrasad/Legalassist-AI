@@ -20,6 +20,8 @@ from .crud.notifications import (
     get_prefs_by_user_ids,
     has_notification_been_sent,
     log_notification,
+    get_notification_template_for_user,
+    create_or_update_notification_template,
     update_notification_log_by_message_id,
     get_notification_history,
 )
@@ -55,6 +57,8 @@ __all__ = [
     "get_prefs_by_user_ids",
     "has_notification_been_sent",
     "log_notification",
+    "get_notification_template_for_user",
+    "create_or_update_notification_template",
     "update_notification_log_by_message_id",
     "get_notification_history",
     "submit_user_feedback",

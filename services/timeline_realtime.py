@@ -19,6 +19,12 @@ _TIMELINE_RATE_LIMIT_WINDOW = int(os.getenv("TIMELINE_REALTIME_RATE_WINDOW", "60
 
 _REDIS_URL = os.getenv("REDIS_URL", "")
 
+NOTIFICATION_TIMELINE_EVENT_TYPES = frozenset({
+    "notification_sent",
+    "notification_delivered",
+    "notification_failed",
+})
+
 
 def _new_redis_client() -> Optional[Any]:
     if not _REDIS_URL:
@@ -235,6 +241,7 @@ class TimelineRealtimeBus:
         message = validated_payload.model_dump(mode="json")
         current_loop = asyncio.get_running_loop()
         current_thread_id = threading.get_ident()
+        event_category = "notification" if validated_payload.event_type in NOTIFICATION_TIMELINE_EVENT_TYPES else "timeline"
         async with channel.lock:
             targets = list(channel.connections)
             dead_targets = [subscriber for subscriber in targets if subscriber.loop.is_closed()]
@@ -262,6 +269,7 @@ class TimelineRealtimeBus:
                 logger.debug(
                     "timeline_realtime_cross_loop_delivery",
                     case_id=case_id,
+                    event_category=event_category,
                     subscriber_count=len(targets),
                     target_loop_running=loop.is_running(),
                     target_loop_closed=loop.is_closed(),
