@@ -839,7 +839,7 @@ def generate_report_task(
 
     # Anonymization / Idempotency: avoid regenerating same report repeatedly
     idemp = IdempotencyManager()
-    idempotency_key = f"report:{user_id}:{case_id}:{report_type}:{format}:{privacy_profile}"
+    idempotency_key = f"report:{report_id}:{user_id}:{case_id}:{report_type}:{format}:{privacy_profile}"
     if not idemp.acquire(idempotency_key, ttl=600):
         existing = idemp.get_result(idempotency_key)
         logger.info(
