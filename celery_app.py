@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from types import SimpleNamespace
 from celery import Celery, Task
+from celery.result import AsyncResult
 from api.validation import validate_file_url, fetch_url_safe
 
 # Database & Core Imports
