@@ -1512,6 +1512,7 @@ def purge_expired_data(self) -> Dict[str, Any]:
     )
 
     logger.info("Executing compliance: purge_expired_data")
+    # Perform cleanups on database backends including Celery Redis results pruning if active
 
     results = {}
     with db_session() as db:
