@@ -308,9 +308,40 @@ def create_app() -> FastAPI:
                 await websocket.close(code=4001, reason="Invalid or expired token")
                 return
 
-            owner = get_job_owner(job_id)
-            if owner is not None and str(owner) != str(user_id):
-                await websocket.close(code=1008, reason="Forbidden: job not owned by user")
+if get_settings().ENABLE_WEBSOCKET:
+    from fastapi import WebSocket
+    from api.jwt_auth import verify_token, InvalidTokenError
+    from api.job_registry import get_job_owner
+    
+    @app.websocket("/ws/progress/{job_id}")
+    async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
+        """
+        WebSocket endpoint for real-time job progress
+        
+        Usage:
+        ws = new WebSocket('ws://localhost:8000/ws/progress/job_id')
+        ws.onmessage = (event) => console.log(event.data)
+        """
+        # Extract token from subprotocol or query parameter
+        auth_token = None
+        if "sec-websocket-protocol" in websocket.headers:
+            protocols = [p.strip() for p in websocket.headers["sec-websocket-protocol"].split(",")]
+            if "access_token" in protocols:
+                idx = protocols.index("access_token")
+                if idx + 1 < len(protocols):
+                    auth_token = protocols[idx + 1]
+        if not auth_token:
+            auth_token = websocket.query_params.get("token")
+        if not auth_token:
+            await websocket.close(code=4001, reason="Authentication required")
+            return
+
+        # Verify token
+        try:
+            payload = verify_token(auth_token)
+            user_id = payload.get("sub")
+            if not user_id:
+                await websocket.close(code=4003, reason="Invalid token")
                 return
 
             await websocket.accept()
