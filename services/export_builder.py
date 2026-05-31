@@ -462,15 +462,15 @@ def build_case_export_artifact(
     if format_name == "json":
         data = _json_bytes(payload)
         mime_type = "application/json"
-        file_name = f"{base_name}.json"
+        file_name = f"case_{case_id}_export.json"
     elif format_name == "pdf":
         data = _pdf_bytes(payload)
         mime_type = "application/pdf"
-        file_name = f"{base_name}.pdf"
+        file_name = f"case_{case_id}_export.pdf"
     else:
         data = _docx_bytes(payload)
         mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        file_name = f"{base_name}.docx"
+        file_name = f"case_{case_id}_export.docx"
 
     with SessionLocal() as db:
         record_audit_event(

@@ -69,6 +69,11 @@ def mask_recipient(recipient: Optional[str]) -> str:
     return "[redacted-recipient]"
 
 
+def storage_safe_recipient(recipient: Optional[str]) -> str:
+    """Return a storage-safe recipient value for persisted records."""
+    return mask_recipient(recipient)
+
+
 def _replace_sensitive_text(value: str) -> str:
     value = EMAIL_PATTERN.sub("[redacted-email]", value)
     value = PHONE_PATTERN.sub("[redacted-phone]", value)

@@ -839,7 +839,7 @@ def generate_report_task(
 
     # Anonymization / Idempotency: avoid regenerating same report repeatedly
     idemp = IdempotencyManager()
-    idempotency_key = f"report:{user_id}:{case_id}:{report_type}:{format}:{privacy_profile}"
+    idempotency_key = f"report:{report_id}:{user_id}:{case_id}:{report_type}:{format}:{privacy_profile}"
     if not idemp.acquire(idempotency_key, ttl=600):
         existing = idemp.get_result(idempotency_key)
         logger.info(
@@ -1023,15 +1023,7 @@ def export_data_task(
 
         # Validate format
         if format not in ("csv", "json"):
-            return {
-                "export_id": None,
-                "file_path": None,
-                "file_size_bytes": 0,
-                "format": format,
-                "expires_in_hours": None,
-                "expires_at": None,
-                "created_at": None,
-            }
+            raise ValueError(f"Unsupported export format: {format}. Supported formats are 'csv' or 'json'.")
 
         try:
             int_user_id = int(user_id)
@@ -1066,10 +1058,19 @@ def export_data_task(
                     return "******"
             else:
                 digits = [c for c in recipient if c.isdigit()]
-                if len(digits) >= 7:
-                    return recipient[:3] + "*" * (len(recipient) - 7) + recipient[-4:]
-                else:
-                    return "*******"
+                masked_chars = []
+                digit_count = 0
+                for c in recipient:
+                    if c.isdigit():
+                        digit_count += 1
+                        # Mask digits except the first 3 and the last 4
+                        if digit_count > 3 and digit_count <= len(digits) - 4:
+                            masked_chars.append("*")
+                        else:
+                            masked_chars.append(c)
+                    else:
+                        masked_chars.append(c)
+                return "".join(masked_chars)
 
         with db_session() as db:
             # Query real user records
@@ -1512,6 +1513,7 @@ def purge_expired_data(self) -> Dict[str, Any]:
     )
 
     logger.info("Executing compliance: purge_expired_data")
+    # Perform cleanups on database backends including Celery Redis results pruning if active
 
     results = {}
     with db_session() as db:
