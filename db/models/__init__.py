@@ -24,6 +24,7 @@ from .analytics import (
 from .exports import ExportJob, ExportChunk
 from .secrets import SecretEntry, SecretRotationLog
 from .knowledge import KnowledgeInvalidation, KnowledgeInvalidationStatus
+from .idempotency import IdempotencyKey, IdempotencyKeyStatus
 
 __all__ = [
     "NotificationStatus",
@@ -72,5 +73,7 @@ __all__ = [
     "KnowledgeInvalidationStatus",
     "SchedulerRun",
     "SchedulerJobStatus",
+    "IdempotencyKey",
+    "IdempotencyKeyStatus",
 ]
 

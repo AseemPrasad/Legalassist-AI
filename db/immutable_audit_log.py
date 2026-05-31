@@ -116,7 +116,6 @@ def _get_audit_session():
     """
     from db.session import SessionLocal
     return SessionLocal()
-_audit_append_lock = threading.Lock()
 
 
 def append_audit_entry(
@@ -308,6 +307,9 @@ def verify_audit_chain(start_id: int = 1, end_id: int | None = None) -> dict:
                 break
             prev_hash = entry.integrity_hash
 
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 

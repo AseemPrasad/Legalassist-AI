@@ -324,3 +324,11 @@ if Config.DEBUG:
         print(f"DEBUG: LegalAssist AI Config Loaded: {safe_config}")
     except Exception as e:
         logger.error(f"Failed to dump sanitized configuration: {e}")
+
+# Compatibility layer for legacy imports
+APISettings = Config
+
+def get_settings():
+    """Return the active Config settings."""
+    return Config
+

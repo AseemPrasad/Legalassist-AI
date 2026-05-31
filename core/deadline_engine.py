@@ -12,6 +12,7 @@ def _parse_date(value: Any, tz: str) -> datetime:
         try:
             dt = datetime.fromisoformat(str(value))
         except ValueError:
+            # Fall back to space-separated SQLite datetimes for Python 3.10
             dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
 
     if dt.tzinfo is None:
@@ -72,6 +73,7 @@ def calculate_deadline(
     if holidays:
         for h in holidays:
             try:
+                # Confirm holiday date matches ISO YYYY-MM-DD pattern
                 date.fromisoformat(h)
             except (ValueError, TypeError):
                 raise ValueError(

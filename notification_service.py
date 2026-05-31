@@ -154,11 +154,23 @@ def _template_language_key(language: Optional[str]) -> str:
 
 
 def _derive_first_action(deadline: CaseDeadline) -> str:
-    stored_action = (getattr(deadline, "first_action", None) or "").strip()
-    if stored_action:
-        return stored_action
+    description = (getattr(deadline, "description", "") or "").strip()
+    if description:
+        first_sentence = re.split(r"(?<=[.!?])\s+", description, maxsplit=1)[0].strip()
+        if len(first_sentence) > 140:
+            first_sentence = first_sentence[:137].rstrip() + "..."
+        return first_sentence
 
-    return get_deadline_first_action(getattr(deadline, "deadline_type", None))
+    deadline_type = str(getattr(deadline, "deadline_type", "") or "").strip().lower()
+    suggestions = {
+        "appeal": "Draft and file the appeal",
+        "filing": "Prepare and submit the filing",
+        "submission": "Gather the required documents and submit them",
+        "response": "Prepare the response and verify deadlines",
+        "hearing": "Review the hearing strategy and supporting documents",
+        "other": "Review the deadline details and plan the next step",
+    }
+    return suggestions.get(deadline_type, "Review the deadline details and plan the next step")
 
 
 def _build_notification_template_values(
@@ -245,7 +257,11 @@ class SMSClient:
     @tenacity.retry(
         wait=tenacity.wait_exponential(multiplier=1, min=2, max=60),
         stop=tenacity.stop_after_attempt(5),
-        retry=tenacity.retry_if_exception(lambda e: '503' in str(e) or '429' in str(e)),
+        retry=tenacity.retry_if_exception(
+            lambda e: any(x in str(e) for x in ("503", "429", "Service Unavailable", "Too Many Requests"))
+            or getattr(e, "status_code", None) in (429, 503)
+            or getattr(e, "status", None) in (429, 503)
+        ),
         reraise=True
     )
     def _create_message_with_retry(self, to_number: str, message: str):
@@ -310,7 +326,11 @@ class EmailClient:
     @tenacity.retry(
         wait=tenacity.wait_exponential(multiplier=1, min=2, max=60),
         stop=tenacity.stop_after_attempt(5),
-        retry=tenacity.retry_if_exception(lambda e: '503' in str(e) or '429' in str(e)),
+        retry=tenacity.retry_if_exception(
+            lambda e: any(x in str(e) for x in ("503", "429", "Service Unavailable", "Too Many Requests"))
+            or getattr(e, "status_code", None) in (429, 503)
+            or getattr(e, "status", None) in (429, 503)
+        ),
         reraise=True
     )
     def _send_email_with_retry(self, message):
