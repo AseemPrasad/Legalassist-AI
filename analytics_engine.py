@@ -174,42 +174,43 @@ class BatchReportGenerator(MemoryOptimizationMixin):
         }
 
         # ---------------------------------------------------------------------
-        # FIX: Use yield_per() to stream results from the database.
-        # This prevents SQLAlchemy from loading the entire result set into 
-        # the session's identity map at once. Note that yield_per() requires
-        # the DB driver to support server-side cursors.
+        # Use LIMIT/OFFSET pagination for SQLite compatibility.
         # ---------------------------------------------------------------------
         try:
-            # We process one record at a time but fetch them in batch_size chunks
-            stream = base_query.yield_per(self.batch_size)
-            
-            for i, case in enumerate(stream):
-                # Update metrics using primitives to avoid keeping references
-                metrics["total_count"] += 1
-                metrics["outcomes"][str(case.outcome).lower()] += 1
-                metrics["jurisdictions"][str(case.jurisdiction)] += 1
-                metrics["case_types"][str(case.case_type).lower()] += 1
+            offset = 0
+            while True:
+                batch = base_query.limit(self.batch_size).offset(offset).all()
+                if not batch:
+                    break
                 
-                # Safely process nested outcome data
-                outcome_data = getattr(case, "outcome_data", None)
-                if outcome_data and getattr(outcome_data, "appeal_filed", False):
-                    metrics["appeal_count"] += 1
-                    cost = _parse_cost_value(getattr(outcome_data, "appeal_cost", None))
-                    if cost:
-                        metrics["total_appeal_cost"] += cost
+                for case in batch:
+                    # Update metrics using primitives to avoid keeping references
+                    metrics["total_count"] += 1
+                    metrics["outcomes"][str(case.outcome).lower()] += 1
+                    metrics["jurisdictions"][str(case.jurisdiction)] += 1
+                    metrics["case_types"][str(case.case_type).lower()] += 1
 
-                total_processed += 1
+                    # Safely process nested outcome data
+                    outcome_data = getattr(case, "outcome_data", None)
+                    if outcome_data and getattr(outcome_data, "appeal_filed", False):
+                        metrics["appeal_count"] += 1
+                        cost = _parse_cost_value(getattr(outcome_data, "appeal_cost", None))
+                        if cost:
+                            metrics["total_appeal_cost"] += cost
 
-                # -------------------------------------------------------------
-                # PERIODIC CLEANUP: Every batch_size records, we clear the 
-                # session and trigger GC to free up memory from processed objects.
-                # -------------------------------------------------------------
-                if total_processed % self.batch_size == 0:
-                    logger.info(f"Checkpoint: Processed {total_processed} cases. Optimizing memory...")
-                    # Expunge all objects from session to allow GC to claim them
-                    self.db.expunge_all() 
-                    self.trigger_garbage_collection()
-                    self.log_memory_stats()
+                    total_processed += 1
+
+                    # -------------------------------------------------------------
+                    # PERIODIC CLEANUP: Every batch_size records, we clear the 
+                    # session and trigger GC to free up memory from processed objects.
+                    # -------------------------------------------------------------
+                    if total_processed % self.batch_size == 0:
+                        logger.info(f"Checkpoint: Processed {total_processed} cases. Optimizing memory...")
+                        self.db.expunge_all()
+                        self.trigger_garbage_collection()
+                        self.log_memory_stats()
+
+                offset += self.batch_size
 
         except Exception as e:
             logger.error(f"Critical error during batch report generation: {str(e)}")
@@ -321,9 +322,9 @@ class PandasAnalyticsProcessor:
     ) -> pd.DataFrame:
         """
         Memory-efficient conversion of a large query into a DataFrame.
-        
-        Uses yield_per() and periodic session clearing to handle 10,000+ 
-        records without leaking memory or causing OOM crashes.
+
+        Uses LIMIT/OFFSET pagination and periodic session clearing to handle 
+        10,000+ records without leaking memory or causing OOM crashes.
         
         Args:
             db: The active database session.
@@ -339,26 +340,27 @@ class PandasAnalyticsProcessor:
 
         logger.info(f"Converting large query to DataFrame using batch size {batch_size}")
         
-        # Stream results using server-side cursors where possible
-        stream = query.yield_per(batch_size)
-        
-        for case in stream:
-            # Flatten DB object into a simple dict immediately
-            current_chunk_data.append(PandasAnalyticsProcessor._extract_case_row(case))
-            total_processed += 1
-            
-            if total_processed % batch_size == 0:
-                # Convert the current list to a DataFrame chunk and store
+        # Use LIMIT/OFFSET pagination for SQLite compatibility.
+        offset = 0
+        while True:
+            batch = query.limit(batch_size).offset(offset).all()
+            if not batch:
+                break
+
+            for case in batch:
+                # Flatten DB object into a simple dict immediately
+                current_chunk_data.append(PandasAnalyticsProcessor._extract_case_row(case))
+                total_processed += 1
+
+            if total_processed % batch_size == 0 and current_chunk_data:
                 chunk_df = pd.DataFrame(current_chunk_data)
                 all_chunks.append(chunk_df)
-                
-                # Clear the temporary list to free list-specific memory
                 current_chunk_data = []
-                
-                # CRITICAL: Clear the session identity map and trigger GC
                 db.expunge_all()
                 gc.collect()
                 logger.debug(f"Memory optimization checkpoint: {total_processed} records batched.")
+
+            offset += batch_size
 
         # Handle the final partial batch
         if current_chunk_data:
