@@ -6,6 +6,7 @@ Handles delivery tracking and retry logic.
 import logging
 import structlog
 import os
+import re
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple
 from dataclasses import dataclass
@@ -102,6 +103,7 @@ from db.crud.notifications import (
 from db.crud.audit import record_immutable_audit_event
 from core.template_renderer import render_template, validate_template, TemplateValidationError
 from core.log_redaction import mask_recipient, sanitize_log_text
+from services.timeline_service import timeline_service as case_timeline_service
 
 # Import debug mode helper
 
@@ -128,6 +130,98 @@ def _should_use_celery(task) -> bool:
     return True
 
 logger = structlog.get_logger(__name__)
+
+NOTIFICATION_TEMPLATE_ALLOWED_VARS = {
+    "case_title",
+    "case_number",
+    "deadline_date",
+    "days_before",
+    "days_left",
+    "court",
+    "deadline_type",
+    "deadline_description",
+    "first_action",
+    "link",
+    "channel",
+    "language",
+}
+
+
+def _template_language_key(language: Optional[str]) -> str:
+    text = str(language or "en").strip().lower()
+    return text or "en"
+
+
+def _derive_first_action(deadline: CaseDeadline) -> str:
+    description = (getattr(deadline, "description", "") or "").strip()
+    if description:
+        first_sentence = re.split(r"(?<=[.!?])\s+", description, maxsplit=1)[0].strip()
+        if len(first_sentence) > 140:
+            first_sentence = first_sentence[:137].rstrip() + "..."
+        return first_sentence
+
+    deadline_type = str(getattr(deadline, "deadline_type", "") or "").strip().lower()
+    suggestions = {
+        "appeal": "Draft and file the appeal",
+        "filing": "Prepare and submit the filing",
+        "submission": "Gather the required documents and submit them",
+        "response": "Prepare the response and verify deadlines",
+        "hearing": "Review the hearing strategy and supporting documents",
+        "other": "Review the deadline details and plan the next step",
+    }
+    return suggestions.get(deadline_type, "Review the deadline details and plan the next step")
+
+
+def _build_notification_template_values(
+    deadline: CaseDeadline,
+    days_left: int,
+    channel: NotificationChannel,
+    language: Optional[str] = None,
+) -> dict[str, str]:
+    case = getattr(deadline, "case", None)
+    deadline_date = getattr(deadline, "deadline_date", None)
+    deadline_date_text = deadline_date.strftime("%d %b %Y") if hasattr(deadline_date, "strftime") else ""
+    case_number = getattr(case, "case_number", "") if case is not None else ""
+    case_title = getattr(deadline, "case_title", "") or getattr(case, "title", "") or ""
+    court = getattr(case, "jurisdiction", "") if case is not None else ""
+    template_language = _template_language_key(language)
+
+    return {
+        "case_title": str(case_title),
+        "case_number": str(case_number),
+        "deadline_date": deadline_date_text,
+        "days_before": str(days_left),
+        "days_left": str(days_left),
+        "court": str(court),
+        "deadline_type": str(getattr(deadline, "deadline_type", "") or ""),
+        "deadline_description": str(getattr(deadline, "description", "") or ""),
+        "first_action": _derive_first_action(deadline),
+        "link": f"https://legalassist.ai/cases/{getattr(deadline, 'case_id', '')}",
+        "channel": channel.value if hasattr(channel, "value") else str(channel),
+        "language": template_language,
+    }
+
+
+def _render_notification_template(template: str, values: dict[str, str]) -> str:
+    return render_template(
+        template,
+        values,
+        allowed=NOTIFICATION_TEMPLATE_ALLOWED_VARS,
+        missing_as_empty=True,
+    )
+
+
+def _resolve_notification_template_values(
+    db: Session,
+    deadline: CaseDeadline,
+    days_left: int,
+    channel: NotificationChannel,
+    language: Optional[str] = None,
+) -> dict[str, Optional[str]]:
+    template = get_notification_template_for_user(db, deadline.user_id, channel=channel, language=language)
+    if not template:
+        return {"sms_template": None, "email_subject_template": None, "email_html_template": None}
+    return template.resolve_templates(channel=channel, language=language)
 
 
 @dataclass
@@ -316,9 +410,7 @@ def send_email_task(
     
     logger.info("background_email_delivery_started", recipient=mask_recipient(to_email), task_id=self.request.id)
     
-    # Initialize the EmailClient. We do this inside the task to ensure 
-    # that any environment-specific configuration is picked up correctly 
-    # by the worker process.
+    # Initialize the EmailClient inside the task
     client = EmailClient()
     
     # Execute the actual network request to SendGrid
@@ -609,12 +701,14 @@ class NotificationService:
         
         return subject, html_content
 
+
     def send_sms_reminder(
         self,
         db: Session,
         deadline: CaseDeadline,
         user_preference: UserPreference,
         days_left: int,
+        language: Optional[str] = None,
     ) -> NotificationResult:
         """Send SMS reminder for a deadline"""
         
@@ -627,22 +721,16 @@ class NotificationService:
                 error="No phone number configured",
             )
 
+        template_language = _template_language_key(language)
+
         # Try per-user template first
         message = None
         try:
-            tmpl = get_notification_template_for_user(db, deadline.user_id)
-            if tmpl and tmpl.sms_template:
-                values = {
-                    "case_title": deadline.case_title,
-                    "case_number": getattr(deadline, "case_id", ""),
-                    "deadline_date": deadline.deadline_date.strftime("%d %b %Y") if deadline.deadline_date else "",
-                    "days_left": days_left,
-                    "court": "",
-                    "deadline_type": deadline.deadline_type,
-                    "deadline_description": deadline.description or "",
-                    "link": f"https://legalassist.ai/cases/{deadline.case_id}",
-                }
-                message = render_template(tmpl.sms_template, values)
+            tmpl = _resolve_notification_template_values(db, deadline, days_left, NotificationChannel.SMS, template_language)
+            sms_template = tmpl.get("sms_template") if isinstance(tmpl, dict) else None
+            if sms_template:
+                values = _build_notification_template_values(deadline, days_left, NotificationChannel.SMS, template_language)
+                message = _render_notification_template(sms_template, values)
         except TemplateValidationError as e:
             logger.warning("User SMS template invalid, falling back to default: %s", str(e))
         except Exception:
@@ -682,13 +770,51 @@ class NotificationService:
                 message_preview=message,
             )
 
+        # Atomically create the notification log with the final status.
+        # The unique constraint on (deadline_id, days_before, channel) prevents
+        # duplicate sends from concurrent workers.
+        try:
+            with db.begin_nested():
+                log = NotificationLog(
+                    deadline_id=deadline.id,
+                    user_id=deadline.user_id,
+                    channel=NotificationChannel.SMS,
+                    recipient=user_preference.phone_number,
+                    days_before=days_left,
+                    message_preview=message,
+                    status=status,
+                    message_id=message_id,
+                    error_message=error,
+                )
+                if success:
+                    log.sent_at = datetime.now(timezone.utc)
+                db.add(log)
+                db.flush()
+            try:
+                case_timeline_service.record_notification_event(
+                    db=db,
+                    notification_log=log,
+                    status=NotificationStatus.SENT if success else NotificationStatus.FAILED,
+                    provider="twilio",
+                    metadata={
+                        "message_preview": _safe_preview(message),
+                        "error_message": error,
+                    },
+                )
+            except Exception:
+                logger.exception("sms_notification_timeline_event_failed", deadline_id=deadline.id, user_id=deadline.user_id)
+        except IntegrityError:
+            logger.debug("SMS notification already recorded; skipping", deadline_id=deadline.id, days_before=days_left)
             return NotificationResult(
                 success=status == NotificationStatus.SENT,
                 channel=NotificationChannel.SMS,
                 recipient=user_preference.phone_number,
                 message_id=message_id,
                 error=error,
+
             )
+        except Exception:
+            logger.exception("Failed to annotate reserved SMS with task id")
 
         # Offload SMS delivery to background task
         logger.info(
@@ -734,28 +860,21 @@ class NotificationService:
         deadline: CaseDeadline,
         user_preference: UserPreference,
         days_left: int,
+        language: Optional[str] = None,
     ) -> NotificationResult:
         """Send email reminder for a deadline"""
+        template_language = _template_language_key(language)
         # Try per-user template first
         subject = None
         html_content = None
         try:
-            tmpl = get_notification_template_for_user(db, deadline.user_id)
-            if tmpl and (tmpl.email_html_template or tmpl.email_subject_template):
-                values = {
-                    "case_title": deadline.case_title,
-                    "case_number": getattr(deadline, "case_id", ""),
-                    "deadline_date": deadline.deadline_date.strftime("%d %B %Y") if deadline.deadline_date else "",
-                    "days_left": days_left,
-                    "court": "",
-                    "deadline_type": deadline.deadline_type,
-                    "deadline_description": deadline.description or "",
-                    "link": f"https://legalassist.ai/cases/{deadline.case_id}",
-                }
-                if tmpl.email_subject_template:
-                    subject = render_template(tmpl.email_subject_template, values)
-                if tmpl.email_html_template:
-                    html_content = render_template(tmpl.email_html_template, values)
+            tmpl = _resolve_notification_template_values(db, deadline, days_left, NotificationChannel.EMAIL, template_language)
+            if tmpl and (tmpl.get("email_html_template") or tmpl.get("email_subject_template")):
+                values = _build_notification_template_values(deadline, days_left, NotificationChannel.EMAIL, template_language)
+                if tmpl.get("email_subject_template"):
+                    subject = _render_notification_template(tmpl["email_subject_template"], values)
+                if tmpl.get("email_html_template"):
+                    html_content = _render_notification_template(tmpl["email_html_template"], values)
         except TemplateValidationError as e:
             logger.warning("User email template invalid, falling back to default: %s", str(e))
         except Exception:
@@ -768,15 +887,15 @@ class NotificationService:
         # ====================================================================
         # ASYNCHRONOUS DELIVERY OFFLOAD
         # ====================================================================
-        # Instead of calling self.email_client.send_email() directly, which 
-        # would block the current thread for several seconds while waiting 
+        # Instead of calling self.email_client.send_email() directly, which
+        # would block the current thread for several seconds while waiting
         # for the SendGrid API response, we dispatch a Celery task.
         #
-        # This allows the request (or the periodic check) to complete 
-        # immediately, providing a much smoother experience 
+        # This allows the request (or the periodic check) to complete
+        # immediately, providing a much smoother and "snappier" experience
         # for the end-user or the system scheduler.
         # ====================================================================
-        
+
         logger.info(
             "Offloading email delivery to background task",
             user_id=deadline.user_id,
@@ -796,35 +915,13 @@ class NotificationService:
         )
 
         if not created:
-            logger.debug("Email reservation already exists; skipping send", deadline_id=deadline.id, days_before=days_left)
-            return NotificationResult(success=False, channel=NotificationChannel.EMAIL, recipient=user_preference.email, error="Already sent")
 
-        if not _should_use_celery(send_email_task):
-            success, message_id, error = self.email_client.send_email(
-                user_preference.email, subject, html_content
-            )
-
-            status = NotificationStatus.SENT if success else NotificationStatus.FAILED
-
-            update_notification_result(
-                db=db,
-                deadline_id=deadline.id,
-                user_id=deadline.user_id,
-                days_before=days_left,
-                channel=NotificationChannel.EMAIL,
-                status=status,
-                message_id=message_id,
-                error_message=error,
-                message_preview=html_content,
-            )
-
-            return NotificationResult(
-                success=success,
-                channel=NotificationChannel.EMAIL,
-                recipient=user_preference.email,
-                message_id=message_id,
-                error=error,
-            )
+        # Annotate the reserved record with a placeholder task id BEFORE dispatching,
+        # so the worker never races against an uncommitted DB state.
+        reserved_log.message_id = "task_pending"
+        reserved_log.message_preview = html_content
+        db.add(reserved_log)
+        db.commit()
 
         task_result = send_email_task.delay(
             to_email=user_preference.email,
@@ -864,6 +961,7 @@ class NotificationService:
         deadline: CaseDeadline,
         user_preference: UserPreference,
         days_left: Optional[int] = None,
+        language: Optional[str] = None,
     ) -> List[NotificationResult]:
         """
         Send appropriate reminders based on days until deadline and user preferences.
@@ -890,14 +988,16 @@ class NotificationService:
             channels = [user_preference.notification_channel]
 
 
+        notification_language = language or getattr(user_preference, "language", None) or "en"
+
         for channel in channels:
             # Check if reminder was already sent for this specific threshold and channel
             if not has_notification_been_sent(db, deadline.id, days_left, channel):
                 if channel == NotificationChannel.SMS:
-                    result = self.send_sms_reminder(db, deadline, user_preference, days_left)
+                    result = self.send_sms_reminder(db, deadline, user_preference, days_left, notification_language)
                     results.append(result)
                 elif channel == NotificationChannel.EMAIL:
-                    result = self.send_email_reminder(db, deadline, user_preference, days_left)
+                    result = self.send_email_reminder(db, deadline, user_preference, days_left, notification_language)
                     results.append(result)
             else:
                 logger.debug("Notification already sent", 

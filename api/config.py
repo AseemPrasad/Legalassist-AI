@@ -1,126 +1,326 @@
-"""
-API Configuration
-"""
 import os
-from typing import Optional
-from pydantic_settings import BaseSettings
+import logging
+import secrets
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Initialize logging for config phase
+logger = logging.getLogger(__name__)
+
+# Load .env file
+PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ENV_PATH = PROJECT_ROOT / ".env"
+
+if PROJECT_ENV_PATH.exists():
+    load_dotenv(dotenv_path=PROJECT_ENV_PATH)
+else:
+    load_dotenv()
+
+def _get_val(key, default=None):
+    # Try Streamlit secrets first (if in a Streamlit context)
+    try:
+        import streamlit as st
+        if key in st.secrets:
+            return st.secrets[key]
+    except (ImportError, RuntimeError, AttributeError, FileNotFoundError):
+        pass
+    
+    # Fallback to environment variables
+    return os.getenv(key, default)
+
+def _get_bool_env(key, default=False):
+    val = str(_get_val(key, str(default))).lower()
+    return val in ("1", "true", "yes", "on")
+
+def _get_int_env(key, default):
+    try:
+        return int(_get_val(key, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+class Config:
+    # --- App Identity ---
+    APP_NAME = _get_val("APP_NAME", "LegalEase AI")
+    APP_ENV = _get_val("APP_ENV", _get_val("ENVIRONMENT", "development")).lower()
+    DEBUG = _get_bool_env("DEBUG", APP_ENV in ("dev", "development", "local"))
+    TESTING = _get_bool_env("TESTING", False)
+    
+    # --- Logging ---
+    LOG_LEVEL = _get_val("LOG_LEVEL", "INFO")
+    
+    # --- Model Settings (LLM) ---
+    # The primary model used for generating summaries and legal remedies analysis.
+    # Default is Llama 3.1 8B Instruct via OpenRouter.
+    DEFAULT_MODEL = _get_val("DEFAULT_MODEL", "meta-llama/llama-3.1-8b-instruct")
+    
+    # Base URL for the OpenAI-compatible API (OpenRouter is used by default).
+    OPENROUTER_BASE_URL = _get_val("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    
+    # API Key for OpenRouter. Must be provided for the AI features to work.
+    OPENROUTER_API_KEY = _get_val("OPENROUTER_API_KEY", "")
+    
+    # --- AI Request Performance & Reliability ---
+    # The maximum number of tokens allowed for judgment summaries.
+    SUMMARY_MAX_TOKENS = _get_int_env("SUMMARY_MAX_TOKENS", 280)
+    
+    # The maximum number of tokens allowed for legal remedies analysis.
+    REMEDIES_MAX_TOKENS = _get_int_env("REMEDIES_MAX_TOKENS", 900)
+    
+    # Controls the randomness of the AI output. 
+    # Lower values (0.0-0.2) make the output more deterministic and focused.
+    LLM_TEMPERATURE = float(_get_val("LLM_TEMPERATURE", "0.05"))
+    
+    # The timeout in seconds for AI model API requests. 
+    # This is critical for preventing the application from hanging on slow network calls.
+    AI_REQUEST_TIMEOUT = float(_get_val("AI_REQUEST_TIMEOUT", _get_val("LLM_TIMEOUT", "60.0")))
+    
+    # Alias for backward compatibility with legacy code.
+    LLM_TIMEOUT = AI_REQUEST_TIMEOUT 
+    
+    # The maximum number of retry attempts for failed AI requests (e.g., on rate limits).
+    AI_MAX_RETRIES = _get_int_env("AI_MAX_RETRIES", 3)
+    
+    # The base delay in seconds for exponential backoff during retries.
+    AI_RETRY_BACKOFF_BASE = float(_get_val("AI_RETRY_BACKOFF_BASE", "2.0"))
+
+    # --- OCR Settings ---
+    OCR_ENABLED = _get_bool_env("OCR_ENABLED", False)
+    OCR_LANGUAGES = _get_val("OCR_LANGUAGES", "eng+hin")
+    OCR_DPI = _get_int_env("OCR_DPI", 300)
+    
+    # --- File Processing ---
+    MAX_FILE_SIZE_MB = _get_int_env("MAX_FILE_SIZE_MB", 25)
+    WARN_FILE_SIZE_MB = _get_int_env("WARN_FILE_SIZE_MB", 10)
+    TEXT_COMPRESSION_LIMIT = _get_int_env("TEXT_COMPRESSION_LIMIT", 6000)
+    # --- Attachments ---
+    # Directory where uploaded attachments are stored (development)
+    ATTACHMENTS_DIR = _get_val("ATTACHMENTS_DIR", str(PROJECT_ROOT / "attachments"))
+    # Use randomized filenames to avoid collisions and leaking original names
+    ATTACHMENTS_RANDOMIZE_FILENAMES = _get_bool_env("ATTACHMENTS_RANDOMIZE_FILENAMES", True)
+    
+    # --- Database Settings ---
+    DATABASE_URL = _get_val("DATABASE_URL", "sqlite:///./legalassist.db")
+
+    # --- Backend API Settings ---
+    API_BASE_URL = _get_val("API_BASE_URL", "")
+    API_REQUEST_TIMEOUT_SECONDS = float(_get_val("API_REQUEST_TIMEOUT_SECONDS", "5.0"))
+    
+    # --- Authentication (JWT & OTP) ---
+    JWT_ALGORITHM = "HS256"
+    JWT_EXPIRY_HOURS = _get_int_env("JWT_EXPIRY_HOURS", 7 * 24)
+    OTP_EXPIRY_MINUTES = _get_int_env("OTP_EXPIRY_MINUTES", 10)
+    OTP_MAX_ATTEMPTS = _get_int_env("OTP_MAX_ATTEMPTS", 3)
+    JWT_ISSUER = _get_val("JWT_ISSUER", "legalassist.ai")
+    JWT_AUDIENCE = _get_val("JWT_AUDIENCE", "legalassist-users")
+    
+    @classmethod
+    def get_jwt_secret(cls):
+        """
+        Resolve JWT secret securely.
+        
+        JWT_SECRET must be provided via environment variable or Streamlit secrets.
+        File-based secrets are no longer supported for security.
+        
+        Raises:
+            RuntimeError: If JWT_SECRET is not configured in environment variables.
+        """
+        # Try environment / streamlit secrets first
+        secret = str(_get_val("JWT_SECRET", "")).strip()
+        if secret:
+            return secret
+
+        # Try central secret manager (Vault or env fallback)
+        try:
+            from utils.secret_manager import get_secret
+            vault_secret = get_secret("jwt_secret")
+            if vault_secret:
+                return str(vault_secret).strip()
+        except Exception:
+            pass
+
+        env_name = cls.APP_ENV.upper()
+        raise RuntimeError(
+            f"JWT_SECRET is not configured for the {env_name} environment. "
+            "For security, secrets must be explicitly provided via the 'JWT_SECRET' "
+            "environment variable or a configured Vault."
+        )
+
+    # --- Notification Settings (SMS) ---
+    TWILIO_ACCOUNT_SID = _get_val("TWILIO_ACCOUNT_SID", "")
+    TWILIO_FROM_NUMBER = _get_val("TWILIO_FROM_NUMBER", "")
+    TWILIO_AUTH_TOKEN = None
+
+    @classmethod
+    def get_twilio_auth_token(cls) -> str:
+        """Return the Twilio auth token, retrieved on demand to limit exposure."""
+        if cls.TWILIO_AUTH_TOKEN is not None:
+            return cls.TWILIO_AUTH_TOKEN
+        # Prefer centralized secret manager
+        try:
+            from utils.secret_manager import get_secret
+            val = get_secret("twilio_auth_token") or _get_val("TWILIO_AUTH_TOKEN", "")
+            return str(val or "")
+        except Exception:
+            return str(_get_val("TWILIO_AUTH_TOKEN", "") or "")
+
+    # --- Notification Settings (Email) ---
+    SENDGRID_FROM_EMAIL = _get_val("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
+    SENDGRID_API_KEY = None
+
+    @classmethod
+    def get_sendgrid_api_key(cls) -> str:
+        """Return the SendGrid API key, retrieved on demand to limit exposure."""
+        if cls.SENDGRID_API_KEY is not None:
+            return cls.SENDGRID_API_KEY
+        try:
+            from utils.secret_manager import get_secret
+            val = get_secret("sendgrid_api_key") or _get_val("SENDGRID_API_KEY", "")
+            return str(val or "")
+        except Exception:
+            return str(_get_val("SENDGRID_API_KEY", "") or "")
+
+    # --- Application URLs ---
+    BASE_URL = _get_val("BASE_URL", "https://legalassist.ai")
+
+    @classmethod
+    def is_development(cls):
+        env_dev = cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
+        if not env_dev:
+            return False
+        # Secondary safety check: flag if BASE_URL looks like production
+        base = str(cls.BASE_URL or "").lower()
+        if not any(local in base for local in ("localhost", "127.0.0.1", "0.0.0.0", "::1")):
+            import logging
+            logging.getLogger(__name__).warning(
+                "is_development()=True but BASE_URL=%s suggests a non-local deployment. "
+                "Review APP_ENV / DEBUG / TESTING settings.",
+                base,
+            )
+        return env_dev
+
+    @classmethod
+    def is_production(cls):
+        return cls.APP_ENV in ("production", "prod", "live")
 
 
-class APISettings(BaseSettings):
-    """API Configuration"""
-    
-    # API Info
-    API_TITLE: str = "Legalassist-AI"
-    API_VERSION: str = "1.0.0"
-    API_DESCRIPTION: str = "Comprehensive legal case analysis and deadline management API"
-    
-    # Server
-    API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
-    API_PORT: int = int(os.getenv("API_PORT", "8000"))
-    API_WORKERS: int = int(os.getenv("API_WORKERS", "4"))
-    
-    # Environment
-    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+import re
+import copy
 
-    # CORS
-    CORS_ORIGINS: list = [
-        "http://localhost:3000",
-        "http://localhost:8501",
-        "http://localhost:8000",
+class ConfigSanitizer:
+    """
+    Utility class to sanitize configuration dictionaries before logging to prevent
+    accidental leakage of sensitive credentials like API keys and JWT secrets.
+    """
+    
+    # Patterns for keys that likely contain sensitive data
+    SENSITIVE_KEY_PATTERNS = [
+        re.compile(r"secret", re.IGNORECASE),
+        re.compile(r"key", re.IGNORECASE),
+        re.compile(r"token", re.IGNORECASE),
+        re.compile(r"password", re.IGNORECASE),
+        re.compile(r"pwd", re.IGNORECASE),
+        re.compile(r"auth", re.IGNORECASE),
+        re.compile(r"credential", re.IGNORECASE),
+        re.compile(r"jwt", re.IGNORECASE),
+        re.compile(r"sid", re.IGNORECASE),
+        re.compile(r"api_?key", re.IGNORECASE),
+        re.compile(r"access", re.IGNORECASE),
+        re.compile(r"url", re.IGNORECASE),
     ]
 
-    # Allowed Hosts
-    ALLOWED_HOSTS: list = ["localhost", "127.0.0.1"]
+    # Keys that we explicitly want to mask
+    EXPLICIT_SENSITIVE_KEYS = {
+        "DATABASE_URL",
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+        "JWT_SECRET",
+        "JWT_SECRET_PREVIOUS",
+        "JWT_SECRET_KEY",
+        "TWILIO_ACCOUNT_SID",
+        "TWILIO_AUTH_TOKEN",
+        "SENDGRID_API_KEY",
+    }
     
-    # Rate Limiting
-    RATE_LIMIT_ENABLED: bool = True
-    RATE_LIMIT_REQUESTS: int = 100  # requests
-    RATE_LIMIT_WINDOW: int = 60  # seconds
-    RATE_LIMIT_BURST: int = 200  # max burst
-<<<<<<< fix/profduction
-    AUTH_RATE_LIMIT_REQUESTS: int = 5  # auth-specific limit
-    AUTH_RATE_LIMIT_WINDOW: int = 60  # auth-specific window (seconds)
-=======
-    RATE_LIMIT_ABUSE_THRESHOLD: int = 3  # consecutive denials before a temporary block
-    RATE_LIMIT_ABUSE_WINDOW: int = 60  # seconds for abuse counter window
-    RATE_LIMIT_ABUSE_BLOCK_SECONDS: int = 300  # block duration after abuse threshold
->>>>>>> main
-    
-    # Authentication
-    AUTH_ENABLED: bool = True
-    # Prefer externally managed secrets; fall back to environment for local dev
+    @classmethod
+    def is_sensitive(cls, key: str) -> bool:
+        """
+        Determine if a configuration key represents sensitive information.
+        """
+        if key.upper() in cls.EXPLICIT_SENSITIVE_KEYS:
+            return True
+            
+        for pattern in cls.SENSITIVE_KEY_PATTERNS:
+            if pattern.search(key):
+                return True
+                
+        return False
+        
+    @classmethod
+    def mask_string(cls, value: str) -> str:
+        """
+        Mask a string value.
+        - Strings <= 4 chars: completely masked with asterisks
+        - Strings 5-8 chars: show 1st char, mask rest, show last char
+        - Strings > 8 chars: show 1st 2 chars, mask rest, show last 2 chars
+        """
+        if not value:
+            return value
+            
+        length = len(value)
+        if length <= 4:
+            return "*" * length
+        elif length <= 8:
+            return f"{value[0]}{'*' * (length - 2)}{value[-1]}"
+        else:
+            return f"{value[:2]}{'*' * (length - 4)}{value[-2:]}"
+
+    @classmethod
+    def sanitize_value(cls, value: any) -> any:
+        """Sanitize an individual value."""
+        if value is None:
+            return value
+        elif isinstance(value, bool):
+            return value
+        elif isinstance(value, (int, float)):
+            return "***"
+        else:
+            return cls.mask_string(str(value))
+
+    @classmethod
+    def sanitize_dict(cls, config_dict: dict) -> dict:
+        """
+        Recursively sanitize a dictionary, masking sensitive values.
+        Returns a new dictionary; does not mutate the original.
+        """
+        sanitized = {}
+        for k, v in config_dict.items():
+            if isinstance(v, dict):
+                sanitized[k] = cls.sanitize_dict(v)
+            elif cls.is_sensitive(str(k)):
+                sanitized[k] = cls.sanitize_value(v)
+            else:
+                sanitized[k] = v
+        return sanitized
+
+
+def get_config_dict(cls_obj) -> dict:
+    """Extract configuration variables from a class object."""
+    cfg = {}
+    for key in dir(cls_obj):
+        if key.startswith("_"):
+            continue
+        val = getattr(cls_obj, key)
+        if callable(val) or isinstance(val, (classmethod, staticmethod, property)):
+            continue
+        cfg[key] = val
+    return cfg
+
+# Print config to stdout/logger if debug mode is enabled, using the sanitizer
+if Config.DEBUG:
     try:
-        from utils.secret_manager import get_secret
-        _jwt_from_vault = get_secret("jwt_secret")
-    except Exception:
-        _jwt_from_vault = None
-
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", _jwt_from_vault or "")
-    JWT_SECRET_KEY_PREVIOUS: str = ""
-    JWT_ALGORITHM: str = "HS256"
-    JWT_ISSUER: str = "legalassist.ai"
-    JWT_AUDIENCE: str = "legalassist-users"
-    JWT_EXPIRATION_HOURS: int = int(os.getenv("JWT_EXPIRATION_HOURS", os.getenv("JWT_EXPIRY_HOURS", "168")))
-    JWT_ACCESS_TOKEN_MINUTES: int = int(os.getenv("JWT_ACCESS_TOKEN_MINUTES", str(JWT_EXPIRATION_HOURS * 60)))
-    API_KEY_HEADER: str = "X-API-Key"
-    CSRF_SECRET: str = ""
-    
-    # Database
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL", 
-        "postgresql://user:password@localhost:5432/legalassist"
-    )
-    DATABASE_POOL_SIZE: int = 20
-    DATABASE_MAX_OVERFLOW: int = 10
-    
-    # Redis
-    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    REDIS_CACHE_TTL: int = 3600  # 1 hour
-    
-    # Celery
-    CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1")
-    CELERY_RESULT_BACKEND: str = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/2")
-    CELERY_TASK_TIMEOUT: int = 3600  # 1 hour
-    CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes
-    
-    # File Upload
-    UPLOAD_MAX_SIZE: int = 500 * 1024 * 1024  # 500 MB
-    UPLOAD_EXTENSIONS: list = [".pdf", ".doc", ".docx", ".txt", ".html"]
-    UPLOAD_TEMP_DIR: str = "/tmp/legalassist-uploads"
-    
-    # PDF Export
-    PDF_MAX_PAGES: int = 5000
-    PDF_QUALITY: str = "high"  # low, medium, high
-    
-    # LLM Settings
-    LLM_MAX_TOKENS: int = 2000
-    LLM_TEMPERATURE: float = 0.7
-    LLM_MODEL: str = "gpt-4"
-    LLM_TIMEOUT: int = 120  # seconds
-    
-    # Logging
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-    LOG_FORMAT: str = "json"
-    
-    # Observability
-    ENABLE_METRICS: bool = True
-    ENABLE_TRACING: bool = True
-    JAEGER_ENABLED: bool = os.getenv("JAEGER_ENABLED", "false").lower() == "true"
-    
-    # WebSocket
-    WEBSOCKET_RATE_LIMIT_REQUESTS: int = 30
-    WEBSOCKET_RATE_LIMIT_WINDOW: int = 60
-
-    # Feature Flags
-    ENABLE_OAUTH2: bool = os.getenv("ENABLE_OAUTH2", "true").lower() == "true"
-    ENABLE_WEBSOCKET: bool = os.getenv("ENABLE_WEBSOCKET", "true").lower() == "true"
-    ENABLE_ANALYTICS: bool = os.getenv("ENABLE_ANALYTICS", "true").lower() == "true"
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-
-
-def get_settings() -> APISettings:
-    """Get API settings"""
-    return APISettings()
+        raw_config = get_config_dict(Config)
+        safe_config = ConfigSanitizer.sanitize_dict(raw_config)
+        logger.debug(f"Active Configuration (Sanitized): {safe_config}")
+        print(f"DEBUG: LegalAssist AI Config Loaded: {safe_config}")
+    except Exception as e:
+        logger.error(f"Failed to dump sanitized configuration: {e}")

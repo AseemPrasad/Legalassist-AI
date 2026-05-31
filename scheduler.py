@@ -322,6 +322,7 @@ def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], boo
                 prefs_by_user = {p.user_id: p for p in prefs}
 
 
+
                 logger.info("scheduler_processing_deadline", case_id=deadline.case_id, days_left=days_left)
 
                 # Send reminders using the notification service

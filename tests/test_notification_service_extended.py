@@ -13,11 +13,12 @@ from database import (
     NotificationChannel,
     create_case_deadline,
     create_or_update_user_preference,
+    create_or_update_notification_template,
     Case,
     CaseStatus,
     User,
 )
-from notification_service import NotificationService, SMSClient, EmailClient
+from notification_service import NotificationService, SMSClient, EmailClient, _render_notification_template
 
 @pytest.fixture(scope="function")
 def test_db():
@@ -109,3 +110,51 @@ class TestNotificationServiceExtended:
             # This is hard to test after imports have already happened in the module
             # But we can at least check if the logic in the module would handle it
             pass
+
+    def test_missing_template_variables_render_safely(self):
+        template = "Your deadline for {case_title} is in {days_before} days. Suggested action: {first_action}."
+        rendered = _render_notification_template(
+            template,
+            {
+                "case_title": "State vs Smith",
+                "days_before": 7,
+                "days_left": 7,
+                "link": "https://legalassist.ai/cases/1",
+            },
+        )
+
+        assert "State vs Smith" in rendered
+        assert "7 days" in rendered
+        assert "Suggested action:" in rendered
+
+    def test_notification_template_variant_resolution(self, test_db):
+        user = User(email="templating@example.com")
+        test_db.add(user)
+        test_db.commit()
+        test_db.refresh(user)
+
+        create_or_update_notification_template(
+            db=test_db,
+            user_id=user.id,
+            sms_template="Default {case_title}",
+            email_subject_template="Default subject {case_title}",
+            email_html_template="<p>Default {case_title}</p>",
+        )
+
+        create_or_update_notification_template(
+            db=test_db,
+            user_id=user.id,
+            sms_template="Hindi SMS {case_title} {first_action}",
+            channel=NotificationChannel.SMS,
+            language="hi",
+        )
+
+        template = test_db.query(__import__("database").NotificationTemplate).filter(
+            __import__("database").NotificationTemplate.user_id == user.id
+        ).one()
+
+        resolved_hi = template.resolve_templates(channel=NotificationChannel.SMS, language="hi")
+        resolved_default = template.resolve_templates(channel=NotificationChannel.EMAIL, language="en")
+
+        assert resolved_hi["sms_template"] == "Hindi SMS {case_title} {first_action}"
+        assert resolved_default["sms_template"] == "Default {case_title}"

@@ -16,6 +16,7 @@ from config import Config
 from db.crud.notifications import update_notification_log_by_message_id
 from api.dependencies import get_db_rls, get_db_rls_optional
 from db.models.notifications import NotificationStatus
+from services.timeline_service import timeline_service
 
 try:
     from twilio.request_validator import RequestValidator
@@ -144,6 +145,19 @@ def _update_delivery_status(db: Session, message_id: str | None, status_value: N
             message_preview=message_preview,
         )
         if updated:
+            try:
+                timeline_service.record_notification_event(
+                    db=db,
+                    notification_log=updated,
+                    status=status_value,
+                    provider="twilio" if updated.channel.value == "sms" else "sendgrid",
+                    metadata={
+                        "error_message": error_message,
+                        "message_preview": message_preview,
+                    },
+                )
+            except Exception:
+                logger.exception("notification_timeline_event_failed", notification_log_id=updated.id, message_id=candidate)
             return updated
     return None
 
