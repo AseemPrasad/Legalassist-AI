@@ -313,7 +313,7 @@ def log_notification(
         failed_at=dt.datetime.now(dt.timezone.utc) if status == NotificationStatus.FAILED else None,
     )
     db.add(log)
-    db.flush()
+    db.commit()
     db.refresh(log)
     return log
 
