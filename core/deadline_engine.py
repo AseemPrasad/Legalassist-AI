@@ -42,6 +42,7 @@ _JURISDICTION_WEEKENDS = {
 
 
 def _is_weekend(dt: date, jurisdiction: Optional[str] = None) -> bool:
+    # Check jurisdiction-specific weekend days mapped in dictionary
     weekend_days = _JURISDICTION_WEEKENDS.get(jurisdiction.upper() if jurisdiction else "", {5, 6})
     return dt.weekday() in weekend_days
 
