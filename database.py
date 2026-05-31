@@ -56,10 +56,9 @@ from db.crud.notifications import (
     has_notification_been_sent,
     log_notification,
     get_notification_history,
+    get_notification_template_for_user,
+    create_or_update_notification_template,
 )
-from db.case_service import save_case_note_draft, publish_case_note, get_case_note_history
-from db.otp_service import revoke_token, is_token_revoked, cleanup_expired_revoked_tokens
-
 
 __all__ = [
     "Base",
@@ -98,12 +97,18 @@ __all__ = [
     "CaseArgument",
     "KnowledgeGraphEdge",
     "PrecedentMatch",
+    "Report",
+    "ReportStatus",
+    "ReportType",
+    "ReportFormat",
     "create_case_deadline",
     "get_upcoming_deadlines",
     "get_user_deadlines",
     "has_notification_been_sent",
     "log_notification",
     "get_notification_history",
+    "get_notification_template_for_user",
+    "create_or_update_notification_template",
     "create_or_update_user_preference",
     "create_user",
     "get_user_by_email",
@@ -115,6 +120,9 @@ __all__ = [
     "record_otp_failed_attempt",
     "reset_otp_failed_attempts",
     "cleanup_expired_otps",
+    "revoke_token",
+    "is_token_revoked",
+    "cleanup_expired_revoked_tokens",
     "create_case",
     "get_user_cases",
     "get_case_by_id",
@@ -137,16 +145,10 @@ __all__ = [
     "get_attachments_for_case",
     "CaseNote",
     "CaseNoteVersion",
-    "Report",
-    "ReportStatus",
-    "ReportType",
-    "ReportFormat",
     "save_case_note_draft",
+    "get_case_note",
     "publish_case_note",
     "get_case_note_history",
-    "revoke_token",
-    "is_token_revoked",
-    "cleanup_expired_revoked_tokens",
 ]
 
 
@@ -177,13 +179,17 @@ def update_user_last_login(db: Session, user_id: int) -> Optional[User]:
     return user
 
 
-def create_otp_verification(db: Session, email: str, otp_hash: str, expires_at: dt.datetime) -> OTPVerification:
-    """Create a new OTP verification record"""
-    otp = OTPVerification(email=email, otp_hash=otp_hash, expires_at=expires_at)
-    db.add(otp)
-    db.commit()
-    db.refresh(otp)
-    return otp
+def create_otp_verification(
+    db: Session,
+    email: str,
+    otp_hash: str,
+    expires_at: dt.datetime,
+    max_requests_per_hour: int = 5,
+    requester_ip: Optional[str] = None,
+) -> OTPVerification:
+    """Create a new OTP verification record, enforcing rate limits and IP tracking."""
+    from db.otp_service import create_otp_verification as _create_otp
+    return _create_otp(db, email, otp_hash, expires_at, max_requests_per_hour, requester_ip)
 
 
 def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
@@ -261,6 +267,28 @@ def cleanup_expired_otps(db: Session) -> int:
     return deleted
 
 
+def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
+    """Persist a JWT revocation record."""
+    token = RevokedToken(jti=jti, expires_at=expires_at)
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    return token
+
+
+def is_token_revoked(db: Session, jti: str) -> bool:
+    """Check whether a JWT has already been revoked."""
+    return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+
+
+def cleanup_expired_revoked_tokens(db: Session) -> int:
+    """Delete expired JWT revocation records."""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = db.query(RevokedToken).filter(RevokedToken.expires_at < now).delete()
+    db.commit()
+    return deleted
+
+
 def create_case(db: Session, user_id: int, case_number: str, case_type: str, jurisdiction: str, title: Optional[str] = None) -> Case:
     """Create a new case"""
     case = Case(
@@ -324,9 +352,25 @@ def create_case_document(
     summary: Optional[str] = None,
     remedies: Optional[dict] = None,
 ) -> CaseDocument:
-    """Create a new case document"""
+    """Create a new case document.
+
+    Security: enforce that `case_id` belongs to `user_id` (server-side ownership
+    validation), consistent with create_case_deadline.
+    """
+    try:
+        normalized_case_id = int(case_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("case_id must be an integer matching cases.id") from exc
+
+    # Ownership validation (prevents attaching documents to another user's case)
+    case = db.query(Case).filter(Case.id == normalized_case_id).first()
+    if not case or case.user_id != user_id:
+        raise PermissionError(
+            "case_id not found or not owned by the provided user_id"
+        )
+
     doc = CaseDocument(
-        case_id=case_id,
+        case_id=normalized_case_id,
         document_type=document_type,
         document_content=document_content,
         file_path=file_path,
@@ -336,6 +380,43 @@ def create_case_document(
     db.add(doc)
     db.commit()
     db.refresh(doc)
+    return doc
+
+
+def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
+    """Get all documents for a case"""
+    return db.query(CaseDocument).filter(
+        CaseDocument.case_id == case_id
+    ).order_by(CaseDocument.uploaded_at).all()
+
+
+def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocument]:
+    """Get a case document by ID"""
+    return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
+
+
+def update_case_document(
+    db: Session,
+    document_id: int,
+    document_content: Optional[str] = None,
+    summary: Optional[str] = None,
+    remedies: Optional[dict] = None,
+) -> Optional[CaseDocument]:
+    """Update case document"""
+    doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
+    if doc:
+        if document_content is not None:
+            doc.document_content = document_content
+        if summary is not None:
+            doc.summary = summary
+        if remedies is not None:
+            doc.remedies = remedies
+        try:
+            db.commit()
+            db.refresh(doc)
+        except Exception as e:
+            db.rollback()
+            raise RuntimeError(f"Database write failed for case document {document_id}: {str(e)}") from e
     return doc
 
 
@@ -456,18 +537,6 @@ def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
         CaseDeadline.is_completed == False,
         CaseDeadline.deadline_date > now,
     ).order_by(CaseDeadline.deadline_date).all()
-
-
-def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
-    """Get all documents for a case"""
-    return db.query(CaseDocument).filter(
-        CaseDocument.case_id == case_id
-    ).order_by(CaseDocument.uploaded_at).all()
-
-
-def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocument]:
-    """Get a document by ID"""
-    return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
 
 
 def get_notification_template_for_user(db: Session, user_id: int) -> Optional[NotificationTemplate]:
@@ -604,84 +673,6 @@ def create_timeline_event(
     return event
 
 
-def create_case_document(
-    db: Session,
-    case_id: int,
-    document_type: DocumentType,
-    user_id: int,
-    document_content: Optional[str] = None,
-    file_path: Optional[str] = None,
-    summary: Optional[str] = None,
-    remedies: Optional[dict] = None,
-) -> CaseDocument:
-    """Create a new case document.
-
-    Security: enforce that `case_id` belongs to `user_id` (server-side ownership
-    validation), consistent with create_case_deadline.
-    """
-    try:
-        normalized_case_id = int(case_id)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("case_id must be an integer matching cases.id") from exc
-
-    # Ownership validation (prevents attaching documents to another user's case)
-    case = db.query(Case).filter(Case.id == normalized_case_id).first()
-    if not case or case.user_id != user_id:
-        raise PermissionError(
-            "case_id not found or not owned by the provided user_id"
-        )
-
-    doc = CaseDocument(
-        case_id=normalized_case_id,
-        document_type=document_type,
-        document_content=document_content,
-        file_path=file_path,
-        summary=summary,
-        remedies=remedies,
-    )
-    db.add(doc)
-    db.commit()
-    db.refresh(doc)
-    return doc
-
-
-def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
-    """Get all documents for a case"""
-    return db.query(CaseDocument).filter(
-        CaseDocument.case_id == case_id
-    ).order_by(CaseDocument.uploaded_at).all()
-
-
-def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocument]:
-    """Get a case document by ID"""
-    return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
-
-
-def update_case_document(
-    db: Session,
-    document_id: int,
-    document_content: Optional[str] = None,
-    summary: Optional[str] = None,
-    remedies: Optional[dict] = None,
-) -> Optional[CaseDocument]:
-    """Update case document"""
-    doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
-    if doc:
-        if document_content is not None:
-            doc.document_content = document_content
-        if summary is not None:
-            doc.summary = summary
-        if remedies is not None:
-            doc.remedies = remedies
-        try:
-            db.commit()
-            db.refresh(doc)
-        except Exception as e:
-            db.rollback()
-            raise RuntimeError(f"Database write failed for case document {document_id}: {str(e)}") from e
-    return doc
-
-
 def create_attachment(
     db: Session,
     user_id: int,
@@ -713,16 +704,14 @@ def get_attachments_for_case(db: Session, case_id: int) -> List[Attachment]:
     return db.query(Attachment).filter(Attachment.case_id == case_id).all()
 
 
-
-# Dynamic relationships injection to support legacy collaborative features on Case and User models
-from db.models import Case, User
+# Dynamic relationships injection to support legacy collaborative features on Case model
+from db.models.cases import Case
 from sqlalchemy.orm import relationship
 
 Case.comments = relationship("CaseComment", back_populates="case", cascade="all, delete-orphan", order_by="CaseComment.created_at")
 Case.presence_updates = relationship("CasePresence", back_populates="case", cascade="all, delete-orphan")
 User.case_comments = relationship("CaseComment", back_populates="user", cascade="all, delete-orphan")
 User.case_presence = relationship("CasePresence", back_populates="user", cascade="all, delete-orphan")
-
 
 
 import enum
@@ -869,14 +858,16 @@ def reserve_notification(
         db.commit()
         db.refresh(log)
         return log, True
-    except IntegrityError:
+    except Exception:
         db.rollback()
         existing = db.query(NotificationLog).filter(
             NotificationLog.deadline_id == deadline_id,
             NotificationLog.days_before == days_before,
             NotificationLog.channel == channel,
         ).first()
-        return existing, False
+        if existing:
+            return existing, False
+        raise
 
 def update_notification_result(
     db: Session,
@@ -1070,3 +1061,108 @@ def get_case_presence(db: Session, case_id: int, active_window_minutes: int = 5)
         CasePresence.case_id == case_id,
         CasePresence.last_seen >= cutoff,
     ).order_by(CasePresence.last_seen.desc()).all()
+
+
+def get_case_note(db: Session, case_id: int, user_id: int) -> Optional[CaseNote]:
+    """Get the editable note state for a case owned by the user."""
+    return (
+        db.query(CaseNote)
+        .filter(
+            CaseNote.case_id == case_id,
+            CaseNote.user_id == user_id,
+        )
+        .first()
+    )
+
+
+def save_case_note_draft(
+    db: Session,
+    case_id: int,
+    user_id: int,
+    note_text: str,
+    changed_by_email: Optional[str] = None,
+) -> CaseNote:
+    """Persist the current draft text without creating a published version."""
+    case = get_case_by_id(db, case_id)
+    if not case or case.user_id != user_id:
+        raise ValueError("Case not found or not owned by user")
+
+    note = get_case_note(db, case_id, user_id)
+    if not note:
+        note = CaseNote(case_id=case_id, user_id=user_id, draft_text=note_text)
+        db.add(note)
+    else:
+        note.draft_text = note_text
+        note.draft_updated_at = dt.datetime.now(dt.timezone.utc)
+
+    db.commit()
+    db.refresh(note)
+    return note
+
+
+def publish_case_note(
+    db: Session,
+    case_id: int,
+    user_id: int,
+    note_text: Optional[str] = None,
+    changed_by_email: Optional[str] = None,
+) -> CaseNoteVersion:
+    """Create an immutable published version from the current draft."""
+    case = get_case_by_id(db, case_id)
+    if not case or case.user_id != user_id:
+        raise ValueError("Case not found or not owned by user")
+
+    note = get_case_note(db, case_id, user_id)
+    if not note:
+        note = CaseNote(case_id=case_id, user_id=user_id, draft_text=note_text or "")
+        db.add(note)
+        db.flush()
+    elif note_text is not None:
+        note.draft_text = note_text
+        note.draft_updated_at = dt.datetime.now(dt.timezone.utc)
+
+    current_text = note_text if note_text is not None else note.draft_text
+    if current_text is None:
+        current_text = ""
+
+    next_version = (
+        db.query(CaseNoteVersion.version_number)
+        .filter(CaseNoteVersion.case_id == case_id, CaseNoteVersion.note_id == note.id)
+        .order_by(CaseNoteVersion.version_number.desc())
+        .first()
+    )
+    version_number = (next_version[0] if next_version else 0) + 1
+
+    version = CaseNoteVersion(
+        note_id=note.id,
+        case_id=case_id,
+        version_number=version_number,
+        note_text=current_text,
+        change_type="published",
+        changed_by_user_id=user_id,
+        changed_by_email=changed_by_email,
+        version_metadata={"published_from_draft": True},
+    )
+    note.published_text = current_text
+    note.published_at = dt.datetime.now(dt.timezone.utc)
+    note.published_version_id = version_number
+
+    db.add(version)
+    db.commit()
+    db.refresh(version)
+    db.refresh(note)
+    return version
+
+
+def get_case_note_history(db: Session, case_id: int, user_id: int) -> List[CaseNoteVersion]:
+    """Get immutable published note versions for a case."""
+    case = get_case_by_id(db, case_id)
+    if not case or case.user_id != user_id:
+        return []
+
+    return (
+        db.query(CaseNoteVersion)
+        .filter(CaseNoteVersion.case_id == case_id)
+        .order_by(CaseNoteVersion.version_number.desc(), CaseNoteVersion.created_at.desc())
+        .all()
+    )
