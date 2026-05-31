@@ -218,7 +218,24 @@ if not _redis_env:
     celery_app.conf.update = lambda **kw: None
     celery_app.conf.__setitem__ = lambda k, v: None
     celery_app.Task = lambda: None
-    celery_app.task = lambda *args, **kwargs: (lambda f: f)
+    def _stub_task(*dec_args, **dec_kwargs):
+        if dec_args and callable(dec_args[0]):
+            return _stub_task()(dec_args[0])
+        def _wrapper(f):
+            if dec_kwargs.get("bind"):
+                def _bound(*args, **kwargs):
+                    dummy_self = SimpleNamespace(
+                        request=SimpleNamespace(id=str(uuid.uuid4()), retries=0),
+                        retry=lambda *a, **kw: None,
+                        update_state=lambda *a, **kw: None,
+                    )
+                    return f(dummy_self, *args, **kwargs)
+                _bound.__name__ = f.__name__
+                _bound.__qualname__ = f.__qualname__
+                return _bound
+            return f
+        return _wrapper
+    celery_app.task = _stub_task
     celery_app.AsyncResult = lambda *args, **kwargs: SimpleNamespace(state="PENDING", result=None, status="PENDING")
     celery_app.main = "legalassist"
     REDIS_URL = ""
