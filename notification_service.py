@@ -6,6 +6,7 @@ Handles delivery tracking and retry logic.
 import logging
 import structlog
 import os
+import re
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple
 from dataclasses import dataclass
@@ -128,6 +129,98 @@ def _should_use_celery(task) -> bool:
     return True
 
 logger = structlog.get_logger(__name__)
+
+NOTIFICATION_TEMPLATE_ALLOWED_VARS = {
+    "case_title",
+    "case_number",
+    "deadline_date",
+    "days_before",
+    "days_left",
+    "court",
+    "deadline_type",
+    "deadline_description",
+    "first_action",
+    "link",
+    "channel",
+    "language",
+}
+
+
+def _template_language_key(language: Optional[str]) -> str:
+    text = str(language or "en").strip().lower()
+    return text or "en"
+
+
+def _derive_first_action(deadline: CaseDeadline) -> str:
+    description = (getattr(deadline, "description", "") or "").strip()
+    if description:
+        first_sentence = re.split(r"(?<=[.!?])\s+", description, maxsplit=1)[0].strip()
+        if len(first_sentence) > 140:
+            first_sentence = first_sentence[:137].rstrip() + "..."
+        return first_sentence
+
+    deadline_type = str(getattr(deadline, "deadline_type", "") or "").strip().lower()
+    suggestions = {
+        "appeal": "Draft and file the appeal",
+        "filing": "Prepare and submit the filing",
+        "submission": "Gather the required documents and submit them",
+        "response": "Prepare the response and verify deadlines",
+        "hearing": "Review the hearing strategy and supporting documents",
+        "other": "Review the deadline details and plan the next step",
+    }
+    return suggestions.get(deadline_type, "Review the deadline details and plan the next step")
+
+
+def _build_notification_template_values(
+    deadline: CaseDeadline,
+    days_left: int,
+    channel: NotificationChannel,
+    language: Optional[str] = None,
+) -> dict[str, str]:
+    case = getattr(deadline, "case", None)
+    deadline_date = getattr(deadline, "deadline_date", None)
+    deadline_date_text = deadline_date.strftime("%d %b %Y") if hasattr(deadline_date, "strftime") else ""
+    case_number = getattr(case, "case_number", "") if case is not None else ""
+    case_title = getattr(deadline, "case_title", "") or getattr(case, "title", "") or ""
+    court = getattr(case, "jurisdiction", "") if case is not None else ""
+    template_language = _template_language_key(language)
+
+    return {
+        "case_title": str(case_title),
+        "case_number": str(case_number),
+        "deadline_date": deadline_date_text,
+        "days_before": str(days_left),
+        "days_left": str(days_left),
+        "court": str(court),
+        "deadline_type": str(getattr(deadline, "deadline_type", "") or ""),
+        "deadline_description": str(getattr(deadline, "description", "") or ""),
+        "first_action": _derive_first_action(deadline),
+        "link": f"https://legalassist.ai/cases/{getattr(deadline, 'case_id', '')}",
+        "channel": channel.value if hasattr(channel, "value") else str(channel),
+        "language": template_language,
+    }
+
+
+def _render_notification_template(template: str, values: dict[str, str]) -> str:
+    return render_template(
+        template,
+        values,
+        allowed=NOTIFICATION_TEMPLATE_ALLOWED_VARS,
+        missing_as_empty=True,
+    )
+
+
+def _resolve_notification_template_values(
+    db: Session,
+    deadline: CaseDeadline,
+    days_left: int,
+    channel: NotificationChannel,
+    language: Optional[str] = None,
+) -> dict[str, Optional[str]]:
+    template = get_notification_template_for_user(db, deadline.user_id, channel=channel, language=language)
+    if not template:
+        return {"sms_template": None, "email_subject_template": None, "email_html_template": None}
+    return template.resolve_templates(channel=channel, language=language)
 
 
 @dataclass
@@ -614,6 +707,7 @@ class NotificationService:
         deadline: CaseDeadline,
         user_preference: UserPreference,
         days_left: int,
+        language: Optional[str] = None,
     ) -> NotificationResult:
         """Send SMS reminder for a deadline"""
         
@@ -626,22 +720,16 @@ class NotificationService:
                 error="No phone number configured",
             )
 
+        template_language = _template_language_key(language)
+
         # Try per-user template first
         message = None
         try:
-            tmpl = get_notification_template_for_user(db, deadline.user_id)
-            if tmpl and tmpl.sms_template:
-                values = {
-                    "case_title": deadline.case_title,
-                    "case_number": getattr(deadline, "case_id", ""),
-                    "deadline_date": deadline.deadline_date.strftime("%d %b %Y") if deadline.deadline_date else "",
-                    "days_left": days_left,
-                    "court": "",
-                    "deadline_type": deadline.deadline_type,
-                    "deadline_description": deadline.description or "",
-                    "link": f"https://legalassist.ai/cases/{deadline.case_id}",
-                }
-                message = render_template(tmpl.sms_template, values)
+            tmpl = _resolve_notification_template_values(db, deadline, days_left, NotificationChannel.SMS, template_language)
+            sms_template = tmpl.get("sms_template") if isinstance(tmpl, dict) else None
+            if sms_template:
+                values = _build_notification_template_values(deadline, days_left, NotificationChannel.SMS, template_language)
+                message = _render_notification_template(sms_template, values)
         except TemplateValidationError as e:
             logger.warning("User SMS template invalid, falling back to default: %s", str(e))
         except Exception:
@@ -736,28 +824,21 @@ class NotificationService:
         deadline: CaseDeadline,
         user_preference: UserPreference,
         days_left: int,
+        language: Optional[str] = None,
     ) -> NotificationResult:
         """Send email reminder for a deadline"""
+        template_language = _template_language_key(language)
         # Try per-user template first
         subject = None
         html_content = None
         try:
-            tmpl = get_notification_template_for_user(db, deadline.user_id)
-            if tmpl and (tmpl.email_html_template or tmpl.email_subject_template):
-                values = {
-                    "case_title": deadline.case_title,
-                    "case_number": getattr(deadline, "case_id", ""),
-                    "deadline_date": deadline.deadline_date.strftime("%d %B %Y") if deadline.deadline_date else "",
-                    "days_left": days_left,
-                    "court": "",
-                    "deadline_type": deadline.deadline_type,
-                    "deadline_description": deadline.description or "",
-                    "link": f"https://legalassist.ai/cases/{deadline.case_id}",
-                }
-                if tmpl.email_subject_template:
-                    subject = render_template(tmpl.email_subject_template, values)
-                if tmpl.email_html_template:
-                    html_content = render_template(tmpl.email_html_template, values)
+            tmpl = _resolve_notification_template_values(db, deadline, days_left, NotificationChannel.EMAIL, template_language)
+            if tmpl and (tmpl.get("email_html_template") or tmpl.get("email_subject_template")):
+                values = _build_notification_template_values(deadline, days_left, NotificationChannel.EMAIL, template_language)
+                if tmpl.get("email_subject_template"):
+                    subject = _render_notification_template(tmpl["email_subject_template"], values)
+                if tmpl.get("email_html_template"):
+                    html_content = _render_notification_template(tmpl["email_html_template"], values)
         except TemplateValidationError as e:
             logger.warning("User email template invalid, falling back to default: %s", str(e))
         except Exception:
@@ -866,6 +947,7 @@ class NotificationService:
         deadline: CaseDeadline,
         user_preference: UserPreference,
         days_left: Optional[int] = None,
+        language: Optional[str] = None,
     ) -> List[NotificationResult]:
         """
         Send appropriate reminders based on days until deadline and user preferences.
@@ -892,14 +974,16 @@ class NotificationService:
             channels = [user_preference.notification_channel]
 
 
+        notification_language = language or getattr(user_preference, "language", None) or "en"
+
         for channel in channels:
             # Check if reminder was already sent for this specific threshold and channel
             if not has_notification_been_sent(db, deadline.id, days_left, channel):
                 if channel == NotificationChannel.SMS:
-                    result = self.send_sms_reminder(db, deadline, user_preference, days_left)
+                    result = self.send_sms_reminder(db, deadline, user_preference, days_left, notification_language)
                     results.append(result)
                 elif channel == NotificationChannel.EMAIL:
-                    result = self.send_email_reminder(db, deadline, user_preference, days_left)
+                    result = self.send_email_reminder(db, deadline, user_preference, days_left, notification_language)
                     results.append(result)
             else:
                 logger.debug("Notification already sent", 

@@ -310,6 +310,51 @@ def get_notification_history(db: Session, user_id: int, limit: int = 50) -> List
     ).order_by(NotificationLog.created_at.desc()).limit(limit).all()
 
 
-def get_notification_template_for_user(db: Session, user_id: int):
-    return db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
+def get_notification_template_for_user(
+    db: Session,
+    user_id: int,
+    channel: Optional[NotificationChannel] = None,
+    language: Optional[str] = None,
+):
+    template = db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
+    if not template:
+        return None
+    if channel is None and language is None:
+        return template
+    return template
+
+
+def create_or_update_notification_template(
+    db: Session,
+    user_id: int,
+    sms_template: Optional[str] = None,
+    email_subject_template: Optional[str] = None,
+    email_html_template: Optional[str] = None,
+    channel: Optional[NotificationChannel] = None,
+    language: Optional[str] = None,
+):
+    template = db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
+    if not template:
+        template = NotificationTemplate(user_id=user_id)
+        db.add(template)
+
+    if channel is None and language is None:
+        if sms_template is not None:
+            template.sms_template = sms_template
+        if email_subject_template is not None:
+            template.email_subject_template = email_subject_template
+        if email_html_template is not None:
+            template.email_html_template = email_html_template
+    else:
+        template.set_template_variant(
+            channel=channel,
+            language=language,
+            sms_template=sms_template,
+            email_subject_template=email_subject_template,
+            email_html_template=email_html_template,
+        )
+
+    db.commit()
+    db.refresh(template)
+    return template
 
