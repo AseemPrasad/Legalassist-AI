@@ -1023,15 +1023,7 @@ def export_data_task(
 
         # Validate format
         if format not in ("csv", "json"):
-            return {
-                "export_id": None,
-                "file_path": None,
-                "file_size_bytes": 0,
-                "format": format,
-                "expires_in_hours": None,
-                "expires_at": None,
-                "created_at": None,
-            }
+            raise ValueError(f"Unsupported export format: {format}. Supported formats are 'csv' or 'json'.")
 
         try:
             int_user_id = int(user_id)
