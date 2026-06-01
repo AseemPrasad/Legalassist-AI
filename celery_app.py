@@ -212,6 +212,63 @@ def _trigger_state_machine_hook(
         )
 
 
+def _broadcast_job_event(
+    job_id: str,
+    event: str,
+    stage: str,
+    progress: int,
+    document_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
+) -> None:
+    """
+    Broadcast a real-time job progress event to WebSocket subscribers.
+    
+    Uses the asyncio job_realtime_bus; safe to call from sync Celery tasks
+    because we fire-and-forget via asyncio.run_coroutine_threadsafe.
+    """
+    try:
+        import asyncio
+        from services.job_realtime import job_realtime_bus
+
+        message = {
+            "event": event,
+            "job_id": job_id,
+            "stage": stage,
+            "progress": progress,
+            "document_id": document_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "payload": payload or {},
+        }
+        if error:
+            message["error"] = error
+
+        # Celery tasks run in separate threads; use the threadsafe approach
+        try:
+            loop = asyncio.get_running_loop()
+            asyncio.run_coroutine_threadsafe(
+                job_realtime_bus.publish(job_id, message),
+                loop
+            )
+        except RuntimeError:
+            # No running loop in this thread — safe to run directly
+            asyncio.run(job_realtime_bus.publish(job_id, message))
+
+        logger.debug(
+            "job_event_broadcasted",
+            job_id=job_id,
+            event=event,
+            stage=stage,
+        )
+    except Exception as e:
+        logger.warning(
+            "job_event_broadcast_failed",
+            job_id=job_id,
+            event=event,
+            error=str(e),
+        )
+
+
 def build_task_context_headers(
     request_id: Optional[str] = None,
     context_user_id: Optional[str] = None,
@@ -581,6 +638,15 @@ def extract_document_text_task(
             text_length=len(extracted_text),
         )
 
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="stage_complete",
+            stage="text_extraction",
+            progress=25,
+            document_id=document_id,
+            payload={"text_length": len(extracted_text)},
+        )
+
         return {
             "user_id": user_id,
             "document_id": document_id,
@@ -593,6 +659,14 @@ def extract_document_text_task(
         logger.error(
             "Stage 1: Text extraction failed",
             task_id=self.request.id,
+            document_id=document_id,
+            error=str(e),
+        )
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="failed",
+            stage="text_extraction",
+            progress=0,
             document_id=document_id,
             error=str(e),
         )
@@ -676,6 +750,15 @@ def summarize_document_task(
             key_points_count=len(key_points),
         )
 
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="stage_complete",
+            stage="summarization",
+            progress=50,
+            document_id=document_id,
+            payload={"key_points_count": len(key_points)},
+        )
+
         return {
             **extraction_result,
             "summary_text": summary_text,
@@ -687,6 +770,14 @@ def summarize_document_task(
         logger.error(
             "Stage 2: Summarization failed",
             task_id=self.request.id,
+            document_id=document_id,
+            error=str(e),
+        )
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="failed",
+            stage="summarization",
+            progress=0,
             document_id=document_id,
             error=str(e),
         )
@@ -769,6 +860,15 @@ def extract_remedies_task(
             remedies_count=len(remedies_list),
         )
 
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="stage_complete",
+            stage="remedy_extraction",
+            progress=75,
+            document_id=document_id,
+            payload={"remedies_count": len(remedies_list)},
+        )
+
         return {
             **summarization_result,
             "remedies": remedies_list,
@@ -783,6 +883,14 @@ def extract_remedies_task(
         logger.error(
             "Stage 3: Remedy extraction failed",
             task_id=self.request.id,
+            document_id=document_id,
+            error=str(e),
+        )
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="failed",
+            stage="remedy_extraction",
+            progress=0,
             document_id=document_id,
             error=str(e),
         )
@@ -836,12 +944,29 @@ def finalize_analysis_task(
             document_id=document_id,
         )
 
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="completed",
+            stage="finalization",
+            progress=100,
+            document_id=document_id,
+            payload={"analysis_time_seconds": result.get("analysis_time_seconds", 0)},
+        )
+
         return result
 
     except Exception as e:
         logger.error(
             "Stage 4: Analysis finalization failed",
             task_id=self.request.id,
+            document_id=document_id,
+            error=str(e),
+        )
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="failed",
+            stage="finalization",
+            progress=0,
             document_id=document_id,
             error=str(e),
         )
@@ -917,6 +1042,15 @@ def analyze_document_task(
             finalize_analysis_task.s(document_type=document_type),
         )
 
+        # Broadcast start event immediately
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="processing_started",
+            stage="analysis",
+            progress=0,
+            document_id=document_id,
+        )
+
         # Execute chain synchronously to capture result
         chain_result = task_chain.apply()
         final_result = chain_result.get() if hasattr(chain_result, 'get') else chain_result
@@ -930,6 +1064,16 @@ def analyze_document_task(
             task_id=self.request.id,
             document_id=document_id,
             analysis_time=analysis_time,
+        )
+
+        # Broadcast final completion (redundant safety net if chain tasks missed it)
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="completed",
+            stage="analysis",
+            progress=100,
+            document_id=document_id,
+            payload={"analysis_time_seconds": analysis_time},
         )
 
         # Mark idempotency complete and persist result
@@ -953,6 +1097,15 @@ def analyze_document_task(
             document_id=document_id,
             error=str(e),
             error_type=type(e).__name__,
+        )
+
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="failed",
+            stage="analysis",
+            progress=0,
+            document_id=document_id,
+            error=str(e),
         )
         
         # HOOK: Trigger State Machine transition for failure

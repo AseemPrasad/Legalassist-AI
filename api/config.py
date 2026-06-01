@@ -105,6 +105,12 @@ class Config:
     API_BASE_URL = _get_val("API_BASE_URL", "")
     API_REQUEST_TIMEOUT_SECONDS = float(_get_val("API_REQUEST_TIMEOUT_SECONDS", "5.0"))
     
+    # --- WebSocket Settings ---
+    ENABLE_WEBSOCKET = _get_bool_env("ENABLE_WEBSOCKET", True)
+    WEBSOCKET_RATE_LIMIT_REQUESTS = _get_int_env("WEBSOCKET_RATE_LIMIT_REQUESTS", 30)
+    WEBSOCKET_RATE_LIMIT_WINDOW = _get_int_env("WEBSOCKET_RATE_LIMIT_WINDOW", 60)
+    ALLOWED_HOSTS = ["localhost", "127.0.0.1", "*.example.com"]
+    
     # --- Authentication (JWT & OTP) ---
     JWT_ALGORITHM = "HS256"
     JWT_EXPIRY_HOURS = _get_int_env("JWT_EXPIRY_HOURS", 7 * 24)
