@@ -663,7 +663,7 @@ def main():
         st.session_state.last_language = language
 
     current_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest() if uploaded_file else None
-    is_same_file = st.session_state.get("processed_file") == uploaded_file.name and st.session_state.get("processed_file_hash") == current_hash
+    is_same_file = (uploaded_file is not None) and (st.session_state.get("processed_file") == uploaded_file.name) and (st.session_state.get("processed_file_hash") == current_hash)
     if uploaded_file and is_same_file and st.session_state.get("last_language") == language:
         if not client:
             st.error(ui["openrouter_not_configured"])
