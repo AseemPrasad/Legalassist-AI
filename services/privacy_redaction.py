@@ -206,6 +206,13 @@ def apply_privacy_profile(
     export_meta["privacy_profile"] = normalize_privacy_profile(profile_name)
     export_meta["privacy_profile_label"] = profile.get("label", export_meta["privacy_profile"])
 
+    if "case_number" in export_meta:
+        export_meta["case_number"] = _redact_case_identifier(
+            export_meta.get("case_number"),
+            anonymized_id,
+            profile,
+        )
+
     case_section = result.get("case")
     if isinstance(case_section, dict):
         case_section["case_number"] = _redact_case_identifier(

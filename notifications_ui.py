@@ -190,6 +190,9 @@ def page_notification_preferences():
                 st.error(f"❌ Error saving preferences: {str(e)}")
                 logger.error(f"Error saving preferences: {str(e)}")
 
+    finally:
+        db.close()
+
     # --- Template Builder ---
     st.divider()
     st.subheader("✉️ Reminder Template Builder")
@@ -209,6 +212,17 @@ def page_notification_preferences():
         sms_input = st.text_area("SMS Template", value=sms_val, height=120, key="sms_template_input")
         subj_input = st.text_input("Email Subject Template", value=subj_val, key="email_subject_input")
         html_input = st.text_area("Email HTML Template", value=html_val, height=220, key="email_html_input")
+        channel_scope = st.selectbox(
+            "Template Scope",
+            ["Default", "SMS", "Email"],
+            index=0,
+            help="Choose Default to keep the legacy single-template behavior, or target a specific channel.",
+        )
+        template_language = st.text_input(
+            "Template Language (optional)",
+            value="",
+            help="Use a locale tag like en or hi. Leave blank to store the default template.",
+        ).strip()
 
         col1, col2 = st.columns(2)
         with col1:
@@ -261,13 +275,33 @@ def page_notification_preferences():
             if st.button("Save Templates", use_container_width=True):
                 try:
                     from database import create_or_update_notification_template
-                    create_or_update_notification_template(
-                        db=db,
-                        user_id=int(user_id),
-                        sms_template=sms_input,
-                        email_subject_template=subj_input,
-                        email_html_template=html_input,
-                    )
+                    from db.models.notifications import NotificationChannel
+
+                    selected_channel = None
+                    if channel_scope == "SMS":
+                        selected_channel = NotificationChannel.SMS
+                    elif channel_scope == "Email":
+                        selected_channel = NotificationChannel.EMAIL
+
+                    selected_language = template_language or None
+                    if selected_channel is None and selected_language is None:
+                        create_or_update_notification_template(
+                            db=db,
+                            user_id=int(user_id),
+                            sms_template=sms_input,
+                            email_subject_template=subj_input,
+                            email_html_template=html_input,
+                        )
+                    else:
+                        create_or_update_notification_template(
+                            db=db,
+                            user_id=int(user_id),
+                            sms_template=sms_input,
+                            email_subject_template=subj_input,
+                            email_html_template=html_input,
+                            channel=selected_channel,
+                            language=selected_language,
+                        )
                     st.success("✅ Templates saved")
                 except Exception as e:
                     st.error(f"Failed to save templates: {str(e)}")
@@ -435,17 +469,22 @@ def page_notification_history():
             return
 
         # Summary statistics
+        delivered_notifications = [n for n in notifications if n.status.value == "delivered"]
+        failed_notifications = [n for n in notifications if n.status.value == "failed"]
+        sms_notifications = [n for n in notifications if n.channel.value == "sms"]
+        email_notifications = [n for n in notifications if n.channel.value == "email"]
+
         col1, col2, col3, col4 = st.columns(4)
 
         total = len(notifications)
-        sent = len([n for n in notifications if n.status.value == "sent"])
-        failed = len([n for n in notifications if n.status.value == "failed"])
-        sms_count = len([n for n in notifications if n.channel.value == "sms"])
+        delivered = len(delivered_notifications)
+        failed = len(failed_notifications)
+        sms_count = len(sms_notifications)
 
         with col1:
             st.metric("Total Notifications", total)
         with col2:
-            st.metric("Successfully Sent", sent)
+            st.metric("Delivered", delivered)
         with col3:
             st.metric("Failed", failed)
         with col4:
@@ -453,17 +492,33 @@ def page_notification_history():
 
         st.divider()
 
+        channel_rows = []
+        for channel_name, channel_notifications in (("SMS", sms_notifications), ("Email", email_notifications)):
+            channel_rows.append({
+                "Channel": channel_name,
+                "Delivered": len([n for n in channel_notifications if n.status.value == "delivered"]),
+                "Failed": len([n for n in channel_notifications if n.status.value == "failed"]),
+                "Pending": len([n for n in channel_notifications if n.status.value == "pending"]),
+                "Sent": len([n for n in channel_notifications if n.status.value == "sent"]),
+            })
+
+        st.subheader("Delivery by Channel")
+        st.dataframe(pd.DataFrame(channel_rows), use_container_width=True, hide_index=True)
+
         # Notification table
         st.subheader("Recent Notifications")
 
         for notif in notifications[:20]:  # Show last 20
             status_emoji = {
-                "sent": "✅",
+                "delivered": "✅",
                 "failed": "❌",
+                "sent": "✅",
                 "pending": "⏳",
                 "bounced": "↩️",
                 "opened": "👁️",
             }.get(notif.status.value, "❓")
+            status_label = notif.status.value.replace("_", " ").title()
+            timeline_value = notif.delivered_at or notif.failed_at or notif.sent_at or notif.created_at
 
             with st.container(border=True):
                 col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
@@ -472,19 +527,24 @@ def page_notification_history():
                     case_title = notif.deadline.case_title if notif.deadline else "Deleted Case/Deadline"
                     st.text(f"Case: {case_title}")
                     st.caption(notif.recipient)
+                    if notif.message_id:
+                        st.caption(f"Message ID: {notif.message_id}")
 
                 with col2:
                     st.text(f"Channel: {notif.channel.value.upper()}")
                     st.caption(f"Reminder: {notif.days_before} day(s)")
+                    st.caption(f"Status: {status_label}")
 
                 with col3:
-                    st.text(f"Sent: {notif.created_at.strftime('%d %b %Y %H:%M')}")
+                    st.text(f"Created: {notif.created_at.strftime('%d %b %Y %H:%M')}")
+                    if timeline_value:
+                        st.caption(f"Updated: {timeline_value.strftime('%d %b %Y %H:%M')}")
+                    if notif.error_message:
+                        st.caption(f"Error: {notif.error_message}")
 
                 with col4:
                     st.markdown(f"### {status_emoji}")
 
-                if notif.error_message:
-                    st.error(f"Error: {notif.error_message}")
 
     finally:
         db.close()

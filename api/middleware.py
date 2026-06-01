@@ -20,6 +20,7 @@ from api.middlewares.rate_limit import rate_limit_middleware
 from api.middlewares.request_size import request_size_limit_middleware
 from api.middlewares.security import security_headers_middleware
 from api.limiter import limiter
+from core.log_redaction import sanitize_log_text, sanitize_log_value
 from observability.instrumentation import (
     bind_request_context,
     capture_exception,
@@ -75,7 +76,7 @@ async def error_handling_middleware(request: Request, call_next: Callable):
             "unhandled_error",
             path=request.url.path,
             method=request.method,
-            error=str(exc),
+            error=sanitize_log_text(str(exc)),
         )
         record_api_error(request.url.path, exc)
         capture_exception(exc, path=request.url.path, method=request.method)
@@ -93,7 +94,8 @@ async def logging_middleware(request: Request, call_next: Callable):
     start_time = time.time()
     endpoint = request.url.path
     request_id = getattr(request.state, "request_id", request.headers.get("X-Correlation-Id") or generate_correlation_id())
-    user_id_attr = getattr(request.state, "user_id", request.headers.get("X-User-Id", "anonymous"))
+    raw_user_id = getattr(request.state, "user_id", request.headers.get("X-User-Id", "anonymous"))
+    user_id_attr = sanitize_log_value(raw_user_id, "user_id")
 
     bind_request_context(request_id=request_id, user_id=user_id_attr)
 
@@ -143,7 +145,7 @@ async def logging_middleware(request: Request, call_next: Callable):
                     duration_ms=round(duration * 1000, 2),
                     request_id=request_id,
                     user_id=user_id_attr,
-                    error=str(exc),
+                    error=sanitize_log_text(str(exc)),
                 )
                 raise
 

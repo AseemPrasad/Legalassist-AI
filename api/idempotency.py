@@ -108,6 +108,13 @@ class IdempotencyManager:
         principal_hash = hashlib.sha256(principal.encode("utf-8")).hexdigest()
         return f"{method.upper()}:{path}:{principal_hash}:{idempotency_key}:{body_fingerprint}"
 
+    @staticmethod
+    def build_operation_key(*, operation: str, principal: str, parts: list[str]) -> str:
+        fingerprint_source = "|".join([operation, principal, *parts])
+        fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
+        principal_hash = hashlib.sha256(principal.encode("utf-8")).hexdigest()
+        return f"op:{operation}:{principal_hash}:{fingerprint}"
+
     def acquire(self, key: str, ttl: int = 60, stale_after: Optional[int] = None) -> bool:
         """Acquire a lock for the given idempotency key.
 

@@ -29,6 +29,9 @@ from api.jwt_auth import (
 )
 
 
+# Canonical exceptions are imported from api.jwt_auth above
+
+
 settings = get_settings()
 security = HTTPBearer(auto_error=False)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
@@ -63,77 +66,7 @@ def _get_jwt_secrets_to_try() -> list[str]:
 # JWT token functions delegated to `api.jwt_auth`
 
 
-def revoke_jwt_token(token: str) -> bool:
-    """Revoke a JWT token by adding its JTI to the revocation table.
-
-    This verifies the token signature (but not expiration) against
-    current/previous secrets and enforces issuer/audience/type checks.
-    Returns True on success, False otherwise.
-    """
-    if not token:
-        return False
-
-    try:
-        # Fast path - extract without signature verification to get jti/exp
-        try:
-            unverified = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
-            jti = unverified.get("jti")
-            exp = unverified.get("exp")
-            if not jti or not exp:
-                return False
-        except Exception:
-            return False
-
-        payload = None
-        last_error = None
-        for secret in _get_jwt_secrets_to_try():
-            try:
-                payload = jwt.decode(
-                    token,
-                    secret,
-                    algorithms=[settings.JWT_ALGORITHM],
-                    issuer=settings.JWT_ISSUER,
-                    audience=settings.JWT_AUDIENCE,
-                    options={"verify_exp": False, "verify_signature": True, "require": ["exp", "iat", "iss", "aud", "jti", "type"]},
-                )
-                break
-            except jwt.InvalidTokenError as exc:
-                last_error = exc
-                continue
-
-        if payload is None:
-            return False
-
-        token_type = payload.get("type")
-        if token_type != "access":
-            return False
-
-        jti = payload.get("jti")
-        exp = payload.get("exp")
-        if not jti or not exp:
-            return False
-
-        # convert exp to datetime
-        expires_at = datetime.fromtimestamp(exp, tz=timezone.utc) if isinstance(exp, (int, float)) else exp
-
-        # Persist revocation
-        with SessionLocal() as db:
-            # db-level revoke_token is available via database shim
-            from database import revoke_token, is_token_revoked
-
-            if not is_token_revoked(db, jti):
-                revoke_token(db, jti, expires_at)
-                # Mark in-memory revocation cache if jwt_auth cache is available
-                try:
-                    import api.jwt_auth as _jwt_mod
-                    now = datetime.now(timezone.utc).timestamp()
-                    _jwt_mod._REVOCATION_CACHE[jti] = (True, now)
-                except Exception:
-                    # non-fatal; cache may not be present in some test envs
-                    pass
-        return True
-    except Exception:
-        return False
+# Canonical revoke_jwt_token function is imported from api.jwt_auth above
 
 
 # ============================================================================
@@ -301,44 +234,9 @@ async def get_current_user(
         api_key = x_api_key
 
     if api_key:
-        
-        if "." not in api_key:
-            raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY_FORMAT", message="Invalid API key format")
-
-        key_id, secret = api_key.split(".", 1)
-
         db = SessionLocal()
         try:
-            key_record = db.query(APIKey).filter(
-                APIKey.key_id == key_id
-            ).first()
-
-            if not key_record:
-                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY", message="Invalid API key")
-
-            if not key_record.is_valid():
-                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="API_KEY_EXPIRED", message="API key has expired")
-
-            if not verify_api_key(secret, key_record.key_salt, key_record.key_hash):
-                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY", message="Invalid API key")
-
-            # Check if linked to a database user
-            if key_record.user_id:
-                user = db.query(User).filter(User.id == key_record.user_id).first()
-                if user:
-                    return CurrentUser(
-                        user_id=user.id,
-                        email=user.email,
-                        role="admin" if getattr(user, "is_admin", False) else "user"
-                    )
-
-            # Fallback to deterministic negative ID matching _resolve_api_key_user
-            derived_id = int.from_bytes(hashlib.sha256(key_id.encode()).digest()[:8], "big", signed=False)
-            return CurrentUser(
-                user_id=-derived_id,
-                email=f"api_key_{key_id[:8]}",
-                role="api"
-            )
+            return _resolve_api_key_user(api_key, db)
         finally:
             db.close()
 

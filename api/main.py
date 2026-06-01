@@ -140,8 +140,10 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=exc.status_code,
             content={
+                "success": False,
                 "error_code": "VALIDATION_ERROR",
-                "message": exc.detail
+                "message": exc.detail,
+                "status_code": exc.status_code,
             }
         )
     
@@ -156,9 +158,10 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             content={
+                "success": False,
                 "error_code": "PAYLOAD_TOO_LARGE",
                 "message": exc.detail,
-                "status_code": 413
+                "status_code": 413,
             },
             headers={"Retry-After": "60"}
         )
@@ -174,8 +177,10 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=500,
             content={
+                "success": False,
                 "error_code": "INTERNAL_SERVER_ERROR",
-                "message": "An internal error occurred"
+                "message": "An internal error occurred",
+                "status_code": 500,
             }
         )
     
@@ -304,45 +309,41 @@ def create_app() -> FastAPI:
                 if not user_id:
                     await websocket.close(code=4003, reason="Invalid token")
                     return
-            except InvalidTokenError:
-                await websocket.close(code=4001, reason="Invalid or expired token")
-                return
 
-            owner = get_job_owner(job_id)
-            if owner is not None and str(owner) != str(user_id):
-                await websocket.close(code=1008, reason="Forbidden: job not owned by user")
-                return
+                await websocket.accept()
 
-            await websocket.accept()
+                try:
+                    from celery_app import TaskStatus
 
-            try:
-                from celery_app import TaskStatus
+                    while True:
+                        import asyncio
 
-                while True:
-                    import asyncio
+                        status_info = TaskStatus.get_task_status(job_id)
 
-                    status_info = TaskStatus.get_task_status(job_id)
-
-                    await websocket.send_json({
-                        "job_id": job_id,
-                        "status": status_info["status"],
-                        "progress": status_info["info"].get("progress", 0),
-                        "timestamp": status_info["timestamp"]
-                    })
-
-                    await asyncio.sleep(2)
-
-                    if status_info["status"] in ["completed", "failed", "cancelled"]:
                         await websocket.send_json({
                             "job_id": job_id,
                             "status": status_info["status"],
-                            "message": "Job completed"
+                            "progress": status_info["info"].get("progress", 0),
+                            "timestamp": status_info["timestamp"]
                         })
-                        break
 
-            except Exception as e:
-                logger.error("WebSocket error", job_id=job_id, error=str(e))
-                await websocket.close(code=1011)
+                        await asyncio.sleep(2)
+
+                        if status_info["status"] in ["completed", "failed", "cancelled"]:
+                            await websocket.send_json({
+                                "job_id": job_id,
+                                "status": status_info["status"],
+                                "message": "Job completed"
+                            })
+                            break
+
+                except Exception as e:
+                    logger.error("WebSocket error", job_id=job_id, error=str(e))
+                    await websocket.close(code=1011)
+
+            except InvalidTokenError:
+                await websocket.close(code=4001, reason="Invalid or expired token")
+                return
 
     return app
 

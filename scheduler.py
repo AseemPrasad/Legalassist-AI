@@ -62,7 +62,7 @@ import subprocess
 import shlex
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Callable
 from contextlib import contextmanager
 
 import pytz
@@ -104,6 +104,7 @@ from notifications.reminder_engine import (
     is_reminder_time_for_user,
 )
 from notification_service import NotificationService
+from api.idempotency import IdempotencyManager
 from core.log_redaction import mask_recipient, sanitize_log_text, sanitize_log_value
 
 # This module is imported by app.py, which handles logging configuration
@@ -140,6 +141,7 @@ class _LazyNotificationService:
 
 
 notification_service = _LazyNotificationService()
+notification_dispatch_idempotency = IdempotencyManager()
 
 
 def get_notification_service() -> NotificationService:
@@ -217,8 +219,37 @@ def _shutdown_scheduler_instance(scheduler, *, wait: bool = True):
 
 def _send_deadline_reminders_safe(db, deadline, user_preference, days_left):
     """Send reminders for one deadline and isolate notification service failures."""
+    operation_key = IdempotencyManager.build_operation_key(
+        operation="deadline_reminder_dispatch",
+        principal=str(getattr(deadline, "user_id", "unknown")),
+        parts=[
+            f"deadline:{getattr(deadline, 'id', 'unknown')}",
+            f"days_left:{days_left}",
+            f"channel:{getattr(user_preference, 'notification_channel', 'unknown')}",
+        ],
+    )
+    if not notification_dispatch_idempotency.acquire(operation_key, ttl=15 * 60):
+        logger.info(
+            "scheduler_reminder_dispatch_skipped",
+            deadline_id=getattr(deadline, "id", None),
+            user_id=getattr(deadline, "user_id", None),
+            days_left=days_left,
+        )
+        return []
+
     try:
-        return notification_service.send_reminders(db, deadline, user_preference, days_left)
+        results = notification_service.send_reminders(db, deadline, user_preference, days_left)
+        notification_dispatch_idempotency.mark_completed(
+            operation_key,
+            {
+                "deadline_id": getattr(deadline, "id", None),
+                "user_id": getattr(deadline, "user_id", None),
+                "days_left": days_left,
+                "sent_count": len(results),
+            },
+            ttl=24 * 60 * 60,
+        )
+        return results
     except Exception as exc:
         logger.error(
             "scheduler_notification_dispatch_failed",
@@ -229,12 +260,14 @@ def _send_deadline_reminders_safe(db, deadline, user_preference, days_left):
             exc_info=True,
         )
         return []
+    finally:
+        notification_dispatch_idempotency.release_lock(operation_key)
 
 
 # Reminder time logic moved to notifications.reminder_engine.build_reminder_jobs
 
 
-def check_and_send_reminders():
+def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], bool]] = None):
     """
     Hourly job: Check all upcoming deadlines and send reminders at 8 AM in each user's local timezone.
     This runs every hour and evaluates if it's 8 AM for each user based on their saved timezone preference.
@@ -315,32 +348,13 @@ def check_and_send_reminders():
             logger.info("scheduler_upcoming_deadlines_found", count=len(upcoming_deadlines))
 
             # Prefetch user preferences for eligible deadlines to avoid N+1 queries
-            eligible = []
-            for dl in upcoming_deadlines:
-                days_left = dl.days_until_deadline()
-                if should_process_threshold(days_left):
-                    eligible.append((dl, days_left))
 
-            user_ids = {d.user_id for d, _ in eligible}
             prefs_by_user = {}
             if user_ids:
                 prefs = db.query(UserPreference).filter(UserPreference.user_id.in_(list(user_ids))).all()
                 prefs_by_user = {p.user_id: p for p in prefs}
 
-            for deadline, days_left in eligible:
-                user_preference = prefs_by_user.get(deadline.user_id)
-                if not user_preference:
-                    logger.warning("scheduler_preferences_missing", user_id=deadline.user_id)
-                    continue
 
-                # Check if reminders should be sent based on preferences and time
-                if not is_notify_enabled(days_left, user_preference):
-                    logger.debug("scheduler_notifications_disabled", user_id=deadline.user_id, days_left=days_left)
-                    continue
-
-                if not is_reminder_time_for_user(user_preference.timezone):
-                    logger.debug("scheduler_waiting_for_reminder_window", user_id=deadline.user_id, user_timezone=user_preference.timezone)
-                    continue
 
                 logger.info("scheduler_processing_deadline", case_id=deadline.case_id, days_left=days_left)
 
@@ -772,12 +786,17 @@ def run_worker():
         _shutdown_scheduler_instance(scheduler)
 
 
-def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object] = None):
+def check_reminders_sync(
+    target_days: Optional[int] = None,
+    db: Optional[object] = None,
+    reminder_time_checker: Optional[Callable[[str], bool]] = None,
+):
     """
     Synchronous version for testing. Optionally check only specific day threshold.
     Args:
         target_days: If specified, only check this day threshold (e.g., 30, 10, 3, 1)
         db: Optional database session. If not provided, uses SessionLocal()
+        reminder_time_checker: Optional time checker. Defaults to lambda tz: True to bypass time window.
     """
     should_close = False
     if db is None:
@@ -789,10 +808,7 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
         upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
         prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
         prefs_by_user = {pref.user_id: pref for pref in prefs}
-        candidates = plan_eligible_reminders(
-            upcoming_deadlines,
-            prefs_by_user,
-            reminder_time_checker=is_reminder_time_for_user,
+
         )
         
         sent_count = 0

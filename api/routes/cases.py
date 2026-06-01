@@ -79,7 +79,11 @@ def _build_case_summary_payload(case: Case, latest_doc: CaseDocument | None = No
         "case_id": str(case.id),
         "case_number": case.case_number,
         "title": case.title or case.case_number,
-        "parties": ["Smith", "Jones"],  # Placeholder
+        "parties": (
+            (latest_doc.extracted_metadata or {}).get("parties", [])
+            if latest_doc and latest_doc.extracted_metadata
+            else []
+        ),
         "jurisdiction": case.jurisdiction,
         "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
         "summary": latest_doc.summary if latest_doc else "",

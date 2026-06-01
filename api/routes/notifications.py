@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from urllib.parse import parse_qsl
+from typing import Any
 
 
 
@@ -15,6 +16,7 @@ from config import Config
 from db.crud.notifications import update_notification_log_by_message_id
 from api.dependencies import get_db_rls, get_db_rls_optional
 from db.models.notifications import NotificationStatus
+from services.timeline_service import timeline_service
 
 try:
     from twilio.request_validator import RequestValidator
@@ -29,6 +31,49 @@ except ImportError:  # pragma: no cover - optional dependency
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["notifications"])
 logger = structlog.get_logger(__name__)
+
+
+def _parse_twilio_webhook_payload(raw_body: str) -> dict[str, str]:
+    return dict(parse_qsl(raw_body, keep_blank_values=True))
+
+
+def _parse_sendgrid_webhook_payload(raw_body: str) -> list[dict[str, Any]]:
+    try:
+        events = json.loads(raw_body or "[]")
+    except json.JSONDecodeError as exc:
+        raise StructuredAPIError(status_code=status.HTTP_400_BAD_REQUEST, error_code="SENDGRID_WEBHOOK_INVALID_JSON", message="Invalid SendGrid webhook payload") from exc
+
+    if isinstance(events, dict):
+        events = [events]
+
+    if not isinstance(events, list):
+        raise StructuredAPIError(status_code=status.HTTP_400_BAD_REQUEST, error_code="SENDGRID_WEBHOOK_INVALID_JSON", message="Invalid SendGrid webhook payload")
+
+    normalized_events: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            raise StructuredAPIError(status_code=status.HTTP_400_BAD_REQUEST, error_code="SENDGRID_WEBHOOK_INVALID_JSON", message="Invalid SendGrid webhook payload")
+        normalized_events.append(event)
+
+    return normalized_events
+
+
+def _twilio_status_to_notification_status(message_status: str) -> NotificationStatus | None:
+    normalized = (message_status or "").lower()
+    if normalized == "delivered":
+        return NotificationStatus.DELIVERED
+    if normalized in {"failed", "undelivered", "canceled", "cancelled"}:
+        return NotificationStatus.FAILED
+    return None
+
+
+def _sendgrid_event_to_notification_status(event_type: str) -> NotificationStatus | None:
+    normalized = (event_type or "").lower()
+    if normalized == "delivered":
+        return NotificationStatus.DELIVERED
+    if normalized in {"bounce", "dropped", "deferred", "blocked", "spamreport", "invalid"}:
+        return NotificationStatus.FAILED
+    return None
 
 
 def _message_id_candidates(message_id: str | None) -> list[str]:
@@ -100,6 +145,19 @@ def _update_delivery_status(db: Session, message_id: str | None, status_value: N
             message_preview=message_preview,
         )
         if updated:
+            try:
+                timeline_service.record_notification_event(
+                    db=db,
+                    notification_log=updated,
+                    status=status_value,
+                    provider="twilio" if updated.channel.value == "sms" else "sendgrid",
+                    metadata={
+                        "error_message": error_message,
+                        "message_preview": message_preview,
+                    },
+                )
+            except Exception:
+                logger.exception("notification_timeline_event_failed", notification_log_id=updated.id, message_id=candidate)
             return updated
     return None
 
@@ -107,7 +165,7 @@ def _update_delivery_status(db: Session, message_id: str | None, status_value: N
 @router.post("/twilio")
 async def twilio_delivery_webhook(request: Request, db: Session = Depends(get_db_rls_optional)) -> dict:
     raw_body = (await request.body()).decode("utf-8")
-    params = dict(parse_qsl(raw_body, keep_blank_values=True))
+    params = _parse_twilio_webhook_payload(raw_body)
 
     if not _verify_twilio_signature(request, params):
         raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="TWILIO_SIGNATURE_INVALID", message="Invalid Twilio signature")
@@ -116,9 +174,10 @@ async def twilio_delivery_webhook(request: Request, db: Session = Depends(get_db
     message_status = (params.get("MessageStatus") or params.get("SmsStatus") or "").lower()
     error_code = params.get("ErrorCode")
 
-    if message_status == "delivered":
+    normalized_status = _twilio_status_to_notification_status(message_status)
+    if normalized_status == NotificationStatus.DELIVERED:
         updated = _update_delivery_status(db, message_sid, NotificationStatus.DELIVERED)
-    elif message_status in {"failed", "undelivered", "canceled", "cancelled"}:
+    elif normalized_status == NotificationStatus.FAILED:
         updated = _update_delivery_status(db, message_sid, NotificationStatus.FAILED, error_message=f"Twilio status: {message_status}{f' ({error_code})' if error_code else ''}")
     else:
         updated = None
@@ -134,13 +193,7 @@ async def sendgrid_delivery_webhook(request: Request, db: Session = Depends(get_
     if not _verify_sendgrid_signature(request, raw_body):
         raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="SENDGRID_SIGNATURE_INVALID", message="Invalid SendGrid signature")
 
-    try:
-        events = json.loads(raw_body or "[]")
-    except json.JSONDecodeError as exc:
-        raise StructuredAPIError(status_code=status.HTTP_400_BAD_REQUEST, error_code="SENDGRID_WEBHOOK_INVALID_JSON", message="Invalid SendGrid webhook payload") from exc
-
-    if isinstance(events, dict):
-        events = [events]
+    events = _parse_sendgrid_webhook_payload(raw_body)
 
     processed = 0
     updated = 0
@@ -148,9 +201,10 @@ async def sendgrid_delivery_webhook(request: Request, db: Session = Depends(get_
         processed += 1
         event_type = str(event.get("event", "")).lower()
         message_id = event.get("sg_message_id") or event.get("message_id") or event.get("smtp-id")
-        if event_type == "delivered":
+        normalized_status = _sendgrid_event_to_notification_status(event_type)
+        if normalized_status == NotificationStatus.DELIVERED:
             result = _update_delivery_status(db, message_id, NotificationStatus.DELIVERED)
-        elif event_type in {"bounce", "dropped", "deferred", "blocked", "spamreport", "invalid"}:
+        elif normalized_status == NotificationStatus.FAILED:
             reason = event.get("reason") or event.get("response") or event_type
             result = _update_delivery_status(db, message_id, NotificationStatus.FAILED, error_message=str(reason))
         else:
