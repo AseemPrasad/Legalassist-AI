@@ -48,6 +48,7 @@ from analytics_engine import AnalyticsAggregator
 from database import init_db, SessionLocal, db_session, CaseRecord
 from db.models import DocumentType
 from config import Config
+from database import init_db
 Config.validate_runtime_security()
 init_db()
 
