@@ -27,7 +27,7 @@ from api.models import (
     AnonymizedShareCreateRequest,
     AnonymizedShareResponse,
 )
-from api.auth import get_current_user, CurrentUser
+from api.auth import get_current_user, get_current_user_optional, CurrentUser
 from api.validation import validate_file_upload, validate_file_upload_streaming, ValidationConfig
 import structlog
 from sqlalchemy import func
@@ -649,8 +649,10 @@ async def create_anonymized_case_share(
 )
 async def resolve_anonymized_case_share(
     token: str,
+    request: Request,
     format: str = Query(default="json", pattern="^(json|pdf)$"),
     db: Session = Depends(get_db),
+    current_user: CurrentUser | None = Depends(get_current_user_optional),
 ):
     share = _get_share_token_or_404(db, token)
     case = db.query(Case).filter(Case.id == share.case_id).first()
@@ -664,10 +666,24 @@ async def resolve_anonymized_case_share(
         db.add(share)
         db.commit()
 
+    # Resolve the actual requester — not the share creator.
+    # share.created_by is the owner who generated the link, not the visitor
+    # accessing it. Anonymous share links are public; the accessor may be
+    # a different authenticated user or an unauthenticated visitor.
+    actor_user_id: int | None = None
+    if current_user is not None:
+        try:
+            actor_user_id = int(current_user.user_id)
+        except (TypeError, ValueError):
+            pass
+
+    ip_address: str | None = request.client.host if request.client else None
+
     record_immutable_audit_event(
         event_type="case.share_token_viewed",
         action="viewed",
-        actor_user_id=share.created_by,
+        actor_user_id=actor_user_id,
+        actor_type="user" if actor_user_id else "anonymous",
         resource_type="case",
         resource_id=str(case.id),
         outcome="success",
@@ -675,7 +691,10 @@ async def resolve_anonymized_case_share(
             "scope": share.scope,
             "anonymized_id": share.anonymized_id,
             "format": format,
+            "share_created_by": share.created_by,
         },
+        ip_address=ip_address,
+        user_agent=request.headers.get("user-agent"),
     )
 
     if format == "pdf":
