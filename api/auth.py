@@ -29,21 +29,6 @@ from api.jwt_auth import (
 )
 
 
-class AuthError(Exception):
-    """Base authentication error"""
-    pass
-
-
-class TokenExpiredError(AuthError):
-    """Token has expired"""
-    pass
-
-
-class InvalidTokenError(AuthError):
-    """Token is invalid"""
-    pass
-
-
 settings = get_settings()
 security = HTTPBearer(auto_error=False)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
