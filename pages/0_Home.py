@@ -6,36 +6,38 @@ CHANGE: build_judgment_result_text now returns (plain_text, structured_dict).
         render_shareable_result_box accepts the tuple directly — no other changes needed.
 """
 
-import streamlit as st
-import logging
 import sys
 import os
-from config import Config
-
-# Add parent directory to sys.path to resolve 'core' module
+# Add parent directory to sys.path to resolve 'core' and other top-level modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import streamlit as st
+import logging
+import routes
+from config import Config
+from pages.ui_components import render_header, SESSION_KEYS
 
 from core.app_utils import (
     get_client,
+    get_default_model,
     extract_text_from_pdf,
+    analyze_legal_citations,
     compress_text,
-    english_leakage_detected,
     output_language_mismatch_detected,
     build_prompt,
     build_retry_prompt,
     get_remedies_advice,
-    extract_appeal_info,
     get_localized_ui_text,
-    localize_yes_no,
     RETRO_STYLING,
     LANGUAGES,
-    parse_summary_bullets,
-    validate_pdf_metadata,
     build_judgment_result_text,
     render_shareable_result_box,
     safe_llm_call,
     generate_legal_draft,
     export_draft_to_pdf,
+    parse_llm_json,
+    parse_timeline,        
+    build_timeline_prompt,
 )
 
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
@@ -90,16 +92,15 @@ def render_page():
     # Get client early for translation
     client = get_client()
     
-    current_language = st.session_state.get("judgment_language", "English")
+    current_language = st.session_state.get(SESSION_KEYS["judgment_language"], "English")
     ui = get_localized_ui_text(current_language, client)
 
-    st.title("⚡ LegalEase AI")
-    st.subheader(ui["app_subtitle"])
+    render_header("⚡ LegalEase AI", ui["app_subtitle"])
 
     st.markdown(ui["app_intro"])
     st.markdown("---")
 
-    language = st.selectbox(ui["language_label"], LANGUAGES, key="judgment_language")
+    language = st.selectbox(ui["language_label"], LANGUAGES, key=SESSION_KEYS["judgment_language"])
     ui = get_localized_ui_text(language, client)
     
     input_method = st.radio(
@@ -111,11 +112,36 @@ def render_page():
     is_valid_input = False
     uploaded_file = None
     pasted_text = None
+    enable_ocr = False
+    ocr_languages = "eng+hin"
 
     if input_method == ui["upload_pdf"]:
-        uploaded_file = st.file_uploader(ui["upload_label"], type=["pdf"])
+        uploaded_file = st.file_uploader(
+            ui["upload_label"], 
+            type=["pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp"]
+        )
         if uploaded_file:
             is_valid_input = True
+            
+            # Show OCR options for images and scanned PDFs
+            file_ext = uploaded_file.name.split('.')[-1].lower()
+            if file_ext != 'pdf':
+                st.info("📷 Image file detected. OCR will be used to extract text.")
+                enable_ocr = True
+                if enable_ocr:
+                    ocr_languages = "+".join(st.multiselect(
+                        "Select OCR languages",
+                        ["English", "Hindi", "Bengali", "Urdu"],
+                        default=["English"]
+                    )) or "eng"
+            else:
+                enable_ocr = st.checkbox("Enable OCR for scanned PDFs", value=False)
+                if enable_ocr:
+                    ocr_languages = "+".join(st.multiselect(
+                        "Select OCR languages",
+                        ["English", "Hindi", "Bengali", "Urdu"],
+                        default=["English"]
+                    )) or "eng"
     else:
         pasted_text = st.text_area(
             ui.get("paste_text", "📋 Paste Text"),
@@ -140,9 +166,12 @@ def render_page():
                         return
 
                     if input_method == ui["upload_pdf"]:
-                        raw_text = extract_text_from_pdf(uploaded_file)
+                        raw_text = extract_text_from_pdf(uploaded_file, enable_ocr=enable_ocr, ocr_languages=ocr_languages)
                     else:
                         raw_text = pasted_text
+
+                    citation_analysis = analyze_legal_citations(raw_text)
+                    st.session_state["citation_analysis"] = citation_analysis
                     
                     # --- NEW RAG STATE ---
                     st.session_state["judgment_raw_text"] = raw_text
@@ -153,7 +182,7 @@ def render_page():
                     safe_text = compress_text(raw_text)
 
                     prompt = build_prompt(safe_text, language)
-                    model_id = "meta-llama/llama-3.1-8b-instruct"
+                    model_id = get_default_model()
 
                     # Use safe_llm_call for robust error handling and retries
                     summary_raw, error = safe_llm_call(
@@ -186,19 +215,52 @@ def render_page():
                             max_tokens=Config.SUMMARY_MAX_TOKENS,
                             temperature=0.03,
                         )
-                        if len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
+                        if retry_summary and len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
                             summary = retry_summary
 
-                    if not summary:
-                        st.error(ui["empty_summary"])
-                    else:
-                        remedies = {}
+                        if not summary:
+                            st.error(ui["empty_summary"])
+                        else:
+                            # 1. Parse and UI Confidence
+                            summary_data = parse_llm_json(summary)
+                            summary = summary_data.get("summary", summary)
+                            
+                            st.markdown("### 🔍 Confidence & Transparency")
+                            score = summary_data.get("confidence_score", 0.5)
+                            st.progress(score, text=f"Confidence: {int(score*100)}%")
+                            
+                            with st.expander("AI Explanation"):
+                                st.write(summary_data.get("explanation", "No explanation provided."))
+                            
+                            if summary_data.get("key_entities"):
+                                st.write("Entities:", ", ".join(summary_data["key_entities"]))
 
-                        with st.spinner(ui["remedies_spinner"]):
-                            try:
-                                remedies = get_remedies_advice(raw_text, language, client) or {}
-                            except Exception as e:
-                                st.error(f"{ui['remedies_error']}: {str(e)}")
+                            # 2. Get Remedies
+                            remedies = {}
+                            with st.spinner(ui["remedies_spinner"]):
+                                try:
+                                    remedies = get_remedies_advice(raw_text, language, client) or {}
+                                except Exception as e:
+                                    st.error(f"{ui['remedies_error']}: {str(e)}")
+
+                            # 3. Build Result and Render (ONLY ONCE)
+                            result = build_judgment_result_text(summary, remedies, ui)
+                            render_shareable_result_box(result, ui)
+                            st.success(ui["summary_success"])
+
+                            # 4. Timeline Logic (Inserted here)
+                            if "timeline_events" not in st.session_state:
+                                with st.spinner("Extracting timeline..."):
+                                    timeline_prompt = build_timeline_prompt(safe_text)
+                                    timeline_raw, error = safe_llm_call(client, model_id, [{"role": "user", "content": timeline_prompt}], 1000, 0.1)
+                                    st.session_state["timeline_events"] = parse_timeline(timeline_raw) if not error else []
+                            
+                            timeline_events = st.session_state["timeline_events"]
+                            if timeline_events:
+                                st.markdown("### 🗓️ Case Timeline")
+                                for item in timeline_events:
+                                    date_str = item.get('date', 'Date Unspecified')
+                                    st.markdown(f"- **{date_str}**: {item.get('event', '')}")
 
                         # build_judgment_result_text now returns (plain_text, structured_dict)
                         result = build_judgment_result_text(summary, remedies, ui)
@@ -206,6 +268,42 @@ def render_page():
                         # render_shareable_result_box accepts the tuple directly
                         render_shareable_result_box(result, ui)
                         st.success(ui["summary_success"])
+
+                        citation_analysis = st.session_state.get("citation_analysis", {"citations": [], "summary": {}})
+                        citation_summary = citation_analysis.get("summary", {})
+                        citation_items = citation_analysis.get("citations", [])
+                        if citation_items:
+                            st.markdown("### 📚 Citation Extraction & Validation")
+                            c1, c2, c3, c4 = st.columns(4)
+                            with c1:
+                                st.metric("Citations", citation_summary.get("total_citations", 0))
+                            with c2:
+                                st.metric("Validated", citation_summary.get("validated_citations", 0))
+                            with c3:
+                                st.metric("Needs review", citation_summary.get("needs_review", 0))
+                            with c4:
+                                st.metric("Deprecated", citation_summary.get("deprecated_citations", 0))
+
+                            with st.expander("View extracted citations", expanded=False):
+                                for item in citation_items[:10]:
+                                    st.write(
+                                        f"- {item['citation']} ({item['citation_type']}, {item['status']}, confidence {item['confidence']:.2f})"
+                                    )
+                            # 1. Generate Timeline
+                            with st.spinner("Extracting timeline..."):
+                                timeline_prompt = build_timeline_prompt(safe_text)
+                                timeline_raw, error = safe_llm_call(client, model_id, [{"role": "user", "content": timeline_prompt}], 1000, 0.1)
+                                
+                                if not error:
+                                    timeline_events = parse_timeline(timeline_raw)
+                                    
+                                    # 2. Render Timeline
+                                    if timeline_events:
+                                        st.markdown("### 🗓️ Case Timeline")
+                                        for item in timeline_events:
+                                            # Use a cleaner UI for dates
+                                            date_str = item['date'] if item['date'] != 'N/A' else "Date Unspecified"
+                                            st.write(f"- **{date_str}**: {item['event']}")
 
                         # ===== DRAFTING SECTION =====
                         st.markdown("---")
@@ -262,15 +360,15 @@ def render_page():
                         col1, col2, col3 = st.columns(3)
 
                         with col1:
-                            if st.button(ui["view_analytics"], key="view_analytics"):
+                            if st.button(ui["view_analytics"], key="view_analytics_home"):
                                 st.session_state.show_analytics = True
 
                         with col2:
-                            if st.button(ui["estimate_chances"], key="estimate_chances"):
+                            if st.button(ui["estimate_chances"], key="estimate_chances_home"):
                                 st.session_state.show_estimator = True
 
                         with col3:
-                            if st.button(ui["report_outcome"], key="report_outcome"):
+                            if st.button(ui["report_outcome"], key="report_outcome_home"):
                                 st.session_state.show_feedback = True
 
                         if st.session_state.get("show_analytics"):
@@ -280,25 +378,27 @@ def render_page():
                                 from database import SessionLocal
 
                                 db = SessionLocal()
-                                summary_data = AnalyticsAggregator.get_dashboard_summary(db)
-
-                                if summary_data.get("total_cases_processed", 0) > 0:
-                                    col1, col2, col3 = st.columns(3)
-                                    with col1:
-                                        st.metric(ui["total_cases_tracked"], summary_data["total_cases_processed"])
-                                    with col2:
-                                        trends = AnalyticsAggregator.get_regional_trends(db)
-                                        success_rate = trends[0]['appeal_success_rate'] if trends else 'N/A'
-                                        st.metric(ui["appeals_success_rate"], f"{success_rate}%")
-                                    with col3:
-                                        st.metric(ui["appeals_filed"], summary_data.get("appeals_filed", 0))
-                                    st.write(f"📌 **{ui['analytics_link_text']}**")
-                                else:
-                                    st.info(ui["analytics_empty"])
-
-                                db.close()
                             except Exception as e:
                                 st.info(ui["analytics_not_ready"])
+                            else:
+                                try:
+                                    summary_data = AnalyticsAggregator.get_dashboard_summary(db)
+
+                                    if summary_data.get("total_cases_processed", 0) > 0:
+                                        col1, col2, col3 = st.columns(3)
+                                        with col1:
+                                            st.metric(ui["total_cases_tracked"], summary_data["total_cases_processed"])
+                                        with col2:
+                                            trends = AnalyticsAggregator.get_regional_trends(db)
+                                            success_rate = trends[0]['appeal_success_rate'] if trends else 'N/A'
+                                            st.metric(ui["appeals_success_rate"], f"{success_rate}%")
+                                        with col3:
+                                            st.metric(ui["appeals_filed"], summary_data.get("appeals_filed", 0))
+                                        st.write(f"📌 **{ui['analytics_link_text']}**")
+                                    else:
+                                        st.info(ui["analytics_empty"])
+                                finally:
+                                    db.close()
 
                         # ===== FREE LEGAL HELP SECTION =====
                         st.markdown("---")
@@ -310,7 +410,7 @@ def render_page():
                         st.markdown("## 💬 Chat with Judgment")
                         st.info("Have specific questions about this document? You can ask our AI assistant.")
                         if st.button("💬 Open Interactive Chat", use_container_width=True):
-                            st.switch_page("pages/4_Chat.py")
+                            st.switch_page(routes.PAGE_CHAT)
 
                 except Exception as e:
                     err = str(e)
