@@ -12,8 +12,22 @@ from pathlib import Path
 from fpdf import FPDF
 from database import SessionLocal, Case, CaseDocument, CaseDeadline, CaseTimeline
 from case_manager import get_case_detail
+from db.crud.audit import record_audit_event
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_dt(value) -> Optional[datetime]:
+    """Normalize a datetime value (native datetime or ISO string) to datetime."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+    return None
+
 
 # Constants for PDF styling
 PRIMARY_COLOR = (44, 62, 80)    # Dark Blue
@@ -158,8 +172,8 @@ class LegalAssistPDF(FPDF):
             logger.warning(f"safe_set_font recovery: {family} {style} failed -> using Helvetica")
             try:
                 self.set_font("Helvetica", "", size)
-            except:
-                pass
+            except Exception:
+                logger.error(f"Failed to set Helvetica font: {e}")
 
     def _clean(self, txt):
         """
@@ -359,11 +373,11 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
         pdf.labeled_value('Jurisdiction', case['jurisdiction'])
         
         # Parse and format date with safety check
-        try:
-            created_at = datetime.fromisoformat(case['created_at'].replace('Z', '+00:00'))
+        created_at = _parse_dt(case.get('created_at'))
+        if created_at:
             pdf.labeled_value('Date Initiated', created_at.strftime('%d %B %Y'))
-        except Exception:
-            pdf.labeled_value('Date Initiated', case['created_at'])
+        else:
+            pdf.labeled_value('Date Initiated', str(case.get('created_at', '')))
         
         # Optional description section
         if case.get('description'):
@@ -431,11 +445,9 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
                 
                 pdf.safe_set_font(pdf.main_font, 'I', 9)
                 pdf.set_text_color(120, 120, 120)
-                try:
-                    up_date = datetime.fromisoformat(doc['uploaded_at'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                    pdf.cell(0, 5, f"   Uploaded: {up_date}", 0, 1)
-                except Exception:
-                    pdf.cell(0, 5, f"   Uploaded: {doc['uploaded_at']}", 0, 1)
+                up_date = _parse_dt(doc.get('uploaded_at'))
+                if up_date:
+                    pdf.cell(0, 5, f"   Uploaded: {up_date.strftime('%d %b %Y')}", 0, 1)
                 
                 if doc.get('summary'):
                     pdf.ln(1)
@@ -462,11 +474,8 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
                 sorted_timeline = timeline
             
             for event in sorted_timeline:
-                try:
-                    ev_date = datetime.fromisoformat(event['event_date'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                except Exception:
-                    ev_date = event['event_date']
-                    
+                ev_dt = _parse_dt(event.get('event_date'))
+                ev_date = ev_dt.strftime('%d %b %Y') if ev_dt else str(event.get('event_date', ''))
                 ev_type = event['event_type'].replace('_', ' ').title()
                 
                 # Date column
@@ -511,11 +520,9 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
                 pdf.ln(2)
                 
                 for d in sorted(pending, key=lambda x: x['deadline_date']):
-                    try:
-                        d_date = datetime.fromisoformat(d['deadline_date'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                    except Exception:
-                        d_date = d['deadline_date']
-                        
+                    d_dt = _parse_dt(d.get('deadline_date'))
+                    d_date = d_dt.strftime('%d %b %Y') if d_dt else str(d.get('deadline_date', ''))
+
                     days = d.get('days_until', 999)
                     
                     # Urgency coloring
@@ -548,10 +555,8 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
                 pdf.cell(0, 8, 'COMPLETED MILESTONES', 0, 1)
                 
                 for d in completed:
-                    try:
-                        d_date = datetime.fromisoformat(d['deadline_date'].replace('Z', '+00:00')).strftime('%d %b %Y')
-                    except Exception:
-                        d_date = d['deadline_date']
+                    d_dt = _parse_dt(d.get('deadline_date'))
+                    d_date = d_dt.strftime('%d %b %Y') if d_dt else str(d.get('deadline_date', ''))
                     
                     pdf.safe_set_font(pdf.main_font, '', 10)
                     pdf.set_text_color(149, 165, 166)
@@ -595,7 +600,13 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
     finally:
         db.close()
 
-def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optional[bytes]:
+def generate_anonymized_pdf(
+    case_id: int,
+    anon_id: str,
+    user_id: int,
+    profile_name: Optional[str] = None,
+    anonymized_data: Optional[Dict[str, Any]] = None,
+) -> Optional[bytes]:
     """
     Generate an anonymized PDF for external legal review.
     Strips all personal identifiers to maintain privacy.
@@ -613,6 +624,16 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optiona
 
         documents = db.query(CaseDocument).filter(CaseDocument.case_id == case_id).all()
         timeline = db.query(CaseTimeline).filter(CaseTimeline.case_id == case_id).all()
+        from services.privacy_redaction import normalize_privacy_profile, get_privacy_profile_definition
+        selected_profile = normalize_privacy_profile(profile_name)
+        profile = get_privacy_profile_definition(selected_profile)
+
+        if anonymized_data is None:
+            try:
+                from case_manager import generate_anonymized_case_data
+                anonymized_data = generate_anonymized_case_data(case_id, profile_name=selected_profile)
+            except Exception:
+                anonymized_data = None
 
         pdf = LegalAssistPDF()
         pdf.add_page()
@@ -625,6 +646,7 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optiona
         pdf.safe_set_font(pdf.main_font, '', 11)
         pdf.set_text_color(*TEXT_COLOR)
         pdf.cell(0, 8, f"Unique Reference ID: {anon_id}", 0, 1, 'C')
+        pdf.cell(0, 8, f"Privacy profile: {profile.get('label', selected_profile)}", 0, 1, 'C')
         pdf.ln(10)
 
         # Classification info
@@ -651,7 +673,16 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optiona
 
         # Document abstracts
         pdf.section_header('Evidence Summary')
-        if documents:
+        if anonymized_data and anonymized_data.get("documents"):
+            for doc in anonymized_data["documents"]:
+                pdf.safe_set_font(pdf.main_font, 'B', 10)
+                pdf.cell(0, 7, f"Type: {doc.get('type', 'Document')}", 0, 1)
+                summary = doc.get("summary")
+                if summary:
+                    pdf.safe_set_font(pdf.main_font, '', 10)
+                    pdf.multi_cell(0, 5, str(summary))
+                pdf.ln(3)
+        elif documents:
             for doc in documents:
                 pdf.safe_set_font(pdf.main_font, 'B', 10)
                 pdf.cell(0, 7, f"Type: {doc.document_type.value}", 0, 1)
@@ -664,7 +695,13 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optiona
 
         # Procedure Timeline
         pdf.section_header('Procedural Milestones')
-        if timeline:
+        if anonymized_data and anonymized_data.get("timeline"):
+            for event in anonymized_data["timeline"][:20]:
+                pdf.safe_set_font(pdf.main_font, 'B', 9)
+                pdf.cell(40, 6, str(event.get("event_type", "event")).replace('_', ' ').title(), 0, 0)
+                pdf.safe_set_font(pdf.main_font, '', 9)
+                pdf.cell(0, 6, str(event.get("description") or ""), 0, 1)
+        elif timeline:
             for event in timeline[:20]:
                 pdf.safe_set_font(pdf.main_font, 'B', 9)
                 pdf.cell(40, 6, event.event_date.strftime('%d %b %Y'), 0, 0)
@@ -683,7 +720,25 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optiona
 
         final_out = pdf.output(dest='S')
         if isinstance(final_out, (bytes, bytearray)):
+            record_audit_event(
+                db,
+                actor=f"user:{user_id}",
+                actor_user_id=user_id,
+                action="download_anonymized_pdf",
+                resource=f"case:{case_id}",
+                case_id=case_id,
+                metadata={"privacy_profile": selected_profile, "anonymized_id": anon_id},
+            )
             return bytes(final_out)
+        record_audit_event(
+            db,
+            actor=f"user:{user_id}",
+            actor_user_id=user_id,
+            action="download_anonymized_pdf",
+            resource=f"case:{case_id}",
+            case_id=case_id,
+            metadata={"privacy_profile": selected_profile, "anonymized_id": anon_id},
+        )
         return final_out.encode('utf-8')
 
     except Exception as e:
@@ -691,3 +746,17 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optiona
         return None
     finally:
         db.close()
+
+
+def calculate_optimal_font_size(text: str, container_width: float, max_font_size: float = 12.0) -> float:
+    """
+    Dynamically scales down the font size for longer table headers 
+    to prevent text wrapping and clipping in PDF generation.
+    """
+    estimated_char_width = 6.0
+    text_length = len(text)
+    required_width = text_length * estimated_char_width
+    if required_width > container_width:
+        ratio = container_width / required_width
+        return max(6.0, min(max_font_size, max_font_size * ratio))
+    return max_font_size

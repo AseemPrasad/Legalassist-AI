@@ -3,7 +3,7 @@ Pydantic schemas for structured legal argument extraction.
 Ensures validated, consistent argument representation.
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import List, Optional
 from enum import Enum
 
@@ -25,19 +25,19 @@ class ExtractedLegalArgument(BaseModel):
     argument_type: ArgumentType = Field(...)
     reasoning: str = Field(..., min_length=10, max_length=500)
     supporting_evidence: Optional[str] = Field(None, max_length=500)
-    citation_references: Optional[List[str]] = Field(None, max_items=10)
+    citation_references: Optional[List[str]] = Field(None, max_length=10)
     confidence_score: float = Field(..., ge=0.0, le=1.0)
-    issue_tags: List[str] = Field(default_factory=list, max_items=5)
+    issue_tags: List[str] = Field(default_factory=list, max_length=5)
     
-    @validator('argument_text')
+    @field_validator('argument_text')
+    @classmethod
     def validate_text_quality(cls, v):
         """Ensure argument has substantive content"""
         if v.count(' ') < 5:
             raise ValueError("Argument must contain meaningful content")
         return v
     
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class ArgumentExtractionResult(BaseModel):

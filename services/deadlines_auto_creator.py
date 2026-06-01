@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from db.models import CaseDeadline, CaseTimeline
+from core.deadline_engine import get_deadline_first_action
 from .timeline_service import timeline_service
 
 
@@ -34,6 +35,8 @@ _APPEAL_DAY_PATTERNS = (
 class RemediesPayload(BaseModel):
     appeal_days: Optional[Union[int, str]] = None
     appeal_court: Optional[str] = None
+    confidence_score: Optional[float] = None
+    evidence_spans: Optional[list[dict[str, Any]]] = None
 
 
 def _validate_remedies_payload(remedies: Any) -> Optional[RemediesPayload]:
@@ -62,6 +65,16 @@ def _validate_remedies_payload(remedies: Any) -> Optional[RemediesPayload]:
         return None
 
     return payload
+
+
+def _build_remedies_telemetry_metadata(remedies: RemediesPayload) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {}
+    if remedies.confidence_score is not None:
+        metadata["remedies_confidence_score"] = remedies.confidence_score
+        metadata["remedies_low_confidence"] = remedies.confidence_score < 0.75
+    if remedies.evidence_spans:
+        metadata["remedies_evidence_spans"] = remedies.evidence_spans
+    return metadata
 
 
 def _emit_deadline_skip_event(
@@ -148,6 +161,8 @@ def auto_create_deadlines_from_remedies(
     if validated_remedies is None:
         return
 
+    telemetry_metadata = _build_remedies_telemetry_metadata(validated_remedies)
+
     appeal_days = validated_remedies.appeal_days
     if appeal_days is None:
         _log_deadline_skip(
@@ -158,6 +173,7 @@ def auto_create_deadlines_from_remedies(
             case_title=case_title,
             document_id=document_id,
             remedies_present=True,
+            **telemetry_metadata,
         )
         return
 
@@ -173,6 +189,7 @@ def auto_create_deadlines_from_remedies(
             document_id=document_id,
             appeal_days_type=type(appeal_days).__name__,
             appeal_days_value=appeal_days_str[:120],
+            **telemetry_metadata,
         )
         return
 
@@ -185,6 +202,7 @@ def auto_create_deadlines_from_remedies(
             case_title=case_title,
             document_id=document_id,
             source_days=days,
+            **telemetry_metadata,
         )
         return
 
@@ -195,8 +213,10 @@ def auto_create_deadlines_from_remedies(
         user_id=user_id,
         case_id=case_id,
         case_title=case_title,
+        court_name=validated_remedies.appeal_court,
         deadline_date=deadline_date,
         deadline_type="appeal",
+        first_action=get_deadline_first_action("appeal"),
         description=f"Appeal deadline - {validated_remedies.appeal_court or 'Unknown court'}",
     )
     db.add(deadline)
@@ -212,5 +232,6 @@ def auto_create_deadlines_from_remedies(
             "document_id": document_id,
             "source_days": days,
             "original_text": appeal_days_str,
+            **telemetry_metadata,
         },
     )

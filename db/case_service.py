@@ -13,9 +13,12 @@ from db.models import (
     CaseRecord,
     CaseStatus,
     CaseTimeline,
+    CaseNote,
+    CaseNoteVersion,
     ModelFeedback,
     UserFeedback,
 )
+from db.crud.knowledge import record_knowledge_invalidation
 
 
 def create_case(db: Session, user_id: int, case_number: str, case_type: str, jurisdiction: str, title: Optional[str] = None) -> Case:
@@ -80,19 +83,41 @@ def create_case_document(
     file_path: Optional[str] = None,
     summary: Optional[str] = None,
     remedies: Optional[dict] = None,
+    extracted_metadata: Optional[dict] = None,
+    extraction_method: Optional[str] = None,
+    ocr_used: bool = False,
+    source_attachment_id: Optional[int] = None,
 ) -> CaseDocument:
     """Create a new case document"""
     doc = CaseDocument(
         case_id=case_id,
+        source_attachment_id=source_attachment_id,
         document_type=document_type,
         document_content=document_content,
         file_path=file_path,
         summary=summary,
         remedies=remedies,
+        extracted_metadata=extracted_metadata,
+        extraction_method=extraction_method,
+        ocr_used=ocr_used,
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
+
+    record_knowledge_invalidation(
+        db,
+        scope_type="case",
+        case_id=case_id,
+        document_id=doc.id,
+        user_id=user_id,
+        reason="document_created",
+        details={
+            "document_type": getattr(document_type, "value", document_type),
+            "source_attachment_id": source_attachment_id,
+            "changed_fields": ["document_content", "summary", "remedies", "extracted_metadata"],
+        },
+    )
     return doc
 
 
@@ -108,24 +133,163 @@ def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocum
     return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
 
 
+def get_case_note(db: Session, case_id: int, user_id: int) -> Optional[CaseNote]:
+    """Get the editable note state for a case owned by the user."""
+    return (
+        db.query(CaseNote)
+        .filter(
+            CaseNote.case_id == case_id,
+            CaseNote.user_id == user_id,
+        )
+        .first()
+    )
+
+
+def save_case_note_draft(
+    db: Session,
+    case_id: int,
+    user_id: int,
+    note_text: str,
+    changed_by_email: Optional[str] = None,
+) -> CaseNote:
+    """Persist the current draft text without creating a published version."""
+    case = get_case_by_id(db, case_id)
+    if not case or case.user_id != user_id:
+        raise ValueError("Case not found or not owned by user")
+
+    note = get_case_note(db, case_id, user_id)
+    if not note:
+        note = CaseNote(case_id=case_id, user_id=user_id, draft_text=note_text)
+        db.add(note)
+    else:
+        note.draft_text = note_text
+        note.draft_updated_at = dt.datetime.now(dt.timezone.utc)
+
+    db.commit()
+    db.refresh(note)
+    return note
+
+
+def publish_case_note(
+    db: Session,
+    case_id: int,
+    user_id: int,
+    note_text: Optional[str] = None,
+    changed_by_email: Optional[str] = None,
+) -> CaseNoteVersion:
+    """Create an immutable published version from the current draft."""
+    case = get_case_by_id(db, case_id)
+    if not case or case.user_id != user_id:
+        raise ValueError("Case not found or not owned by user")
+
+    note = get_case_note(db, case_id, user_id)
+    if not note:
+        note = CaseNote(case_id=case_id, user_id=user_id, draft_text=note_text or "")
+        db.add(note)
+        db.flush()
+    elif note_text is not None:
+        note.draft_text = note_text
+        note.draft_updated_at = dt.datetime.now(dt.timezone.utc)
+
+    current_text = note_text if note_text is not None else note.draft_text
+    if current_text is None:
+        current_text = ""
+
+    next_version = (
+        db.query(CaseNoteVersion.version_number)
+        .filter(CaseNoteVersion.case_id == case_id, CaseNoteVersion.note_id == note.id)
+        .order_by(CaseNoteVersion.version_number.desc())
+        .first()
+    )
+    version_number = (next_version[0] if next_version else 0) + 1
+
+    version = CaseNoteVersion(
+        note_id=note.id,
+        case_id=case_id,
+        version_number=version_number,
+        note_text=current_text,
+        change_type="published",
+        changed_by_user_id=user_id,
+        changed_by_email=changed_by_email,
+        version_metadata={"published_from_draft": True},
+    )
+    note.published_text = current_text
+    note.published_at = dt.datetime.now(dt.timezone.utc)
+    note.published_version_id = version_number
+
+    db.add(version)
+    db.commit()
+    db.refresh(version)
+    db.refresh(note)
+    return version
+
+
+def get_case_note_history(db: Session, case_id: int, user_id: int) -> List[CaseNoteVersion]:
+    """Get immutable published note versions for a case."""
+    case = get_case_by_id(db, case_id)
+    if not case or case.user_id != user_id:
+        return []
+
+    return (
+        db.query(CaseNoteVersion)
+        .filter(CaseNoteVersion.case_id == case_id)
+        .order_by(CaseNoteVersion.version_number.desc(), CaseNoteVersion.created_at.desc())
+        .all()
+    )
+
+
 def update_case_document(
     db: Session,
     document_id: int,
     document_content: Optional[str] = None,
     summary: Optional[str] = None,
     remedies: Optional[dict] = None,
+    extracted_metadata: Optional[dict] = None,
+    extraction_method: Optional[str] = None,
+    ocr_used: Optional[bool] = None,
 ) -> Optional[CaseDocument]:
     """Update case document"""
     doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
     if doc:
+        changed_fields = []
         if document_content is not None:
             doc.document_content = document_content
+            changed_fields.append("document_content")
         if summary is not None:
             doc.summary = summary
+            changed_fields.append("summary")
         if remedies is not None:
             doc.remedies = remedies
-        db.commit()
-        db.refresh(doc)
+            changed_fields.append("remedies")
+        if extracted_metadata is not None:
+            doc.extracted_metadata = extracted_metadata
+            changed_fields.append("extracted_metadata")
+        if extraction_method is not None:
+            doc.extraction_method = extraction_method
+            changed_fields.append("extraction_method")
+        if ocr_used is not None:
+            doc.ocr_used = ocr_used
+            changed_fields.append("ocr_used")
+        try:
+            db.commit()
+            db.refresh(doc)
+            if changed_fields:
+                reason = f"{changed_fields[0]}_updated"
+                record_knowledge_invalidation(
+                    db,
+                    scope_type="case",
+                    case_id=doc.case_id,
+                    document_id=doc.id,
+                    reason=reason,
+                    details={
+                        "changed_fields": changed_fields,
+                        "document_id": doc.id,
+                        "case_id": doc.case_id,
+                    },
+                )
+        except Exception as e:
+            db.rollback()
+            raise RuntimeError(f"Database write failed for case document {document_id}: {str(e)}") from e
     return doc
 
 
@@ -290,4 +454,61 @@ def create_timeline_event(
     db.commit()
     db.refresh(event)
     return event
+
+
+def transition_deadline(db: Session, deadline_id: int, target_status: str, actor_user_id: int) -> CaseDeadline:
+    """
+    Transition a deadline to a new status with validation and audit trail.
+    Allowed transitions:
+    - active -> completed
+    - active -> overdue
+    - overdue -> completed
+    - overdue -> active
+    - completed -> active (reopening)
+    """
+    from db.crud.audit import record_audit_event
+
+    deadline = db.query(CaseDeadline).filter(CaseDeadline.id == deadline_id).first()
+    if not deadline:
+        raise ValueError(f"Deadline {deadline_id} not found")
+
+    old_status = deadline.status or ("completed" if deadline.is_completed else "active")
+    if old_status == target_status:
+        raise ValueError(f"Deadline is already in '{target_status}' status")
+
+    # Validate transition
+    allowed = {
+        "active": {"completed", "overdue"},
+        "overdue": {"completed", "active"},
+        "completed": {"active"},
+    }
+
+    if target_status not in allowed.get(old_status, set()):
+        raise ValueError(f"Invalid transition from '{old_status}' to '{target_status}'")
+
+    deadline.status = target_status
+    if target_status == "completed":
+        deadline.is_completed = True
+    else:
+        deadline.is_completed = False
+
+    db.commit()
+    db.refresh(deadline)
+
+    # Audit trail
+    record_audit_event(
+        db,
+        actor=f"user:{actor_user_id}",
+        action="transition_deadline",
+        resource=f"deadline:{deadline.id}",
+        case_id=deadline.case_id,
+        actor_user_id=actor_user_id,
+        metadata={
+            "deadline_id": deadline.id,
+            "old_status": old_status,
+            "new_status": target_status,
+        }
+    )
+
+    return deadline
 

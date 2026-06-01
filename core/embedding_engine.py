@@ -5,7 +5,7 @@ Generates semantic embeddings for case documents using OpenAI or other models.
 
 import json
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import numpy as np
 from datetime import datetime, timezone
 
@@ -19,11 +19,10 @@ from database import (
     SessionLocal,
 )
 from config import Config
+from core.vector_store import ShardedVectorStore
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
-
-# Initialize OpenAI
-openai.api_key = Config.OPENAI_API_KEY
 
 
 class EmbeddingEngine:
@@ -34,14 +33,11 @@ class EmbeddingEngine:
         model: str = "text-embedding-3-small",
         dimension: int = 1536,
     ):
-        """Initialize embedding engine
-        
-        Args:
-            model: Embedding model to use (text-embedding-3-small, text-embedding-3-large)
-            dimension: Embedding dimension (1536 for small, 3072 for large)
-        """
         self.model = model
         self.dimension = dimension
+        self._client = openai.OpenAI(
+            api_key=getattr(Config, "OPENAI_API_KEY", None) or getattr(Config, "OPENROUTER_API_KEY", "")
+        )
 
     def generate_embedding(self, text: str) -> Optional[List[float]]:
         """Generate embedding for a single text
@@ -66,13 +62,12 @@ class EmbeddingEngine:
                 logger.warning(f"Text truncated from {len(text)} to {max_chars} chars")
                 text = text[:max_chars]
             
-            # Call OpenAI API
-            response = openai.Embedding.create(
+            response = self._client.embeddings.create(
                 model=self.model,
                 input=text,
             )
             
-            embedding = response["data"][0]["embedding"]
+            embedding = response.data[0].embedding
             return embedding
             
         except Exception as e:
@@ -184,10 +179,49 @@ class EmbeddingEngine:
             Dict mapping case_id -> CaseEmbedding
         """
         results = {}
-        for case_id in case_ids:
-            results[case_id] = self.embed_case(
-                db, case_id, force_regenerate=force_regenerate
-            )
+        # Batch configuration
+        batch_size = int(getattr(Config, "EMBEDDING_BATCH_SIZE", 16))
+        concurrency = int(getattr(Config, "EMBEDDING_CONCURRENCY", 4))
+
+        vector_store = get_vector_store(num_shards=int(getattr(Config, "VECTOR_SHARDS", 4)), dimension=self.dimension)
+
+        # Helper to process a single case id (used by threads)
+        def process_case(cid: int) -> Tuple[int, Optional[CaseEmbedding], Optional[List[float]]]:
+            emb_obj = self.embed_case(db, cid, force_regenerate=force_regenerate)
+            if emb_obj:
+                vec = None
+                try:
+                    vec = json.loads(emb_obj.embedding_vector)
+                except Exception:
+                    vec = None
+                return cid, emb_obj, vec
+            return cid, None, None
+
+        # Use ThreadPoolExecutor to parallelize embedding generation within batches
+        for i in range(0, len(case_ids), batch_size):
+            batch = case_ids[i : i + batch_size]
+            futures = []
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                for cid in batch:
+                    futures.append(ex.submit(process_case, cid))
+
+                to_add = []  # items for vector store
+                for fut in as_completed(futures):
+                    try:
+                        cid, emb_obj, vec = fut.result()
+                        results[cid] = emb_obj
+                        if vec is not None:
+                            to_add.append((cid, vec))
+                    except Exception as e:
+                        logger.error(f"Embedding generation failed in batch: {e}")
+
+                # Push batch to vector store
+                if to_add:
+                    try:
+                        vector_store.add_batch(to_add)
+                    except Exception as e:
+                        logger.exception("Failed to add batch to vector store: %s", e)
+
         return results
 
     @staticmethod
@@ -284,3 +318,14 @@ def get_embedding_engine(
         EmbeddingEngine instance
     """
     return EmbeddingEngine(model=model, dimension=dimension)
+
+
+# Default singleton vector store for the application
+_vector_store: Optional[ShardedVectorStore] = None
+
+
+def get_vector_store(num_shards: int = 4, dimension: int = 1536) -> ShardedVectorStore:
+    global _vector_store
+    if _vector_store is None:
+        _vector_store = ShardedVectorStore(num_shards=num_shards, dimension=dimension)
+    return _vector_store

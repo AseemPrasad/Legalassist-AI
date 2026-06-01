@@ -74,3 +74,30 @@ def test_websocket_auth_invalid_token(mock_verify_token, client):
         pytest.fail("Should have rejected connection")
     except Exception as e:
         assert hasattr(e, "code") or "4001" in str(e) or "403" in str(e) or type(e).__name__ == "WebSocketDisconnect"
+
+
+@patch("api.auth.verify_token")
+@patch("api.main.TaskStatus.get_task_status")
+def test_websocket_auth_rate_limited(mock_get_task_status, mock_verify_token, monkeypatch, client):
+    """Test that websocket rejects connection when the rate limiter blocks it."""
+    from api.limiter import RateLimitExceeded
+
+    async def deny(*args, **kwargs):
+        raise RateLimitExceeded(retry_after=5, message="Too many requests. Limit is 20 per 60 seconds.")
+
+    mock_verify_token.return_value = {"sub": "user_123"}
+    mock_get_task_status.return_value = {
+        "status": "completed",
+        "info": {"progress": 100},
+        "timestamp": "2023-01-01T00:00:00Z"
+    }
+    monkeypatch.setattr("api.main.enforce_rate_limit", deny)
+
+    token = "valid_token"
+    job_id = "job_123"
+    try:
+        with client.websocket_connect(f"/ws/progress/{job_id}", subprotocols=["access_token", token]) as websocket:
+            pass
+        pytest.fail("Should have rejected connection")
+    except Exception as e:
+        assert hasattr(e, "code") or "1013" in str(e) or type(e).__name__ == "WebSocketDisconnect"

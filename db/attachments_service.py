@@ -16,6 +16,7 @@ def create_attachment(
     size_bytes: Optional[int] = None,
     case_id: Optional[int] = None,
     deadline_id: Optional[int] = None,
+    document_id: Optional[int] = None,
 ) -> Attachment:
     """Create a new file attachment record"""
     att = Attachment(
@@ -26,6 +27,7 @@ def create_attachment(
         size_bytes=size_bytes,
         case_id=case_id,
         deadline_id=deadline_id,
+        document_id=document_id,
     )
     db.add(att)
     db.commit()

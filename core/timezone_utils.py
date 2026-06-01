@@ -4,7 +4,7 @@ Timezone utilities for consistent datetime display across the application.
 Provides helpers for timezone-aware datetime handling and user-local display.
 """
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional, Union
 import pytz
 

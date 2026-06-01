@@ -6,9 +6,11 @@ Tests database models, notification services, and scheduler.
 import pytest
 import os
 from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch, MagicMock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from database import (
     Base,
@@ -604,6 +606,62 @@ class TestNotificationService:
         # Verify the email contains the case information
         assert "Appeal Filing" in result.recipient or result.message_id is not None
 
+    def test_send_with_fallback_uses_email_when_sms_fails(self, test_db):
+        """Test fallback from SMS to email and log the attempted channel chain."""
+        case = Case(
+            user_id=1,
+            case_number="CASE-FALLBACK",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Fallback Case",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
+        deadline = create_case_deadline(
+            test_db,
+            1,
+            case.id,
+            "Fallback Case",
+            datetime.now(timezone.utc) + timedelta(days=10),
+            "appeal",
+        )
+
+        pref = create_or_update_user_preference(
+            test_db,
+            1,
+            "user@example.com",
+            phone_number="+91-9876543210",
+            notification_channel=NotificationChannel.BOTH,
+        )
+
+        sms_client = Mock()
+        sms_client.send_sms.return_value = (False, None, "Twilio is down")
+        email_client = Mock()
+        email_client.send_email.return_value = (True, "email_123", None)
+
+        service = NotificationService(sms_client=sms_client, email_client=email_client)
+        result = service.send_with_fallback(test_db, deadline, pref, 10)
+
+        assert result.success is True
+        assert result.channel == NotificationChannel.EMAIL
+        assert result.attempted_channels == ["sms", "email"]
+        assert result.message_id == "email_123"
+
+        log = test_db.query(NotificationLog).filter(
+            NotificationLog.deadline_id == deadline.id,
+            NotificationLog.days_before == 10,
+            NotificationLog.channel == NotificationChannel.EMAIL,
+        ).first()
+
+        assert log is not None
+        assert log.status == NotificationStatus.SENT
+        assert log.attempted_channels == ["sms", "email"]
+        assert log.message_id == "email_123"
+        assert log.recipient == "user@example.com"
+
     def test_mock_mode_sms(self, test_db):
         """Test SMS in mock mode (no credentials)"""
         # Owned case required for ownership validation
@@ -678,6 +736,95 @@ class TestNotificationService:
 
 # ==================== Scheduler Tests ====================
 
+
+class TestNotificationDispatchConcurrency:
+    """Concurrency regressions for overlapping reminder jobs."""
+
+    @pytest.fixture()
+    def shared_engine(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        yield engine
+        engine.dispose()
+
+    def test_overlapping_reminder_runs_create_one_log_and_send_once(self, shared_engine):
+        session_factory = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=shared_engine)
+        setup_db = session_factory()
+        now = datetime.now(timezone.utc)
+
+        user = User(id=501, email="race@example.com")
+        setup_db.add(user)
+        setup_db.commit()
+
+        case = Case(
+            user_id=501,
+            case_number="CASE-RACE",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Race Case",
+        )
+        setup_db.add(case)
+        setup_db.commit()
+        setup_db.refresh(case)
+
+        deadline = create_case_deadline(
+            setup_db,
+            501,
+            case.id,
+            "Race Case",
+            now + timedelta(days=30, hours=1),
+            "appeal",
+        )
+        preference = create_or_update_user_preference(
+            setup_db,
+            501,
+            "race@example.com",
+            phone_number="+911111111111",
+            notification_channel=NotificationChannel.SMS,
+        )
+
+        setup_db.close()
+
+        service = NotificationService()
+        send_calls = []
+
+        def fake_delay(*args, **kwargs):
+            send_calls.append(kwargs)
+            return MagicMock(id=f"task-{len(send_calls)}")
+
+        with patch("notification_service.send_sms_task.delay", side_effect=fake_delay), \
+             patch("notification_service._is_debug_or_testing_mode", return_value=True):
+
+            def run_once():
+                local_db = session_factory()
+                try:
+                    return service.send_reminders(local_db, deadline, preference, 30)
+                finally:
+                    local_db.close()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(lambda _: run_once(), range(2)))
+
+        verify_db = session_factory()
+        try:
+            logs = verify_db.query(NotificationLog).filter(
+                NotificationLog.deadline_id == deadline.id,
+                NotificationLog.days_before == 30,
+                NotificationLog.channel == NotificationChannel.SMS,
+            ).all()
+        finally:
+            verify_db.close()
+
+        assert len(logs) == 1
+        assert len(send_calls) == 1
+        assert any(result and result[0].success for result in results)
+        assert any(result and result[0].error == "Already sent" for result in results if result)
+
 class TestScheduler:
     """Test the background scheduler"""
 
@@ -712,7 +859,7 @@ class TestScheduler:
         # Mock the notification service to count calls
         with patch("scheduler.notification_service") as mock_service, \
              patch("scheduler.SessionLocal", return_value=test_db):
-            mock_service.send_reminders.return_value = []
+            mock_service.send_with_fallback.return_value = Mock(success=True)
             check_reminders_sync(target_days=30, db=test_db)
 
     def test_sync_reminder_respects_preferences(self, test_db):

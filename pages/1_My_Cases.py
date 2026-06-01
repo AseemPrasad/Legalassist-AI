@@ -196,16 +196,15 @@ def render_create_case_modal():
                 st.error("Please fill in all required fields (*)")
             else:
                 user_id = get_current_user_id()
-                # Normalize input to avoid near-duplicate cases
-                normalized_case_number = (case_number or "").strip().casefold()
-                normalized_case_type = (case_type or "").strip().casefold()
-                normalized_jurisdiction = (jurisdiction or "").strip().casefold()
+                canonical_case_number = (case_number or "").strip()
+                canonical_case_type = (case_type or "").strip()
+                canonical_jurisdiction = (jurisdiction or "").strip()
 
                 case = get_or_create_case_for_document(
                     user_id=user_id,
-                    new_case_number=normalized_case_number,
-                    new_case_type=normalized_case_type,
-                    new_jurisdiction=normalized_jurisdiction,
+                    new_case_number=canonical_case_number,
+                    new_case_type=canonical_case_type,
+                    new_jurisdiction=canonical_jurisdiction,
                     new_title=(case_title or "").strip(),
                 )
 

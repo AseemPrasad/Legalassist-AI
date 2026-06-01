@@ -17,6 +17,7 @@ from database import (
     KnowledgeGraphEdge,
     CaseEmbedding,
 )
+from core.precedent_ranker import rank_precedents
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ class PrecedentMatcher:
                     results.append(result)
             
             # Sort by weight (relevance)
-            results.sort(key=lambda x: x["weight"], reverse=True)
+            results.sort(key=lambda x: float(x.get("weight", 1.0)), reverse=True)
             
             # Remove duplicates (same precedent case)
             seen = set()
@@ -114,8 +115,10 @@ class PrecedentMatcher:
                 if key not in seen:
                     seen.add(key)
                     unique_results.append(r)
-            
-            return unique_results[:limit]
+
+            # Rank using multi-factor ranking
+            ranked = rank_precedents(db, unique_results)
+            return ranked[:limit]
             
         except Exception as e:
             logger.error(f"Error finding winning precedents: {str(e)}")

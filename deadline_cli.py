@@ -48,6 +48,7 @@ from database import (
     CaseAnalytics,
 )
 from notification_service import NotificationService
+from core.log_redaction import mask_email, mask_phone
 from scheduler import check_reminders_sync, trigger_reminder_check_now
 
 # ==============================================================================
@@ -530,7 +531,7 @@ def test_sms(user_id: int, msg: str):
             console.print(f"[bold red]❌ User {user_id} has no phone number configured.[/bold red]")
             sys.exit(1)
         
-        console.print(f"📱 Dispatching test SMS to [cyan]{pref.phone_number}[/cyan]...")
+        console.print(f"📱 Dispatching test SMS to [cyan]{mask_phone(pref.phone_number)}[/cyan]...")
         
         # Create a minimal test case if none exists for FK constraint
         test_case = ctx.db.query(Case).filter(Case.user_id == user_id).first()
@@ -568,7 +569,7 @@ def test_email(user_id: int):
             console.print(f"[bold red]❌ User {user_id} has no preferences configured.[/bold red]")
             sys.exit(1)
         
-        console.print(f"📧 Dispatching test email to [cyan]{pref.email}[/cyan]...")
+        console.print(f"📧 Dispatching test email to [cyan]{mask_email(pref.email)}[/cyan]...")
         
         # Create a minimal test case if none exists for FK constraint
         test_case = ctx.db.query(Case).filter(Case.user_id == user_id).first()
