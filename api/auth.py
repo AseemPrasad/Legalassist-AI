@@ -12,6 +12,17 @@ import hashlib
 
 from api.config import get_settings
 
+# Import shared JWT exception hierarchy and utilities from the canonical module.
+# Do NOT redefine AuthError, TokenExpiredError, or InvalidTokenError here —
+# redefining them would shadow these imports and break exception handling because
+# verify_token() raises the jwt_auth classes, not any locally defined ones.
+from api.jwt_auth import (
+    AuthError,
+    TokenExpiredError,
+    InvalidTokenError,
+    create_access_token,
+    verify_token,
+)
 
 settings = get_settings()
 security = HTTPBearer()
@@ -19,47 +30,11 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 
 
 # ============================================================================
-# JWT Token Management
+# JWT Token Management — delegated to api.jwt_auth
 # ============================================================================
-
-def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Create JWT access token"""
-    to_encode = data.copy()
-    
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(hours=settings.JWT_EXPIRATION_HOURS)
-    
-    to_encode.update({"exp": expire})
-    
-    encoded_jwt = jwt.encode(
-        to_encode,
-        settings.JWT_SECRET_KEY,
-        algorithm=settings.JWT_ALGORITHM
-    )
-    return encoded_jwt
-
-
-def verify_token(token: str) -> Dict:
-    """Verify JWT token"""
-    try:
-        payload = jwt.decode(
-            token,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM]
-        )
-        return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired"
-        )
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token"
-        )
+# create_access_token and verify_token are re-exported from api.jwt_auth above.
+# They raise TokenExpiredError / InvalidTokenError (both subclasses of AuthError)
+# so callers can catch typed exceptions instead of bare HTTPException.
 
 
 # ============================================================================
@@ -136,17 +111,25 @@ async def get_current_user(
             user_id = payload.get("sub")
             email = payload.get("email")
             role = payload.get("role", "user")
-            
+
             if not user_id:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid token payload"
                 )
-            
+
             return CurrentUser(user_id, email, role)
-        except HTTPException:
-            raise
-    
+        except TokenExpiredError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has expired"
+            )
+        except InvalidTokenError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token"
+            )
+
     # Try API Key from header — validate as a signed JWT.
     # Arbitrary or unsigned tokens are rejected by verify_token with a 401.
     if http_auth:
@@ -164,8 +147,16 @@ async def get_current_user(
                 )
 
             return CurrentUser(user_id, email, role)
-        except HTTPException:
-            raise
+        except TokenExpiredError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has expired"
+            )
+        except InvalidTokenError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token"
+            )
     
     # Try X-API-Key header
     # This would typically be validated against database
