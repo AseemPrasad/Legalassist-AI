@@ -40,6 +40,31 @@ intermediaries for basic updates. The judiciary is stuck with manual records and
  
  Accessibility (Digital Divide Bridge): By instantly converting legal jargon into local language summaries, the solution bridges the Digital Divide and promotes inclusive justice for ordinary people who cannot navigate the courts due to language
 
+## Developer Setup & Running Tests
+
+### Local Setup
+1. Create a virtual environment:
+   ```bash
+   python -m venv venv
+   .\venv\Scripts\activate  # On Windows
+   # or source venv/bin/activate on Linux/macOS
+   ```
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   pip install -r requirements-notifications.txt
+   ```
+3. Run environment validation:
+   ```bash
+   python scripts/validate_env.py
+   ```
+
+### Running Tests
+To run the test suite:
+```bash
+pytest
+```
+
 ## CLI Tool for Batch Processing
 
 LegalEase AI now supports command-line processing for legal aid teams handling many judgments each day.
