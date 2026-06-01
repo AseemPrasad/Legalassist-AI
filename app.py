@@ -595,7 +595,7 @@ def main():
     st.markdown(ui["app_intro"])
     st.markdown("---")
 
-    language = st.selectbox("🌐 Select your language", ["English", "Hindi", "Bengali", "Urdu"])
+    language = st.selectbox("🌐 Select your language", ["English", "Hindi", "Bengali", "Urdu"], key="judgment_language")
     uploaded_file = st.file_uploader("📄 Upload Judgment PDF / Image", type=["pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp"])
     enable_ocr = False
     ocr_languages = "eng+hin"
