@@ -1008,6 +1008,7 @@ class NotificationService:
             subject, html_content = self.build_email_message(deadline, days_left, _derive_first_action(deadline))
 
 
+
         # ====================================================================
         # ASYNCHRONOUS DELIVERY OFFLOAD
         # ====================================================================
