@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from database import Case, CaseDeadline
 from api.dependencies import get_db_rls
+from core.deadline_engine import get_deadline_first_action
 
 router = APIRouter(prefix="/api/v1/deadlines", tags=["deadlines"])
 logger = structlog.get_logger(__name__)
@@ -281,10 +282,10 @@ async def create_deadline(
             """
             INSERT INTO case_deadlines (
                 user_id, case_id, case_title, deadline_date, deadline_type,
-                description, created_at, updated_at, is_completed, status
+                first_action, description, created_at, updated_at, is_completed, status
             ) VALUES (
                 :user_id, :case_id, :case_title, :deadline_date, :deadline_type,
-                :description, :created_at, :updated_at, :is_completed, :status
+                :first_action, :description, :created_at, :updated_at, :is_completed, :status
             )
             """
         ),
@@ -294,6 +295,7 @@ async def create_deadline(
             "case_title": case["title"] or case["case_number"],
             "deadline_date": normalized_due_date,
             "deadline_type": priority or "manual",
+            "first_action": get_deadline_first_action(priority or "manual"),
             "description": description or title,
             "created_at": now,
             "updated_at": now,

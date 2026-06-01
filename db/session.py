@@ -1,5 +1,6 @@
 import datetime as dt
 import logging
+import os
 from contextlib import contextmanager
 from typing import Optional
 
@@ -24,8 +25,10 @@ engine_kwargs: dict = {}
 if _is_sqlite:
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 else:
-    engine_kwargs["pool_size"] = 20
-    engine_kwargs["max_overflow"] = 10
+    engine_kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "20"))
+    engine_kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+    engine_kwargs["pool_timeout"] = int(os.getenv("DB_POOL_TIMEOUT", "30"))
+    engine_kwargs["pool_recycle"] = int(os.getenv("DB_POOL_RECYCLE", "1800"))
 engine = create_engine(DATABASE_URL, **engine_kwargs)
 
 if _is_sqlite:

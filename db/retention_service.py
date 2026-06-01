@@ -176,10 +176,12 @@ def purge_expired_notifications(db: Session, cutoff_days: int, dry_run: bool = F
 def purge_expired_otl_tokens(db: Session, cutoff_days: int, dry_run: bool = False) -> tuple[list, int]:
     """Delete OTP tokens past their expiry time."""
     from db.models.auth import OTPVerification
+    from db.session import _datetime_for_db
 
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=cutoff_days)
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=cutoff_days)
+    db_cutoff = _datetime_for_db(cutoff)
     q = db.query(OTPVerification).filter(
-        OTPVerification.expires_at < dt.datetime.now(dt.timezone.utc)
+        OTPVerification.expires_at < db_cutoff
     )
     records = q.all()
     ids = [r.id for r in records]
@@ -190,5 +192,5 @@ def purge_expired_otl_tokens(db: Session, cutoff_days: int, dry_run: bool = Fals
     if ids:
         db.query(OTPVerification).filter(OTPVerification.id.in_(ids)).delete(synchronize_session="fetch")
         db.commit()
-    logger.info(f"Deleted {len(ids)} expired OTP tokens")
+    logger.info(f"Deleted {len(ids)} expired OTP tokens (cutoff={cutoff_days} days)")
     return ids, len(ids)
