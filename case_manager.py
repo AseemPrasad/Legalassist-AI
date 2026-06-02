@@ -732,9 +732,8 @@ def mark_deadline_completed(user_id: int, deadline_id: int) -> bool:
             return False
 
         deadline.is_completed = True
-        db.commit()
 
-        # Create timeline event
+        # Create timeline event before commit to keep transaction atomic
         create_timeline_event(
             db=db,
             case_id=deadline.case_id,
@@ -743,6 +742,7 @@ def mark_deadline_completed(user_id: int, deadline_id: int) -> bool:
             metadata={"deadline_id": deadline_id},
         )
 
+        db.commit()
         logger.info(f"Marked deadline {deadline_id} as completed")
         return True
 
