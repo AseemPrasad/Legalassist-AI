@@ -99,6 +99,25 @@ for case in results['results']:
     print(f"  Score: {case['relevance_score']}")
 ```
 
+### Real-time Progress Tracking (WebSocket)
+
+```python
+import websockets
+import json
+import asyncio
+
+async def track_progress(job_id, token):
+    url = f"ws://localhost:8000/ws/progress/{job_id}"
+    
+    # Pass token securely via Sec-WebSocket-Protocol
+    async with websockets.connect(url, subprotocols=["access_token", token]) as ws:
+        async for message in ws:
+            data = json.loads(message)
+            print(f"Progress: {data.get('progress')}% - {data.get('status')}")
+            if data.get('status') == 'completed':
+                break
+```
+
 ### Report Generation
 
 ```python
