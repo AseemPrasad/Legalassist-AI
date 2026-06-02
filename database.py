@@ -24,6 +24,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import enum
 from contextlib import contextmanager
+from sqlalchemy.exc import IntegrityError
 from config import Config
 
 # Database setup
@@ -122,6 +123,9 @@ class UserPreference(Base):
 class NotificationLog(Base):
     """Model for tracking sent notifications"""
     __tablename__ = "notification_logs"
+    __table_args__ = (
+        UniqueConstraint("deadline_id", "days_before", "channel", name="uq_notification_log"),
+    )
 
     id = Column(Integer, primary_key=True)
     deadline_id = Column(Integer, ForeignKey("case_deadlines.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -927,7 +931,7 @@ def log_notification(
     error_message: Optional[str] = None,
     message_preview: Optional[str] = None,
 ) -> NotificationLog:
-    """Log a notification attempt"""
+    """Atomically log a notification attempt. Returns existing log if duplicate."""
     log = NotificationLog(
         deadline_id=deadline_id,
         user_id=user_id,
@@ -941,9 +945,17 @@ def log_notification(
         sent_at=dt.datetime.now(dt.timezone.utc) if status != NotificationStatus.PENDING else None,
     )
     db.add(log)
-    db.commit()
-    db.refresh(log)
-    return log
+    try:
+        db.commit()
+        return log
+    except IntegrityError:
+        db.rollback()
+        existing = db.query(NotificationLog).filter(
+            NotificationLog.deadline_id == deadline_id,
+            NotificationLog.days_before == days_before,
+            NotificationLog.channel == channel,
+        ).first()
+        return existing
 
 
 def get_notification_history(db: Session, user_id: int, limit: int = 50) -> List[NotificationLog]:
