@@ -193,12 +193,12 @@ def check_and_send_reminders():
     init_db()
 
     db = SessionLocal()
+    sent_count = 0
     try:
         # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
         upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
         logger.info(f"Found {len(upcoming_deadlines)} upcoming deadlines")
 
-        sent_count = 0
         for deadline in upcoming_deadlines:
             days_left = deadline.days_until_deadline()
             
@@ -259,6 +259,8 @@ def check_and_send_reminders():
         logger.error(f"Error in reminder job: {str(e)}", exc_info=True)
     finally:
         db.close()
+
+    return sent_count
 
 
 def setup_scheduler(scheduler_class):
