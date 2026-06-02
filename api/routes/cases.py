@@ -19,6 +19,7 @@ from sqlalchemy import func
 from database import (
     CaseRecord,
     CaseOutcome,
+    Case,
     get_db,
     submit_similarity_feedback,
 )
@@ -332,17 +333,35 @@ async def get_case_details(
     case_id: str,
     current_user: CurrentUser = Depends(get_current_user)
 ) -> dict:
-    """Get complete case details"""
-    
-    return {
-        "case_id": case_id,
-        "case_number": "2023-CV-00001",
-        "title": "Example Case",
-        "parties": [],
-        "jurisdiction": "US",
-        "status": "closed",
-        "summary": "Case summary here"
-    }
+    """Get complete case details from database"""
+    try:
+        case_id_int = int(case_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid case ID")
+
+    db = get_db()
+    try:
+        case = db.query(Case).filter(Case.id == case_id_int).first()
+        if not case:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+        if case.user_id != int(current_user.user_id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+        latest_doc = None
+        if case.documents:
+            latest_doc = sorted(case.documents, key=lambda d: d.uploaded_at, reverse=True)[0]
+
+        return {
+            "case_id": str(case.id),
+            "case_number": case.case_number,
+            "title": case.title or case.case_number,
+            "parties": [],
+            "jurisdiction": case.jurisdiction,
+            "status": case.status.value if hasattr(case.status, 'value') else str(case.status),
+            "summary": latest_doc.summary if latest_doc else "",
+        }
+    finally:
+        db.close()
 
 
 @router.get(
@@ -355,10 +374,38 @@ async def list_cases(
     current_user: CurrentUser = Depends(get_current_user)
 ) -> dict:
     """Get list of cases for current user"""
-    
-    return {
-        "total": 0,
-        "limit": limit,
-        "offset": offset,
-        "cases": []
-    }
+    try:
+        user_id_int = int(current_user.user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid user ID")
+
+    db = get_db()
+    try:
+        total = db.query(Case).filter(Case.user_id == user_id_int).count()
+        cases = (
+            db.query(Case)
+            .filter(Case.user_id == user_id_int)
+            .order_by(Case.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+        cases_list = []
+        for c in cases:
+            latest_doc = None
+            if c.documents:
+                latest_doc = sorted(c.documents, key=lambda d: d.uploaded_at, reverse=True)[0]
+            cases_list.append({
+                "case_id": str(c.id),
+                "case_number": c.case_number,
+                "title": c.title or c.case_number,
+                "parties": [],
+                "jurisdiction": c.jurisdiction,
+                "status": c.status.value if hasattr(c.status, 'value') else str(c.status),
+                "summary": latest_doc.summary if latest_doc else "",
+            })
+
+        return {"total": total, "limit": limit, "offset": offset, "cases": cases_list}
+    finally:
+        db.close()
