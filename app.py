@@ -48,6 +48,7 @@ from analytics_engine import AnalyticsAggregator
 from database import init_db, SessionLocal, db_session, CaseRecord
 from db.models import DocumentType
 from config import Config
+from database import init_db
 Config.validate_runtime_security()
 init_db()
 
@@ -595,7 +596,7 @@ def main():
     st.markdown(ui["app_intro"])
     st.markdown("---")
 
-    language = st.selectbox("🌐 Select your language", ["English", "Hindi", "Bengali", "Urdu"])
+    language = st.selectbox("🌐 Select your language", ["English", "Hindi", "Bengali", "Urdu"], key="judgment_language")
     uploaded_file = st.file_uploader("📄 Upload Judgment PDF / Image", type=["pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp"])
     enable_ocr = False
     ocr_languages = "eng+hin"
@@ -637,17 +638,18 @@ def main():
             st.warning("⚠️ This file is quite large. Processing may take longer than usual.")
             
         # Check page count
-        try:
-            pdf_reader = PdfReader(uploaded_file)
-            num_pages = len(pdf_reader.pages)
-            if num_pages > 100:
-                st.warning(f"⚠️ This document has {num_pages} pages. Summaries of very long judgments may be less precise.")
-            if num_pages > 1000:
-                st.error("🛑 Extremely large PDF (1000+ pages) detected. Character limits will be exceeded, leading to a very poor summary. Please upload a shorter excerpt.")
+        if file_ext == "pdf":
+            try:
+                pdf_reader = PdfReader(uploaded_file)
+                num_pages = len(pdf_reader.pages)
+                if num_pages > 100:
+                    st.warning(f"⚠️ This document has {num_pages} pages. Summaries of very long judgments may be less precise.")
+                if num_pages > 1000:
+                    st.error("🛑 Extremely large PDF (1000+ pages) detected. Character limits will be exceeded, leading to a very poor summary. Please upload a shorter excerpt.")
+                    is_valid_pdf = False
+            except Exception as e:
+                st.error("Could not read PDF metadata. The file might be corrupted.")
                 is_valid_pdf = False
-        except Exception as e:
-            st.error("Could not read PDF metadata. The file might be corrupted.")
-            is_valid_pdf = False
 
     st.markdown("---")
 
@@ -663,7 +665,7 @@ def main():
         st.session_state.last_language = language
 
     current_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest() if uploaded_file else None
-    is_same_file = st.session_state.get("processed_file") == uploaded_file.name and st.session_state.get("processed_file_hash") == current_hash
+    is_same_file = (uploaded_file is not None) and (st.session_state.get("processed_file") == uploaded_file.name) and (st.session_state.get("processed_file_hash") == current_hash)
     if uploaded_file and is_same_file and st.session_state.get("last_language") == language:
         if not client:
             st.error(ui["openrouter_not_configured"])

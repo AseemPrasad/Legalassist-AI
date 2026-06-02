@@ -119,15 +119,6 @@ async def generate_report(
     db.commit()
     db.refresh(db_report)
     
-    # Step 3: Update Report record with actual celery_task_id
-    update_report_status(db, report_id, status="pending")
-    db_report = db.query(db_report.__class__).filter(
-        db_report.__class__.report_id == report_id
-    ).first()
-    db_report.celery_task_id = task.id
-    db.commit()
-    db.refresh(db_report)
-    
     logger.info("Task enqueued", report_id=report_id, task_id=task.id)
     
     return ReportGenerationResponse(

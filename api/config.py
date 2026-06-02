@@ -179,6 +179,28 @@ class Config:
         except Exception:
             return str(_get_val("SENDGRID_API_KEY", "") or "")
 
+    # --- Rate Limiting ---
+    RATE_LIMIT_ENABLED = _get_bool_env("RATE_LIMIT_ENABLED", False)
+    REDIS_URL = _get_val("REDIS_URL", "")
+    RATE_LIMIT_REQUESTS = _get_int_env("RATE_LIMIT_REQUESTS", 100)
+    RATE_LIMIT_WINDOW = _get_int_env("RATE_LIMIT_WINDOW", 60)
+    RATE_LIMIT_BURST = _get_int_env("RATE_LIMIT_BURST", 10)
+    RATE_LIMIT_ABUSE_THRESHOLD = _get_int_env("RATE_LIMIT_ABUSE_THRESHOLD", 3)
+    RATE_LIMIT_ABUSE_WINDOW = _get_int_env("RATE_LIMIT_ABUSE_WINDOW", 60)
+    RATE_LIMIT_ABUSE_BLOCK_SECONDS = _get_int_env("RATE_LIMIT_ABUSE_BLOCK_SECONDS", 300)
+    AUTH_RATE_LIMIT_REQUESTS = _get_int_env("AUTH_RATE_LIMIT_REQUESTS", 5)
+    AUTH_RATE_LIMIT_WINDOW = _get_int_env("AUTH_RATE_LIMIT_WINDOW", 60)
+    API_KEY_HEADER = _get_val("API_KEY_HEADER", "X-API-Key")
+
+    # --- CORS / API Server ---
+    CORS_ORIGINS = _get_val("CORS_ORIGINS", "http://localhost:8080")
+    API_TITLE = _get_val("API_TITLE", "LegalAssist API")
+    API_VERSION = _get_val("API_VERSION", "1.0.0")
+    API_HOST = _get_val("API_HOST", "0.0.0.0")
+    API_PORT = _get_int_env("API_PORT", 8000)
+    API_WORKERS = _get_int_env("API_WORKERS", 1)
+    ENABLE_WEBSOCKET = _get_bool_env("ENABLE_WEBSOCKET", False)
+
     # --- Application URLs ---
     BASE_URL = _get_val("BASE_URL", "https://legalassist.ai")
 

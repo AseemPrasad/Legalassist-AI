@@ -140,8 +140,10 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=exc.status_code,
             content={
+                "success": False,
                 "error_code": "VALIDATION_ERROR",
-                "message": exc.detail
+                "message": exc.detail,
+                "status_code": exc.status_code,
             }
         )
     
@@ -156,9 +158,10 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             content={
+                "success": False,
                 "error_code": "PAYLOAD_TOO_LARGE",
                 "message": exc.detail,
-                "status_code": 413
+                "status_code": 413,
             },
             headers={"Retry-After": "60"}
         )
@@ -174,8 +177,10 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=500,
             content={
+                "success": False,
                 "error_code": "INTERNAL_SERVER_ERROR",
-                "message": "An internal error occurred"
+                "message": "An internal error occurred",
+                "status_code": 500,
             }
         )
     
@@ -304,76 +309,41 @@ def create_app() -> FastAPI:
                 if not user_id:
                     await websocket.close(code=4003, reason="Invalid token")
                     return
-            except InvalidTokenError:
-                await websocket.close(code=4001, reason="Invalid or expired token")
-                return
 
-if get_settings().ENABLE_WEBSOCKET:
-    from fastapi import WebSocket
-    from api.jwt_auth import verify_token, InvalidTokenError
-    from api.job_registry import get_job_owner
-    
-    @app.websocket("/ws/progress/{job_id}")
-    async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
-        """
-        WebSocket endpoint for real-time job progress
-        
-        Usage:
-        ws = new WebSocket('ws://localhost:8000/ws/progress/job_id')
-        ws.onmessage = (event) => console.log(event.data)
-        """
-        # Extract token from subprotocol or query parameter
-        auth_token = None
-        if "sec-websocket-protocol" in websocket.headers:
-            protocols = [p.strip() for p in websocket.headers["sec-websocket-protocol"].split(",")]
-            if "access_token" in protocols:
-                idx = protocols.index("access_token")
-                if idx + 1 < len(protocols):
-                    auth_token = protocols[idx + 1]
-        if not auth_token:
-            auth_token = websocket.query_params.get("token")
-        if not auth_token:
-            await websocket.close(code=4001, reason="Authentication required")
-            return
+                await websocket.accept()
 
-        # Verify token
-        try:
-            payload = verify_token(auth_token)
-            user_id = payload.get("sub")
-            if not user_id:
-                await websocket.close(code=4003, reason="Invalid token")
-                return
+                try:
+                    from celery_app import TaskStatus
 
-            await websocket.accept()
+                    while True:
+                        import asyncio
 
-            try:
-                from celery_app import TaskStatus
+                        status_info = TaskStatus.get_task_status(job_id)
 
-                while True:
-                    import asyncio
-
-                    status_info = TaskStatus.get_task_status(job_id)
-
-                    await websocket.send_json({
-                        "job_id": job_id,
-                        "status": status_info["status"],
-                        "progress": status_info["info"].get("progress", 0),
-                        "timestamp": status_info["timestamp"]
-                    })
-
-                    await asyncio.sleep(2)
-
-                    if status_info["status"] in ["completed", "failed", "cancelled"]:
                         await websocket.send_json({
                             "job_id": job_id,
                             "status": status_info["status"],
-                            "message": "Job completed"
+                            "progress": status_info["info"].get("progress", 0),
+                            "timestamp": status_info["timestamp"]
                         })
-                        break
 
-            except Exception as e:
-                logger.error("WebSocket error", job_id=job_id, error=str(e))
-                await websocket.close(code=1011)
+                        await asyncio.sleep(2)
+
+                        if status_info["status"] in ["completed", "failed", "cancelled"]:
+                            await websocket.send_json({
+                                "job_id": job_id,
+                                "status": status_info["status"],
+                                "message": "Job completed"
+                            })
+                            break
+
+                except Exception as e:
+                    logger.error("WebSocket error", job_id=job_id, error=str(e))
+                    await websocket.close(code=1011)
+
+            except InvalidTokenError:
+                await websocket.close(code=4001, reason="Invalid or expired token")
+                return
 
     return app
 

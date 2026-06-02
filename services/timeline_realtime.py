@@ -43,6 +43,7 @@ class _SlidingWindowRateLimiter:
     def __init__(self) -> None:
         self._redis: Optional[Any] = _new_redis_client()
         self._local: Dict[int, list] = {}
+        self._lock = threading.Lock()
 
     def allow(self, case_id: int) -> bool:
         now = time.time()
@@ -65,13 +66,14 @@ class _SlidingWindowRateLimiter:
             except Exception:
                 pass
 
-        entries = self._local.setdefault(case_id, [])
-        cutoff = now - _TIMELINE_RATE_LIMIT_WINDOW
-        self._local[case_id] = [t for t in entries if t > cutoff]
-        if len(self._local[case_id]) >= _TIMELINE_RATE_LIMIT_MAX:
-            return False
-        self._local[case_id].append(now)
-        return True
+        with self._lock:
+            entries = self._local.setdefault(case_id, [])
+            cutoff = now - _TIMELINE_RATE_LIMIT_WINDOW
+            self._local[case_id] = [t for t in entries if t > cutoff]
+            if len(self._local[case_id]) >= _TIMELINE_RATE_LIMIT_MAX:
+                return False
+            self._local[case_id].append(now)
+            return True
 
 
 @dataclass(frozen=True)
