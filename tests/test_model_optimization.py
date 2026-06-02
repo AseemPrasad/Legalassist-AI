@@ -26,7 +26,7 @@ def test_db():
 def client(test_db, monkeypatch):
     app = FastAPI()
     app.include_router(models_route.router)
-    app.dependency_overrides[get_current_user] = lambda: CurrentUser("u1", "u1@example.com", "user")
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(1, "u1@example.com", "user")
     monkeypatch.setattr(models_route, "get_db", lambda: test_db)
     yield TestClient(app)
     app.dependency_overrides.clear()
