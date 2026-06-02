@@ -2,10 +2,23 @@
 REST API Integration module for Flask/Streamlit applications
 """
 from functools import wraps
-from celery_app import celery_app
+import uuid
+try:
+    from celery_app import celery_app
+except ImportError:
+    celery_app = None
 import structlog
 
+try:
+    from flask import Blueprint
+    _FLASK_AVAILABLE = True
+except ImportError:
+    _FLASK_AVAILABLE = False
+    Blueprint = None
+
 logger = structlog.get_logger(__name__)
+
+_integration_done = False
 
 
 class StreamlitAPIAdapter:
@@ -14,11 +27,18 @@ class StreamlitAPIAdapter:
     @staticmethod
     def queue_document_analysis(text: str, document_type: str = "unknown"):
         """Queue document analysis and return job ID"""
-        from celery_app import analyze_document_task
+        try:
+            from celery_app import analyze_document_task
+        except ImportError:
+            logger.warning("Celery unavailable — cannot queue document analysis")
+            return None
+        except Exception:
+            logger.exception("Unexpected error importing analyze_document_task")
+            return None
         
         task = analyze_document_task.delay(
             user_id="streamlit-user",
-            document_id="doc_" + __import__('uuid').uuid4().hex[:8],
+            document_id="doc_" + uuid.uuid4().hex[:8],
             text=text,
             document_type=document_type
         )
@@ -28,14 +48,28 @@ class StreamlitAPIAdapter:
     @staticmethod
     def get_task_progress(task_id: str):
         """Get task progress for WebSocket streaming"""
-        from celery_app import TaskStatus
+        try:
+            from celery_app import TaskStatus
+        except ImportError:
+            logger.warning("Celery unavailable — cannot get task progress")
+            return {"status": "unknown", "info": None}
+        except Exception:
+            logger.exception("Unexpected error importing TaskStatus")
+            return {"status": "unknown", "info": None}
         
         return TaskStatus.get_task_status(task_id)
     
     @staticmethod
     def get_task_result(task_id: str):
         """Get task result"""
-        from celery_app import TaskStatus
+        try:
+            from celery_app import TaskStatus
+        except ImportError:
+            logger.warning("Celery unavailable — cannot get task result")
+            return None
+        except Exception:
+            logger.exception("Unexpected error importing TaskStatus")
+            return None
         
         status = TaskStatus.get_task_status(task_id)
         if status["status"] == "completed":
@@ -49,13 +83,22 @@ class FlaskAPIAdapter:
     @staticmethod
     def create_flask_blueprint():
         """Create Flask blueprint for API"""
-        from flask import Blueprint
+        if not _FLASK_AVAILABLE:
+            raise ImportError(
+                "Flask is not installed. Install it with: pip install flask"
+            )
         
         bp = Blueprint("api", __name__, url_prefix="/api-bridge")
         
         @bp.route("/task/<task_id>/status")
         def get_task_status(task_id):
-            from celery_app import TaskStatus
+            try:
+                from celery_app import TaskStatus
+            except ImportError:
+                return {"status": "unknown", "info": None, "error": "Celery unavailable"}
+            except Exception:
+                logger.exception("Unexpected error importing TaskStatus")
+                return {"status": "unknown", "info": None, "error": "Internal error"}
             
             status = TaskStatus.get_task_status(task_id)
             return status
@@ -72,8 +115,20 @@ def integrate_api_with_core():
 
     Raises RuntimeError on import failure so broken wiring is surfaced
     immediately at startup rather than silently downgraded to a warning.
+    
+    Idempotent - safe to call multiple times.
     """
+    global _integration_done
+    
+    if _integration_done:
+        return
+    
     logger.info("Integrating REST API with core application")
+
+    if celery_app is None:
+        logger.warning("Celery not available — core task registration skipped")
+        _integration_done = True
+        return
 
     # Import the real core entry points.  Raise immediately if they are
     # missing so broken wiring is visible at startup rather than silently
@@ -101,7 +156,11 @@ def integrate_api_with_core():
             "document_id": document_id,
             "summary_prompt": summary_prompt,
             "remedies": remedies,
+            "remedies_confidence_score": remedies.get("confidence_score", 0.0),
+            "remedies_evidence_spans": remedies.get("evidence_spans", []),
         }
+    
+    _integration_done = True
 
 
 if __name__ == "__main__":
