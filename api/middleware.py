@@ -2,7 +2,8 @@
 API Rate Limiting and Middleware
 """
 import time
-from typing import Callable
+import threading
+from typing import Callable, Optional
 from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
 import redis
@@ -22,11 +23,11 @@ logger = structlog.get_logger(__name__)
 
 
 class RateLimiter:
-    """Token bucket rate limiter using Redis"""
+    """Token bucket rate limiter using Redis (thread-safe singleton client)"""
 
-    # Lua script: atomically increment the counter and set TTL on first write.
-    # Redis executes Lua scripts as a single atomic operation, so there is no
-    # window between INCR and EXPIRE where the key can be left without a TTL.
+    _instance = None
+    _lock = threading.Lock()
+
     _INCR_EXPIRE_SCRIPT = """
 local current = redis.call('INCR', KEYS[1])
 if current == 1 then
@@ -35,10 +36,22 @@ end
 return current
 """
 
+    def __new__(cls, redis_url: str = "redis://localhost:6379/0"):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    inst = super().__new__(cls)
+                    inst._initialized = False
+                    cls._instance = inst
+        return cls._instance
+
     def __init__(self, redis_url: str = "redis://localhost:6379/0"):
+        if self._initialized:
+            return
+        self._initialized = True
         self.redis = redis.from_url(redis_url, decode_responses=True)
-        self.requests = 100  # requests
-        self.window = 60  # seconds
+        self.requests = 100
+        self.window = 60
         self._script = self.redis.register_script(self._INCR_EXPIRE_SCRIPT)
 
     def is_allowed(self, key: str) -> bool:
