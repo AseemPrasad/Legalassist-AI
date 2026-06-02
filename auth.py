@@ -21,6 +21,7 @@ from sendgrid.helpers.mail import Mail
 
 from database import (
     SessionLocal,
+    db_session,
     get_user_by_email,
     create_user,
     create_otp_verification,
@@ -237,6 +238,10 @@ def request_otp(email: str) -> Tuple[bool, str]:
             # consistent UI behavior and avoid leaking bypass status.
             return True, "OTP sent to your email"
 
+        # In-memory rate limit check (auto-cleans expired entries)
+        if not _check_otp_rate_limit(email):
+            return False, "Too many OTP requests. Please try again in an hour."
+
         rate_limit_start = now - timedelta(hours=OTP_RATE_LIMIT_HOURS)
 
         recent_otps = db.query(OTPVerification).filter(
@@ -254,6 +259,7 @@ def request_otp(email: str) -> Tuple[bool, str]:
 
         # Store OTP
         create_otp_verification(db, email, otp_hash, expires_at)
+        _record_otp_request(email)
 
         # Send OTP email
         email_sent = send_otp_email(email, otp)
@@ -271,6 +277,7 @@ def request_otp(email: str) -> Tuple[bool, str]:
 
     except Exception as e:
         logger.error(f"Error requesting OTP for {email}: {str(e)}")
+        db.rollback()
         return False, f"Error: {str(e)}"
     finally:
         db.close()
@@ -347,6 +354,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
 
     except Exception as e:
         logger.error(f"Error verifying OTP for {email}: {str(e)}")
+        db.rollback()
         return False, f"Error: {str(e)}", None
     finally:
         db.close()
@@ -656,6 +664,9 @@ def revoke_jwt_token(token: str) -> bool:
                 
             return True
             
+        except Exception:
+            db.rollback()
+            raise
         finally:
             db.close()
             
