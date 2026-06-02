@@ -149,9 +149,27 @@ def distributed_lock(lock_key: str, ttl_seconds: int = 300, lock_id: Optional[st
         yield acquired
     finally:
         if acquired:
-            current_holder = redis_client.get(lock_key)
-            if current_holder == lock_id:
-                redis_client.delete(lock_key)
+            # Atomic compare-and-delete via Lua script.
+            # A plain GET + DELETE is a race: if the TTL expires between the two
+            # calls another instance can acquire the lock, and our subsequent
+            # DELETE would then remove *their* key, breaking mutual exclusion.
+            # Lua executes atomically on the Redis server — no other command
+            # can interleave between the ownership check and the deletion.
+            _UNLOCK_SCRIPT = (
+                "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                "    return redis.call('del', KEYS[1]) "
+                "else "
+                "    return 0 "
+                "end"
+            )
+            try:
+                redis_client.eval(_UNLOCK_SCRIPT, 1, lock_key, lock_id)
+            except Exception as e:
+                logger.error(
+                    "scheduler_lock_release_failed",
+                    lock_key=lock_key,
+                    error=sanitize_log_text(str(e)),
+                )
 
 
 # Reminder time logic moved to notifications.reminder_engine.build_reminder_jobs
