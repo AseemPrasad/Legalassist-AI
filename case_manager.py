@@ -668,10 +668,21 @@ def get_case_full_timeline(user_id: int, case_id: int) -> List[Dict[str, Any]]:
 
         items: List[Dict[str, Any]] = []
 
+        def _ensure_utc(dt_val):
+            if dt_val is None:
+                return None
+            if dt_val.tzinfo is None:
+                return dt_val.replace(tzinfo=timezone.utc)
+            return dt_val.astimezone(timezone.utc)
+
+        def _fmt_ts(dt_val):
+            normalized = _ensure_utc(dt_val)
+            return normalized.isoformat() if normalized is not None else ""
+
         for t in timelines:
             item = {
                 "type": t.event_type,
-                "timestamp": t.event_date.isoformat(),
+                "timestamp": _fmt_ts(t.event_date),
                 "description": t.description,
                 "metadata": t.event_metadata or {},
                 "source": "timeline",
@@ -686,14 +697,14 @@ def get_case_full_timeline(user_id: int, case_id: int) -> List[Dict[str, Any]]:
         for d in documents:
             items.append({
                 "type": "document_uploaded",
-                "timestamp": d.uploaded_at.isoformat(),
+                "timestamp": _fmt_ts(d.uploaded_at),
                 "description": f"{d.document_type.value} uploaded",
                 "metadata": {"document_id": d.id},
                 "source": "document",
             })
 
         for d in deadlines:
-            ts = d.created_at.isoformat() if d.created_at else (d.deadline_date.isoformat() if d.deadline_date else "")
+            ts = _fmt_ts(d.created_at) or _fmt_ts(d.deadline_date)
             items.append({
                 "type": "deadline_created",
                 "timestamp": ts,
@@ -705,14 +716,14 @@ def get_case_full_timeline(user_id: int, case_id: int) -> List[Dict[str, Any]]:
         for n in notifications:
             items.append({
                 "type": "reminder",
-                "timestamp": n.created_at.isoformat() if n.created_at else "",
+                "timestamp": _fmt_ts(n.created_at),
                 "description": f"Reminder ({n.channel.value}) to {n.recipient} - {n.status.value}",
                 "metadata": {"notification_id": n.id, "deadline_id": n.deadline_id, "days_before": n.days_before},
                 "message_preview": n.message_preview,
                 "source": "notification",
             })
 
-        # Sort descending by timestamp
+        # Sort descending by normalized timestamp
         items_sorted = sorted(items, key=lambda x: x.get("timestamp") or "", reverse=True)
         return items_sorted
     finally:
