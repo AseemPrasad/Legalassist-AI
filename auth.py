@@ -10,7 +10,7 @@ import time
 import re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
 import logging
 from config import Config
 
@@ -63,6 +63,41 @@ OTP_RATE_LIMIT_MAX = 3  # Max OTP requests per email per hour
 # OTP Verification Security - Failed Attempt Lockout
 OTP_MAX_FAILED_ATTEMPTS = int(os.getenv("OTP_MAX_FAILED_ATTEMPTS", "5"))  # Max failed verification attempts
 OTP_LOCKOUT_MINUTES = int(os.getenv("OTP_LOCKOUT_MINUTES", "15"))  # Lockout duration after max attempts
+
+# In-memory OTP rate limit registry: email -> list of request timestamps
+# Entries are automatically removed when their timestamp list becomes empty,
+# preventing unbounded memory growth over time.
+_otp_request_registry: Dict[str, List[float]] = {}
+
+
+def _check_otp_rate_limit(email: str) -> bool:
+    """Check and record OTP request. Removes expired entries and cleans up empty keys."""
+    now = time.time()
+    cutoff = now - (OTP_RATE_LIMIT_HOURS * 3600)
+
+    timestamps = _otp_request_registry.get(email)
+    if timestamps is None:
+        _otp_request_registry[email] = []
+        return True
+
+    # Remove expired timestamps
+    active = [ts for ts in timestamps if ts > cutoff]
+    if active:
+        _otp_request_registry[email] = active
+        return len(active) < OTP_RATE_LIMIT_MAX
+    else:
+        # All timestamps expired — remove empty entry and allow request
+        del _otp_request_registry[email]
+        return True
+
+
+def _record_otp_request(email: str) -> None:
+    """Record a new OTP request timestamp for the given email."""
+    timestamps = _otp_request_registry.get(email)
+    if timestamps is None:
+        _otp_request_registry[email] = [time.time()]
+    else:
+        timestamps.append(time.time())
 
 
 def _hash_otp(otp: str) -> str:
@@ -237,6 +272,10 @@ def request_otp(email: str) -> Tuple[bool, str]:
             # consistent UI behavior and avoid leaking bypass status.
             return True, "OTP sent to your email"
 
+        # In-memory rate limit check (auto-cleans expired entries)
+        if not _check_otp_rate_limit(email):
+            return False, "Too many OTP requests. Please try again in an hour."
+
         rate_limit_start = now - timedelta(hours=OTP_RATE_LIMIT_HOURS)
 
         recent_otps = db.query(OTPVerification).filter(
@@ -254,6 +293,7 @@ def request_otp(email: str) -> Tuple[bool, str]:
 
         # Store OTP
         create_otp_verification(db, email, otp_hash, expires_at)
+        _record_otp_request(email)
 
         # Send OTP email
         email_sent = send_otp_email(email, otp)
