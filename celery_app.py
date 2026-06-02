@@ -114,7 +114,7 @@ celery_app.conf.update(
     
     # Worker Performance Tuning
     # Prefetch multiplier controls how many tasks each worker reserved
-    worker_prefetch_multiplier=4,
+    worker_prefetch_multiplier=1,
     
     # Max tasks per child prevents memory leaks in long-lived worker processes
     worker_max_tasks_per_child=1000,
