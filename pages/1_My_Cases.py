@@ -8,8 +8,10 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from auth import require_auth, redirect_to_login, get_current_user_id, get_current_user_email
+import routes
 from case_manager import get_user_cases_summary, get_or_create_case_for_document
 from database import CaseStatus, DocumentType
+from pages.ui_components import render_header, section
 
 # Page config
 st.set_page_config(
@@ -141,7 +143,7 @@ def render_case_card(case: dict):
             # Action buttons
             if st.button("📄 View", key=f"view_{case_id}", use_container_width=True):
                 st.session_state.selected_case_id = case_id
-                st.switch_page("pages/2_Case_Details.py")
+                st.switch_page(routes.PAGE_CASE_DETAILS)
 
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -166,7 +168,7 @@ def render_empty_state():
         pass
     with col2:
         if st.button("📤 Upload Judgment", use_container_width=True):
-            st.switch_page("pages/0_Home.py")
+            st.switch_page(routes.PAGE_HOME)
     with col3:
         pass
 
@@ -194,16 +196,15 @@ def render_create_case_modal():
                 st.error("Please fill in all required fields (*)")
             else:
                 user_id = get_current_user_id()
-                # Normalize input to avoid near-duplicate cases
-                normalized_case_number = (case_number or "").strip().casefold()
-                normalized_case_type = (case_type or "").strip().casefold()
-                normalized_jurisdiction = (jurisdiction or "").strip().casefold()
+                canonical_case_number = (case_number or "").strip()
+                canonical_case_type = (case_type or "").strip()
+                canonical_jurisdiction = (jurisdiction or "").strip()
 
                 case = get_or_create_case_for_document(
                     user_id=user_id,
-                    new_case_number=normalized_case_number,
-                    new_case_type=normalized_case_type,
-                    new_jurisdiction=normalized_jurisdiction,
+                    new_case_number=canonical_case_number,
+                    new_case_type=canonical_case_type,
+                    new_jurisdiction=canonical_jurisdiction,
                     new_title=(case_title or "").strip(),
                 )
 
@@ -228,37 +229,34 @@ def main():
     user_email = get_current_user_email()
 
     # Header
-    st.title("📁 My Cases")
-    st.markdown(f"*Welcome back, {user_email}*")
-
-    st.markdown("---")
+    render_header("📁 My Cases", f"Welcome back, {user_email}")
 
     # Stats bar
     cases = get_user_cases_summary(user_id, include_closed=True)
 
     if cases:
         render_stats_bar(cases)
-        st.markdown("---")
 
     # Filters
-    col1, col2, col3 = st.columns(3)
+    with section("Filter Cases"):
+        col1, col2, col3 = st.columns(3)
 
-    with col1:
-        status_filter = st.selectbox(
-            "Filter by Status",
-            ["All", "Active", "Appealed", "Closed", "Pending"],
-            key="status_filter",
-        )
+        with col1:
+            status_filter = st.selectbox(
+                "Filter by Status",
+                ["All", "Active", "Appealed", "Closed", "Pending"],
+                key="status_filter",
+            )
 
-    with col2:
-        type_filter = st.selectbox(
-            "Filter by Type",
-            ["All"] + sorted(set(c["case_type"].title() for c in cases)),
-            key="type_filter",
-        )
+        with col2:
+            type_filter = st.selectbox(
+                "Filter by Type",
+                ["All"] + sorted(set(c["case_type"].title() for c in cases)),
+                key="type_filter",
+            )
 
-    with col3:
-        search_query = st.text_input("🔍 Search", placeholder="Case number or title...", key="search")
+        with col3:
+            search_query = st.text_input("🔍 Search", placeholder="Case number or title...", key="search")
 
     # Apply filters
     filtered_cases = cases
@@ -292,7 +290,7 @@ def main():
     st.markdown("---")
 
     # Create new case section
-    with st.expander("📁 Create New Case Manually"):
+    with section("📁 Create New Case Manually"):
         render_create_case_modal()
 
     # Handle export has been moved to export_dialog directly invoked by the case card
