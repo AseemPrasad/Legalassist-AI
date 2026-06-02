@@ -1540,6 +1540,15 @@ def create_attachment(
     deadline_id: Optional[int] = None,
 ) -> "Attachment":
     """Create a new attachment record linked to a case or deadline"""
+    if case_id is not None:
+        case = db.query(Case).filter(Case.id == case_id).first()
+        if not case or case.user_id != user_id:
+            raise PermissionError("case_id not found or not owned by the provided user_id")
+    if deadline_id is not None:
+        deadline = db.query(CaseDeadline).filter(CaseDeadline.id == deadline_id).first()
+        if not deadline or deadline.user_id != user_id:
+            raise PermissionError("deadline_id not found or not owned by the provided user_id")
+
     att = Attachment(
         user_id=user_id,
         case_id=case_id,
