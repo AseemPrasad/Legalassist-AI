@@ -751,6 +751,29 @@ class CaseTimeline(Base):
         return f"<CaseTimeline(case_id={self.case_id}, event_type={self.event_type})>"
 
 
+class CasePresence(Base):
+    """Tracks which users are currently viewing or editing a case"""
+    __tablename__ = "case_presence"
+    __table_args__ = (
+        UniqueConstraint("case_id", "user_id", name="uq_case_user_presence"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(50), default="online", nullable=False)  # online, away, offline
+    last_seen_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    case = relationship("Case", backref="presence_entries")
+    user = relationship("User", backref="presence_entries")
+
+    def __repr__(self):
+        return f"<CasePresence(case_id={self.case_id}, user_id={self.user_id}, status={self.status})>"
+
+
 # Database initialization
 def init_db():
     """Create all tables"""
