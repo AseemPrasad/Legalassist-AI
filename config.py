@@ -100,67 +100,228 @@ class Config:
     
     # --- Database Settings ---
     DATABASE_URL = _get_val("DATABASE_URL", "sqlite:///./legalassist.db")
+
+    # --- Backend API Settings ---
+    API_BASE_URL = _get_val("API_BASE_URL", "")
+    API_REQUEST_TIMEOUT_SECONDS = float(_get_val("API_REQUEST_TIMEOUT_SECONDS", "5.0"))
     
     # --- Authentication (JWT & OTP) ---
     JWT_ALGORITHM = "HS256"
     JWT_EXPIRY_HOURS = _get_int_env("JWT_EXPIRY_HOURS", 7 * 24)
     OTP_EXPIRY_MINUTES = _get_int_env("OTP_EXPIRY_MINUTES", 10)
     OTP_MAX_ATTEMPTS = _get_int_env("OTP_MAX_ATTEMPTS", 3)
+    JWT_ISSUER = _get_val("JWT_ISSUER", "legalassist.ai")
+    JWT_AUDIENCE = _get_val("JWT_AUDIENCE", "legalassist-users")
     
     @classmethod
     def get_jwt_secret(cls):
         """
         Resolve JWT secret securely.
         
-        Order of precedence:
-        1. Environment variable or Streamlit secret 'JWT_SECRET'
-        2. File-based secret in '.jwt_secret' (legacy/local development)
+        JWT_SECRET must be provided via environment variable or Streamlit secrets.
+        File-based secrets are no longer supported for security.
         
-        NOTE: Automatic generation and writing of .jwt_secret has been disabled 
-        for security in all environments.
+        Raises:
+            RuntimeError: If JWT_SECRET is not configured in environment variables.
         """
+        # Try environment / streamlit secrets first
         secret = str(_get_val("JWT_SECRET", "")).strip()
         if secret:
             return secret
-            
-        secret_file = PROJECT_ROOT / ".jwt_secret"
-        if secret_file.exists():
-            try:
-                file_secret = secret_file.read_text(encoding="utf-8").strip()
-                if file_secret:
-                    return file_secret
-            except Exception as e:
-                logger.warning(f"Failed to read .jwt_secret file: {e}")
-        
-        # We no longer auto-generate secrets to prevent insecure fallback.
-        # This forces explicit configuration which is a security best practice.
+
+        # Try central secret manager (Vault or env fallback)
+        try:
+            from utils.secret_manager import get_secret
+            vault_secret = get_secret("jwt_secret")
+            if vault_secret:
+                return str(vault_secret).strip()
+        except Exception:
+            pass
+
         env_name = cls.APP_ENV.upper()
         raise RuntimeError(
             f"JWT_SECRET is not configured for the {env_name} environment. "
             "For security, secrets must be explicitly provided via the 'JWT_SECRET' "
-            "environment variable or a manually created '.jwt_secret' file in the root."
+            "environment variable or a configured Vault."
         )
 
     # --- Notification Settings (SMS) ---
     TWILIO_ACCOUNT_SID = _get_val("TWILIO_ACCOUNT_SID", "")
     TWILIO_FROM_NUMBER = _get_val("TWILIO_FROM_NUMBER", "")
+    TWILIO_AUTH_TOKEN = None
 
     @classmethod
     def get_twilio_auth_token(cls) -> str:
         """Return the Twilio auth token, retrieved on demand to limit exposure."""
-        return str(_get_val("TWILIO_AUTH_TOKEN", "") or "")
+        if cls.TWILIO_AUTH_TOKEN is not None:
+            return cls.TWILIO_AUTH_TOKEN
+        # Prefer centralized secret manager
+        try:
+            from utils.secret_manager import get_secret
+            val = get_secret("twilio_auth_token") or _get_val("TWILIO_AUTH_TOKEN", "")
+            return str(val or "")
+        except Exception:
+            return str(_get_val("TWILIO_AUTH_TOKEN", "") or "")
 
     # --- Notification Settings (Email) ---
     SENDGRID_FROM_EMAIL = _get_val("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
+    SENDGRID_API_KEY = None
 
     @classmethod
     def get_sendgrid_api_key(cls) -> str:
         """Return the SendGrid API key, retrieved on demand to limit exposure."""
-        return str(_get_val("SENDGRID_API_KEY", "") or "")
+        if cls.SENDGRID_API_KEY is not None:
+            return cls.SENDGRID_API_KEY
+        try:
+            from utils.secret_manager import get_secret
+            val = get_secret("sendgrid_api_key") or _get_val("SENDGRID_API_KEY", "")
+            return str(val or "")
+        except Exception:
+            return str(_get_val("SENDGRID_API_KEY", "") or "")
 
     # --- Application URLs ---
     BASE_URL = _get_val("BASE_URL", "https://legalassist.ai")
 
     @classmethod
     def is_development(cls):
-        return cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
+        env_dev = cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
+        if not env_dev:
+            return False
+        # Secondary safety check: flag if BASE_URL looks like production
+        base = str(cls.BASE_URL or "").lower()
+        if not any(local in base for local in ("localhost", "127.0.0.1", "0.0.0.0", "::1")):
+            import logging
+            logging.getLogger(__name__).warning(
+                "is_development()=True but BASE_URL=%s suggests a non-local deployment. "
+                "Review APP_ENV / DEBUG / TESTING settings.",
+                base,
+            )
+        return env_dev
+
+    @classmethod
+    def is_production(cls):
+        return cls.APP_ENV in ("production", "prod", "live")
+
+
+import re
+import copy
+
+class ConfigSanitizer:
+    """
+    Utility class to sanitize configuration dictionaries before logging to prevent
+    accidental leakage of sensitive credentials like API keys and JWT secrets.
+    """
+    
+    # Patterns for keys that likely contain sensitive data
+    SENSITIVE_KEY_PATTERNS = [
+        re.compile(r"secret", re.IGNORECASE),
+        re.compile(r"key", re.IGNORECASE),
+        re.compile(r"token", re.IGNORECASE),
+        re.compile(r"password", re.IGNORECASE),
+        re.compile(r"pwd", re.IGNORECASE),
+        re.compile(r"auth", re.IGNORECASE),
+        re.compile(r"credential", re.IGNORECASE),
+        re.compile(r"jwt", re.IGNORECASE),
+        re.compile(r"sid", re.IGNORECASE),
+        re.compile(r"api_?key", re.IGNORECASE),
+        re.compile(r"access", re.IGNORECASE),
+        re.compile(r"url", re.IGNORECASE),
+    ]
+
+    # Keys that we explicitly want to mask
+    EXPLICIT_SENSITIVE_KEYS = {
+        "DATABASE_URL",
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+        "JWT_SECRET",
+        "JWT_SECRET_PREVIOUS",
+        "JWT_SECRET_KEY",
+        "TWILIO_ACCOUNT_SID",
+        "TWILIO_AUTH_TOKEN",
+        "SENDGRID_API_KEY",
+    }
+    
+    @classmethod
+    def is_sensitive(cls, key: str) -> bool:
+        """
+        Determine if a configuration key represents sensitive information.
+        """
+        if key.upper() in cls.EXPLICIT_SENSITIVE_KEYS:
+            return True
+            
+        for pattern in cls.SENSITIVE_KEY_PATTERNS:
+            if pattern.search(key):
+                return True
+                
+        return False
+        
+    @classmethod
+    def mask_string(cls, value: str) -> str:
+        """
+        Mask a string value.
+        - Strings <= 4 chars: completely masked with asterisks
+        - Strings 5-8 chars: show 1st char, mask rest, show last char
+        - Strings > 8 chars: show 1st 2 chars, mask rest, show last 2 chars
+        """
+        if not value:
+            return value
+            
+        length = len(value)
+        if length <= 4:
+            return "*" * length
+        elif length <= 8:
+            return f"{value[0]}{'*' * (length - 2)}{value[-1]}"
+        else:
+            return f"{value[:2]}{'*' * (length - 4)}{value[-2:]}"
+
+    @classmethod
+    def sanitize_value(cls, value: any) -> any:
+        """Sanitize an individual value."""
+        if value is None:
+            return value
+        elif isinstance(value, bool):
+            return value
+        elif isinstance(value, (int, float)):
+            return "***"
+        else:
+            return cls.mask_string(str(value))
+
+    @classmethod
+    def sanitize_dict(cls, config_dict: dict) -> dict:
+        """
+        Recursively sanitize a dictionary, masking sensitive values.
+        Returns a new dictionary; does not mutate the original.
+        """
+        sanitized = {}
+        for k, v in config_dict.items():
+            if isinstance(v, dict):
+                sanitized[k] = cls.sanitize_dict(v)
+            elif cls.is_sensitive(str(k)):
+                sanitized[k] = cls.sanitize_value(v)
+            else:
+                sanitized[k] = v
+        return sanitized
+
+
+def get_config_dict(cls_obj) -> dict:
+    """Extract configuration variables from a class object."""
+    cfg = {}
+    for key in dir(cls_obj):
+        if key.startswith("_"):
+            continue
+        val = getattr(cls_obj, key)
+        if callable(val) or isinstance(val, (classmethod, staticmethod, property)):
+            continue
+        cfg[key] = val
+    return cfg
+
+# Print config to stdout/logger if debug mode is enabled, using the sanitizer
+if Config.DEBUG:
+    try:
+        raw_config = get_config_dict(Config)
+        safe_config = ConfigSanitizer.sanitize_dict(raw_config)
+        logger.debug(f"Active Configuration (Sanitized): {safe_config}")
+        print(f"DEBUG: LegalAssist AI Config Loaded: {safe_config}")
+    except Exception as e:
+        logger.error(f"Failed to dump sanitized configuration: {e}")
+
