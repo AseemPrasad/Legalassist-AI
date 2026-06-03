@@ -733,7 +733,18 @@ def process_case_document_upload_task(
     session = SessionLocal()
     try:
         case = get_case_by_id(session, int(case_id))
-        if not case or str(case.user_id) != str(user_id):
+
+        # Ownership check: compare as integers to prevent string-based bypass.
+        # The task receives user_id as a string from the Celery JSON queue.
+        # Using str(case.user_id) != str(user_id) allows values like "007" or
+        # " 7" to bypass the check for user 7, or equal a different integer
+        # through locale-specific string coercion.
+        try:
+            task_user_id_int = int(user_id)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid user_id value: {user_id!r}")
+
+        if not case or case.user_id != task_user_id_int:
             raise ValueError("Case not found or not owned by the provided user")
 
         doc = get_case_document_by_id(session, int(document_id))
