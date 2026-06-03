@@ -8,6 +8,8 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any
 
+import routes
+
 from auth import require_auth, redirect_to_login, get_current_user_id, get_current_user_email
 from case_manager import get_user_cases_summary, mark_deadline_completed, mark_deadline_incomplete
 from database import SessionLocal, CaseDeadline, Case
@@ -31,10 +33,14 @@ def get_all_user_deadlines(user_id: int) -> List[Dict[str, Any]]:
             CaseDeadline.user_id == user_id
         ).order_by(CaseDeadline.deadline_date).all()
 
+        # Single batch query for all related cases (eliminates N+1)
+        case_ids = {d.case_id for d in deadlines}
+        cases = db.query(Case).filter(Case.id.in_(case_ids)).all()
+        case_map = {c.id: c for c in cases}
+
         result = []
         for d in deadlines:
-            # Get case info
-            case = db.query(Case).filter(Case.id == d.case_id).first()
+            case = case_map.get(d.case_id)
 
             result.append({
                 "id": d.id,
@@ -311,6 +317,26 @@ def render_upcoming_section(deadlines: List[Dict]):
             st.markdown("---")
 
 
+def _escape_ics(text: str) -> str:
+    """Escape \, \; \, and newlines for RFC 5545 compliance."""
+    return text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def _fold_ics_line(line: str, maxlen: int = 75) -> str:
+    """Fold long ICS lines per RFC 5545 (max 75 octets, continuation with leading space)."""
+    if len(line.encode("utf-8")) <= maxlen:
+        return line
+    folded = []
+    while len(line.encode("utf-8")) > maxlen:
+        cut = maxlen
+        while cut > 0 and line[cut - 1:cut].encode("utf-8").startswith(b"\x80"):
+            cut -= 1
+        folded.append(line[:cut])
+        line = " " + line[cut:]
+    folded.append(line)
+    return "\r\n ".join(folded)
+
+
 def main():
     """Main deadline tracker logic"""
     # Require authentication
@@ -335,7 +361,7 @@ def main():
     if not deadlines:
         st.info("📭 No deadlines yet. Deadlines are created when you upload documents with remedies advice.")
         if st.button("📤 Upload a Judgment"):
-            st.switch_page("pages/0_Home.py")
+            st.switch_page(routes.PAGE_HOME)
         return
 
     # Render summary cards
@@ -395,13 +421,17 @@ def main():
 
             for d in pending:
                 deadline_dt = d["deadline_date"]
+                summary = _escape_ics(f"[LegalAssist] {d['deadline_type'].title()} - {d['case_title']}")
+                description = _escape_ics(d.get("description", ""))
                 ics_lines.extend([
-                    "BEGIN:VEVENT",
-                    f"UID:deadline-{d['id']}@legalassist.ai",
-                    f"DTSTAMP:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
-                    f"DTSTART;VALUE=DATE:{deadline_dt.strftime('%Y%m%d')}",
-                    f"SUMMARY:[LegalAssist] {d['deadline_type'].title()} - {d['case_title']}",
-                    f"DESCRIPTION:{d.get('description', '')}",
+                    _fold_ics_line("BEGIN:VEVENT"),
+                    _fold_ics_line(f"UID:deadline-{d['id']}@legalassist.ai"),
+                    _fold_ics_line(f"DTSTAMP:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"),
+                    _fold_ics_line(f"DTSTART:{deadline_dt.strftime('%Y%m%d')}T090000"),
+                    _fold_ics_line("DURATION:PT1H"),
+                    _fold_ics_line(f"SUMMARY:{summary}"),
+                    _fold_ics_line(f"DESCRIPTION:{description}"),
+                    "SEQUENCE:0",
                     "STATUS:CONFIRMED",
                     "END:VEVENT",
                 ])
