@@ -8,6 +8,7 @@ import io
 import os
 from unittest.mock import MagicMock, patch
 from pypdf import PdfWriter
+from core.exceptions import PDFProcessingError
 from core.app_utils import (
     extract_text_from_pdf,
     compress_text,
@@ -90,6 +91,19 @@ class TestPDFExtraction:
         
         with pytest.raises(ValueError, match="No extractable text found"):
             extract_text_from_pdf(pdf_file)
+
+    @patch("core.app_utils._process_image_with_multimodal_processor")
+    def test_extract_image_uses_multimodal_ocr(self, mock_multimodal_ocr):
+        """Test that standalone image uploads are routed through multimodal OCR."""
+        mock_multimodal_ocr.return_value = "Scanned affidavit text"
+
+        image_file = io.BytesIO(b"fake-image-bytes")
+        image_file.name = "scan.png"
+
+        text = extract_text_from_pdf(image_file, enable_ocr=True)
+
+        assert text == "Scanned affidavit text"
+        mock_multimodal_ocr.assert_called_once()
 
 
 # ==================== TEXT COMPRESSION TESTS ====================
@@ -340,7 +354,11 @@ class TestRemediesParsing:
         
         # Should return empty dictionary values gracefully
         assert isinstance(remedies, dict)
-        assert all(isinstance(v, str) for k, v in remedies.items() if not k.startswith("_"))
+        assert all(
+            isinstance(v, str)
+            for k, v in remedies.items()
+            if k not in {"confidence_score", "evidence_spans"} and not k.startswith("_")
+        )
 
 
 # ==================== APPEAL INFO EXTRACTION TESTS ====================
