@@ -92,9 +92,9 @@ async def search_cases(
 
         # Restrict time window if requested
         if request.year_from is not None:
-            query = query.filter(CaseRecord.created_at >= datetime(request.year_from, 1, 1))
+            query = query.filter(CaseRecord.created_at >= datetime(request.year_from, 1, 1, tzinfo=timezone.utc))
         if request.year_to is not None:
-            query = query.filter(CaseRecord.created_at <= datetime(request.year_to, 12, 31, 23, 59, 59))
+            query = query.filter(CaseRecord.created_at <= datetime(request.year_to, 12, 31, 23, 59, 59, tzinfo=timezone.utc))
 
         # Keep result set small for <2s performance
         candidates = query.order_by(CaseRecord.created_at.desc()).limit(candidate_limit).all()
