@@ -198,6 +198,45 @@ def enqueue_task_from_http_request(
 
 
 # ============================================================================
+# RESULT REDACTION FOR PII PROTECTION
+# ============================================================================
+
+
+def _redact_task_result(result: Any) -> Any:
+    """Redact sensitive fields from task results before storing in Redis.
+
+    Task results may contain:
+    - LLM output (summary_text, key_points, remedies_list from legal docs)
+    - Extracted text from uploaded PDFs
+    - Party names, addresses, case details
+
+    This function removes or truncates these fields to reduce the PII
+    exposure window during the result_expires TTL.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    redacted = result.copy()
+
+    # Strip full text output — keep only summary info
+    sensitive_keys = {
+        "summary_text",
+        "key_points",
+        "remedies_list",
+        "extracted_text",
+        "raw_content",
+        "document_content",
+        "analysis_output",
+        "summary",
+    }
+    for key in sensitive_keys:
+        if key in redacted:
+            redacted[key] = "[REDACTED]"  # placeholder
+
+    return redacted
+
+
+# ============================================================================
 # CUSTOM TASK BASE CLASS
 # ============================================================================
 
@@ -332,6 +371,13 @@ celery_app.conf.update(
     # Prevent tasks from running indefinitely and blocking worker resources
     task_time_limit=settings.CELERY_TASK_TIMEOUT,
     task_soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+    # Result Backend TTL (PII Protection)
+    # Task results may contain sensitive data (LLM output, extracted text,
+    # remedies, PII from legal documents). Without an expiry, results persist
+    # indefinitely in Redis, accessible to anyone with DB read access.
+    # Set to 86400 seconds (1 day) — long enough for clients to poll results,
+    # short enough to bound the PII retention window.
+    result_expires=86400,
     # Worker Performance Tuning
     # Prefetch multiplier controls how many tasks each worker reserved
     worker_prefetch_multiplier=4,
