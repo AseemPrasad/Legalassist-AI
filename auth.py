@@ -1138,6 +1138,9 @@ def require_auth() -> bool:
             # and trigger a fresh render cycle. The application will restart from the top.
             st.rerun()
 
+    # Explicit unauthenticated result: user has no session or token.
+    # Always return False here — never fall through implicitly.
+    # Callers must check this return value and redirect accordingly.
     return False
 
 
