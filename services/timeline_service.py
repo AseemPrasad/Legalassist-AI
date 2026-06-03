@@ -9,7 +9,7 @@ from core.time_serialization import to_utc_iso
 from core.timeline_payloads import TimelineEventPayload
 from sqlalchemy.orm import Session
 
-from db.models import CaseDocument, CaseDeadline, CaseTimeline, NotificationLog
+from db.models import CaseDocument, CaseDeadline, CaseTimeline, NotificationLog, NotificationStatus
 from services.timeline_realtime import publish_timeline_event_best_effort
 
 
@@ -77,6 +77,13 @@ class TimelineService:
             deadline_ids = [d.id for d in deadlines]
             notifications = db.query(NotificationLog).filter(NotificationLog.deadline_id.in_(deadline_ids)).all()
 
+        notification_log_ids_in_timeline = set()
+        for t in timelines:
+            metadata = t.event_metadata if isinstance(t.event_metadata, dict) else {}
+            notification_log_id = metadata.get("notification_log_id")
+            if notification_log_id is not None:
+                notification_log_ids_in_timeline.add(notification_log_id)
+
         items: List[Dict[str, Any]] = []
 
         for t in timelines:
@@ -113,16 +120,56 @@ class TimelineService:
             })
 
         for n in notifications:
+            if n.id in notification_log_ids_in_timeline:
+                continue
+            notification_event_type = f"notification_{n.status.value}"
             items.append({
-                "type": "reminder",
+                "type": notification_event_type,
                 "timestamp": to_utc_iso(n.created_at) if n.created_at else "",
-                "description": f"Reminder ({n.channel.value}) to {n.recipient} - {n.status.value}",
-                "metadata": {"notification_id": n.id, "deadline_id": n.deadline_id, "days_before": n.days_before},
+                "description": f"Notification {n.status.value} via {n.channel.value}",
+                "metadata": {"notification_log_id": n.id, "deadline_id": n.deadline_id, "days_before": n.days_before, "channel": n.channel.value, "status": n.status.value, "message_id": n.message_id},
                 "message_preview": n.message_preview,
                 "source": "notification",
             })
 
         return sorted(items, key=lambda x: x.get("timestamp") or "", reverse=True)
+
+    def record_notification_event(
+        self,
+        db: Session,
+        notification_log: NotificationLog,
+        status: NotificationStatus,
+        provider: str,
+        event_date: Optional[dt.datetime] = None,
+        metadata: Optional[dict] = None,
+    ) -> Optional[CaseTimeline]:
+        case_id = getattr(getattr(notification_log, "deadline", None), "case_id", None)
+        if case_id is None:
+            return None
+
+        event_metadata = {
+            "notification_log_id": notification_log.id,
+            "deadline_id": notification_log.deadline_id,
+            "user_id": notification_log.user_id,
+            "channel": notification_log.channel.value if hasattr(notification_log.channel, "value") else str(notification_log.channel),
+            "status": status.value if hasattr(status, "value") else str(status),
+            "message_id": notification_log.message_id,
+            "days_before": notification_log.days_before,
+            "provider": provider,
+            "recipient": notification_log.recipient,
+        }
+        if metadata:
+            event_metadata.update(metadata)
+
+        description = f"Notification {event_metadata['status']} via {provider} ({event_metadata['channel']})"
+        return self.create_event(
+            db=db,
+            case_id=case_id,
+            event_type=f"notification_{event_metadata['status']}",
+            description=description,
+            metadata=event_metadata,
+            event_date=event_date or dt.datetime.now(dt.timezone.utc),
+        )
 
 
 timeline_service = TimelineService()

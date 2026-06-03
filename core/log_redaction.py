@@ -12,22 +12,13 @@ OTP_PATTERN = re.compile(r"(?i)\b(?:otp|one[-\s]?time password)\b[^0-9]{0,24}([0
 
 SENSITIVE_KEYS = {
     "authorization",
-    "body",
-    "content",
     "email",
-    "html",
-    "html_content",
-    "message",
-    "message_body",
     "otp",
     "password",
-    "payload",
     "phone",
     "phone_number",
     "recipient",
     "secret",
-    "summary",
-    "text",
     "token",
 }
 
@@ -78,6 +69,11 @@ def mask_recipient(recipient: Optional[str]) -> str:
     return "[redacted-recipient]"
 
 
+def storage_safe_recipient(recipient: Optional[str]) -> str:
+    """Return a storage-safe recipient value for persisted records."""
+    return mask_recipient(recipient)
+
+
 def _replace_sensitive_text(value: str) -> str:
     value = EMAIL_PATTERN.sub("[redacted-email]", value)
     value = PHONE_PATTERN.sub("[redacted-phone]", value)
@@ -108,7 +104,7 @@ def sanitize_log_value(value: Any, key: Optional[str] = None) -> Any:
     if isinstance(value, (list, tuple, set)):
         return [sanitize_log_value(item, key_name) for item in value]
     if isinstance(value, str):
-        if "@" in value:
+        if EMAIL_PATTERN.search(value):
             value = mask_email(value)
         return sanitize_log_text(value)[:240]
     if hasattr(value, "isoformat"):

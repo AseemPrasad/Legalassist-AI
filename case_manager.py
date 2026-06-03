@@ -56,6 +56,8 @@ from database import (
     get_attachments_for_case,
     save_case_note_draft,
 )
+from core.deadline_engine import get_deadline_first_action
+from db.case_service import get_case_note, publish_case_note, get_case_note_history
 from services.timeline_service import timeline_service as _timeline_service
 from services.deadlines_auto_creator import (
     _extract_days_from_text as _extract_days_from_text_service,
@@ -529,13 +531,16 @@ def upload_case_attachment(
             logger.error(f"Case {case_id} not found or not owned by user {user_id}")
             return None
 
+        # Sanitize filename to prevent directory traversal
+        safe_filename = os.path.basename(filename)
+
         # Save file to storage
-        stored_path, size = save_attachment(file_bytes, filename)
+        stored_path, size = save_attachment(file_bytes, safe_filename)
 
         att = create_attachment(
             db=db,
             user_id=user_id,
-            original_filename=filename,
+            original_filename=safe_filename,
             stored_path=stored_path,
             content_type=content_type,
             size_bytes=size,
@@ -586,12 +591,15 @@ def upload_case_document_file(
             logger.error(f"Case {case_id} not found or not owned by user {user_id}")
             return None
 
-        stored_path, size = save_attachment(file_bytes, filename)
+        # Sanitize filename to prevent directory traversal
+        safe_filename = os.path.basename(filename)
+
+        stored_path, size = save_attachment(file_bytes, safe_filename)
 
         att = create_attachment(
             db=db,
             user_id=user_id,
-            original_filename=filename,
+            original_filename=safe_filename,
             stored_path=stored_path,
             content_type=content_type,
             size_bytes=size,
@@ -673,12 +681,17 @@ def _auto_create_deadlines_from_remedies(
     return _auto_create_deadlines_from_remedies_service(db, user_id, case_id, case_title, remedies, document_id)
 
 
-def get_document_content(document_id: int) -> Optional[str]:
-    """Get full document content by ID"""
+def get_document_content(document_id: int, user_id: int) -> Optional[str]:
+    """Get full document content by ID, verifying user ownership."""
     db = SessionLocal()
     try:
         doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
-        return doc.document_content if doc else None
+        if doc is None:
+            return None
+        if doc.case.user_id != user_id:
+            logger.warning("idor_document_access_denied", document_id=document_id, user_id=user_id, owner_id=doc.case.user_id)
+            return None
+        return doc.document_content
     finally:
         db.close()
 
@@ -843,6 +856,7 @@ def add_manual_deadline(
     deadline_date: datetime,
     deadline_type: str,
     description: Optional[str] = None,
+    court_name: Optional[str] = None,
 ) -> Optional[CaseDeadline]:
     """Add a manual deadline to a case"""
     if deadline_date.tzinfo is None:
@@ -859,8 +873,10 @@ def add_manual_deadline(
             user_id=user_id,
             case_id=case_id,
             case_title=case_title,
+            court_name=court_name,
             deadline_date=deadline_date,
             deadline_type=deadline_type,
+            first_action=get_deadline_first_action(deadline_type),
             description=description,
         )
         db.add(deadline)
@@ -922,6 +938,17 @@ def _update_case_status(user_id: int, case_id: int, status: CaseStatus) -> bool:
             case_id=case_id,
             event_type="status_changed",
             description=f"Case status changed to {status.value}",
+            metadata={"new_status": status.value},
+        )
+
+        record_immutable_audit_event(
+            event_type="case.status_changed",
+            action="status_change",
+            actor_user_id=user_id,
+            resource_type="case",
+            resource_id=str(case_id),
+            outcome="success",
+            case_id=case_id,
             metadata={"new_status": status.value},
         )
 
@@ -1112,3 +1139,18 @@ def delete_user_cases(user_id: int, case_ids: List[int], confirm: bool = False) 
 # =============================================================================
 # END OF SERVICE
 # =============================================================================
+
+
+def validate_case_transition(current_status: str, target_status: str) -> bool:
+    """
+    Validates if a transition from current case status to target case status 
+    is permitted under standard case lifecycle rules.
+    """
+    allowed_transitions = {
+        "pending": ["active", "dismissed"],
+        "active": ["settled", "dismissed", "appealed"],
+        "appealed": ["active", "dismissed"],
+        "settled": [],
+        "dismissed": []
+    }
+    return target_status in allowed_transitions.get(current_status, [])

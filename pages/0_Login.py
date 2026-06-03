@@ -58,7 +58,7 @@ def render_login_card():
         )
 
         if Config.is_development():
-            st.caption("💡 Hint: Use **test@example.com** for a quick dummy account login")
+            st.caption("💡 Development mode — auto-fill available for local testing")
 
         if st.button("📧 Send OTP", use_container_width=True):
             if not email:
@@ -100,8 +100,8 @@ def render_otp_verification():
             help="Enter the 6-digit code from your email",
         )
 
-        if email.lower() == "test@example.com" and Config.is_development():
-            st.caption("💡 Hint: Dummy OTP is **123456**")
+        if Config.is_development():
+            st.caption("💡 Development mode — enter any valid 6-digit code from the backend logs")
 
         col1, col2 = st.columns(2)
 
