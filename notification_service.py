@@ -73,7 +73,10 @@ class SMSClient:
         self.auth_token = Config.get_twilio_auth_token()
         self.from_number = Config.TWILIO_FROM_NUMBER
 
-        if not all([self.account_sid, self.auth_token, self.from_number]):
+        if TwilioClient is None:
+            logger.warning("Twilio library not installed. SMS will be mocked.")
+            self.client = None
+        elif not all([self.account_sid, self.auth_token, self.from_number]):
             logger.warning("Twilio credentials not configured. SMS will be mocked.")
             self.client = None
         else:
@@ -119,7 +122,10 @@ class EmailClient:
         self.api_key = Config.get_sendgrid_api_key()
         self.from_email = Config.SENDGRID_FROM_EMAIL
 
-        if not self.api_key:
+        if SendGridAPIClient is None:
+            logger.warning("SendGrid library not installed. Emails will be mocked.")
+            self.client = None
+        elif not self.api_key:
             logger.warning("SendGrid API key not configured. Emails will be mocked.")
             self.client = None
         else:
