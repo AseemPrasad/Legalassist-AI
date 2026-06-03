@@ -11,17 +11,12 @@ from contextlib import contextmanager
 
 from openai import OpenAI
 from pypdf import PdfReader
-from langdetect import DetectorFactory, detect_langs
-import pdfplumber
+from langdetect import detect, DetectorFactory, detect_langs
 from typing import Any, Dict, List, Optional, Tuple
 import html as html_lib
-from database import DocumentProcessingState
 from contextlib import contextmanager
-from langdetect import detect, DetectorFactory, detect_langs
-from database import DocumentProcessingState
 
 from config import Config
-from database import DocumentProcessingState # Fixed import
 from .exceptions import PDFProcessingError, OCRDependencyError, OCRProcessingError
 
 try:

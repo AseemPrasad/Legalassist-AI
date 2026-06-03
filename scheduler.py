@@ -350,13 +350,18 @@ def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], boo
             logger.info("scheduler_upcoming_deadlines_found", count=len(upcoming_deadlines))
 
             # Prefetch user preferences for eligible deadlines to avoid N+1 queries
+            prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
+            prefs_by_user = {pref.user_id: pref for pref in prefs}
+            candidates = plan_eligible_reminders(
+                upcoming_deadlines,
+                prefs_by_user,
+                reminder_time_checker=reminder_time_checker or is_reminder_time_for_user,
+            )
 
-            prefs_by_user = {}
-            if user_ids:
-                prefs = db.query(UserPreference).filter(UserPreference.user_id.in_(list(user_ids))).all()
-                prefs_by_user = {p.user_id: p for p in prefs}
-
-
+            for candidate in candidates:
+                deadline = candidate.deadline
+                days_left = candidate.days_left
+                user_preference = candidate.user_preference
 
                 logger.info("scheduler_processing_deadline", case_id=deadline.case_id, days_left=days_left)
 
@@ -810,7 +815,10 @@ def check_reminders_sync(
         upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
         prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
         prefs_by_user = {pref.user_id: pref for pref in prefs}
-
+        candidates = plan_eligible_reminders(
+            upcoming_deadlines,
+            prefs_by_user,
+            reminder_time_checker=reminder_time_checker or (lambda tz: True),
         )
         
         sent_count = 0

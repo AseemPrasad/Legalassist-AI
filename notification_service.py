@@ -1039,6 +1039,14 @@ class NotificationService:
         )
 
         if not created:
+            logger.debug("Email notification already reserved; skipping", deadline_id=deadline.id, days_before=days_left)
+            return NotificationResult(
+                success=False,
+                channel=NotificationChannel.EMAIL,
+                recipient=user_preference.email,
+                message_id=reserved_log.message_id,
+                error="Notification already reserved/sent",
+            )
 
         # Annotate the reserved record with a placeholder task id BEFORE dispatching,
         # so the worker never races against an uncommitted DB state.
