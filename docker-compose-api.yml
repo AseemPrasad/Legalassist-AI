@@ -18,14 +18,18 @@ services:
     environment:
       - ENVIRONMENT=production
       - LOG_LEVEL=INFO
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-CHANGE-ME}@postgres:5432/legalassist
+      - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-CHANGE-ME-IN-PRODUCTION}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - JWT_SECRET_KEY_PREVIOUS=${JWT_SECRET_KEY_PREVIOUS}
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
       - API_KEY_ENABLED=true
       - ENABLE_WEBSOCKET=true
       - CORS_ORIGINS=["http://localhost:3000", "http://localhost:8501", "http://localhost:8000"]
+      - APP_ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0
     depends_on:
       - postgres
       - redis
@@ -54,7 +58,7 @@ services:
     environment:
       - ENVIRONMENT=production
       - LOG_LEVEL=INFO
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-CHANGE-ME}@postgres:5432/legalassist
+      - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
@@ -80,7 +84,7 @@ services:
     environment:
       - ENVIRONMENT=production
       - LOG_LEVEL=INFO
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-CHANGE-ME}@postgres:5432/legalassist
+      - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
@@ -128,7 +132,7 @@ services:
       - "5432:5432"
     environment:
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-CHANGE-ME}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=legalassist
     volumes:
       - postgres_data:/var/lib/postgresql/data
