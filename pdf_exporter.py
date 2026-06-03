@@ -5,11 +5,13 @@ Generate professional, multilingual PDF case summaries for export and sharing.
 
 import os
 import logging
+import unicodedata
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
 from fpdf import FPDF
+from fpdf.errors import FPDFUnicodeEncodingException
 from database import SessionLocal, Case, CaseDocument, CaseDeadline, CaseTimeline
 from case_manager import get_case_detail
 
@@ -172,37 +174,68 @@ class LegalAssistPDF(FPDF):
             except:
                 pass
 
-    def _clean(self, txt):
+    @staticmethod
+    def _is_glyph_supported(char: str) -> bool:
         """
-        Clean text for PDF rendering. 
-        Removed latin-1 encoding to support Unicode characters.
+        Quick check whether a character is likely renderable by common fonts.
+
+        Rejects Unicode control characters and unassigned codepoints.
+        Allows all Unicode categories except Cc, Cf, Cn, Co, Cs, Zl, Zp.
+        """
+        try:
+            cat = unicodedata.category(char)
+            # Reject control/format/surrogate/private-use/unassigned
+            if cat in ("Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"):
+                return False
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    def _safe_text(self, txt: str) -> str:
+        """
+        Sanitize text for PDF rendering, removing unsupported characters.
+
+        Falls back gracefully when a character cannot be rendered by the
+        current font, preventing FPDFUnicodeEncodingException crashes.
         """
         if not isinstance(txt, str):
             return str(txt) if txt is not None else ""
-        
-        # Handle some common smart quotes/special chars that might still cause issues
-        # but DejaVu Sans handles most Unicode points natively.
+
+        # Replace problematic common Unicode punctuation with ASCII equivalents
         replacements = {
-            '\u201c': '"', '\u201d': '"', 
-            '\u2018': "'", '\u2019': "'", 
-            '…': '...'
+            "\u201c": '"', "\u201d": '"',
+            "\u2018": "'", "\u2019": "'",
+            "\u2013": "-", "\u2014": "--",
+            "\u2026": "...",
         }
         for k, v in replacements.items():
             txt = txt.replace(k, v)
-        
-        # CRITICAL FIX: Removed .encode('latin-1', 'replace').decode('latin-1')
-        # This allows Hindi, Bengali, Urdu and other Unicode characters to pass through.
-        return txt
+
+        # Strip characters that won't render in the current font
+        safe = []
+        for char in txt:
+            if self._is_glyph_supported(char):
+                safe.append(char)
+        return "".join(safe)
 
     def cell(self, w, h=0, txt="", *args, **kwargs):
-        """Override cell to ensure text cleaning"""
-        txt = self._clean(txt)
-        super().cell(w, h, txt, *args, **kwargs)
+        """Override cell, safely handling unsupported Unicode characters."""
+        txt = self._safe_text(txt)
+        try:
+            super().cell(w, h, txt, *args, **kwargs)
+        except FPDFUnicodeEncodingException:
+            # Retry with only ASCII-safe characters
+            safe = txt.encode("ascii", "replace").decode("ascii")
+            super().cell(w, h, safe, *args, **kwargs)
 
     def multi_cell(self, w, h, txt, *args, **kwargs):
-        """Override multi_cell to ensure text cleaning"""
-        txt = self._clean(txt)
-        super().multi_cell(w, h, txt, *args, **kwargs)
+        """Override multi_cell, safely handling unsupported Unicode characters."""
+        txt = self._safe_text(txt)
+        try:
+            super().multi_cell(w, h, txt, *args, **kwargs)
+        except FPDFUnicodeEncodingException:
+            safe = txt.encode("ascii", "replace").decode("ascii")
+            super().multi_cell(w, h, safe, *args, **kwargs)
 
     def header(self):
         """Add professional header to each page with branding and accent."""
