@@ -23,6 +23,8 @@ import uuid
 import structlog
 import json
 import re
+import time
+import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import io
@@ -267,6 +269,77 @@ def _broadcast_job_event(
             event=event,
             error=str(e),
         )
+
+
+def _persist_lock_event(
+    document_id: str,
+    task_id: str,
+    action: str,
+    lock_key: str,
+    ttl_ms: Optional[int] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Best-effort persistence of lock events to the database audit table."""
+    try:
+        from db.session import db_session
+        from db.models.locks import DocumentProcessingLock, LockAction
+
+        with db_session() as db:
+            record = DocumentProcessingLock(
+                document_id=document_id,
+                task_id=task_id,
+                worker_id=os.getenv("HOSTNAME", "unknown"),
+                action=LockAction(action),
+                lock_key=lock_key,
+                ttl_ms=ttl_ms,
+                error_message=error,
+            )
+            db.add(record)
+            db.commit()
+    except Exception as e:
+        logger.debug("lock_audit_persist_failed", document_id=document_id, error=str(e))
+
+
+def _acquire_document_lock(document_id: str, task_id: str) -> Optional[Any]:
+    """Acquire distributed lock for document processing; returns lock handle or None."""
+    try:
+        from core.distributed_lock import DistributedLock
+
+        lock = DistributedLock(document_id, ttl_ms=60000, retry_count=5, retry_delay_ms=500)
+        acquired = lock.acquire()
+        if acquired:
+            _persist_lock_event(document_id, task_id, "acquired", lock.lock_key, lock.ttl_ms)
+            return lock
+        _persist_lock_event(document_id, task_id, "failed", lock.lock_key, lock.ttl_ms, "Acquire failed after retries")
+        return None
+    except Exception as e:
+        logger.error("document_lock_acquire_error", document_id=document_id, task_id=task_id, error=str(e))
+        return None
+
+
+def _release_document_lock(lock: Optional[Any], document_id: str, task_id: str) -> None:
+    """Release distributed lock and persist audit event."""
+    if lock is None:
+        return
+    try:
+        lock.release()
+        _persist_lock_event(document_id, task_id, "released", lock.lock_key)
+    except Exception as e:
+        logger.warning("document_lock_release_error", document_id=document_id, task_id=task_id, error=str(e))
+
+
+def _extend_document_lock(lock: Optional[Any], document_id: str, task_id: str, additional_ms: int = 30000) -> bool:
+    """Extend lock TTL for long-running tasks."""
+    if lock is None:
+        return False
+    try:
+        extended = lock.extend(additional_ms)
+        if extended:
+            _persist_lock_event(document_id, task_id, "extended", lock.lock_key, lock.ttl_ms)
+        return extended
+    except Exception as e:
+        logger.warning("document_lock_extend_error", document_id=document_id, task_id=task_id, error=str(e))
+        return False
 
 
 def build_task_context_headers(
@@ -1212,6 +1285,16 @@ def analyze_document_task(
         )
         return existing or {"status": "duplicate", "task_id": self.request.id}
 
+    # Acquire distributed lock for strict serial processing per document
+    doc_lock = _acquire_document_lock(document_id, self.request.id)
+    if doc_lock is None:
+        logger.error(
+            "analyze_document_lock_failed",
+            task_id=self.request.id,
+            document_id=document_id,
+        )
+        raise RuntimeError(f"Could not acquire distributed lock for document {document_id}")
+
     start_time = datetime.utcnow()
 
     try:
@@ -1221,6 +1304,15 @@ def analyze_document_task(
             user_id=user_id,
             document_id=document_id,
         )
+
+        # Auto-extend lock every 30s for long chains
+        def _lock_heartbeat():
+            while True:
+                time.sleep(25)
+                _extend_document_lock(doc_lock, document_id, self.request.id, 30000)
+
+        heartbeat_thread = threading.Thread(target=_lock_heartbeat, daemon=True)
+        heartbeat_thread.start()
 
         # Build task chain
         task_chain = chain(
@@ -1313,6 +1405,7 @@ def analyze_document_task(
         
         raise
     finally:
+        _release_document_lock(doc_lock, document_id, self.request.id)
         clear_request_context()
 
 
@@ -1329,6 +1422,9 @@ def process_case_document_upload_task(
 ) -> Dict[str, Any]:
     """Run OCR and metadata extraction for a newly uploaded case document."""
     session = SessionLocal()
+    doc_lock = _acquire_document_lock(document_id, self.request.id)
+    if doc_lock is None:
+        raise RuntimeError(f"Could not acquire distributed lock for document {document_id}")
     try:
         case = get_case_by_id(session, int(case_id))
         if not case or str(case.user_id) != str(user_id):
@@ -1403,6 +1499,7 @@ def process_case_document_upload_task(
             "statutes": metadata.get("statutes", []),
         }
     finally:
+        _release_document_lock(doc_lock, document_id, self.request.id)
         session.close()
 
 
@@ -1449,6 +1546,11 @@ def generate_report_task(
                     db_report.completed_at = datetime.utcnow()
                     db.commit()
         return existing or {"status": "duplicate", "task_id": self.request.id}
+
+    # Acquire distributed lock keyed by report_id for report generation
+    doc_lock = _acquire_document_lock(f"report:{report_id}", self.request.id)
+    if doc_lock is None:
+        raise RuntimeError(f"Could not acquire distributed lock for report {report_id}")
 
     try:
         # Mark task as started in DB
@@ -1565,6 +1667,7 @@ def generate_report_task(
                 db.commit()
         raise
     finally:
+        _release_document_lock(doc_lock, f"report:{report_id}", self.request.id)
         try:
             idemp.release_lock(idempotency_key)
         except Exception:
