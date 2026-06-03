@@ -10,6 +10,10 @@ env/
 # Environment variables
 .env
 
+# Secret files — must never be committed
+.jwt_secret
+*.secret
+
 # Streamlit secrets
 .streamlit/secrets.toml
 
@@ -30,3 +34,6 @@ htmlcov/
 requirements.txt
 requirements.in
 /.venv
+.exports/
+
+.jwt_secret
