@@ -9,6 +9,8 @@ PHONE_PATTERN = re.compile(r"(?:(?:\+?\d[\d\s().-]{6,}\d))")
 JWT_PATTERN = re.compile(r"\b[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")
 BEARER_PATTERN = re.compile(r"(?i)\b(?:bearer|jwt|token|access[_ -]?token|refresh[_ -]?token)[:=\s]+([A-Za-z0-9._-]{16,})")
 OTP_PATTERN = re.compile(r"(?i)\b(?:otp|one[-\s]?time password)\b[^0-9]{0,24}([0-9]{4,8})")
+AADHAAR_PATTERN = re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b")
+PAN_PATTERN = re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b", re.IGNORECASE)
 
 SENSITIVE_KEYS = {
     "authorization",
@@ -20,6 +22,10 @@ SENSITIVE_KEYS = {
     "recipient",
     "secret",
     "token",
+    "aadhaar",
+    "pan",
+    "pan_card",
+    "aadhaar_card",
 }
 
 
@@ -80,6 +86,8 @@ def _replace_sensitive_text(value: str) -> str:
     value = JWT_PATTERN.sub("[redacted-token]", value)
     value = BEARER_PATTERN.sub(lambda match: f"{match.group(0).split()[0]} [redacted-token]", value)
     value = OTP_PATTERN.sub(lambda match: match.group(0).replace(match.group(1), "[redacted-otp]"), value)
+    value = AADHAAR_PATTERN.sub("[redacted-aadhaar]", value)
+    value = PAN_PATTERN.sub("[redacted-pan]", value)
     return value
 
 
