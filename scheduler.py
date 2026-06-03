@@ -326,6 +326,8 @@ def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], boo
 
     """
 
+    sent_count = 0
+
     lock_id = f"{_instance_id}:{os.getpid()}"
     with distributed_lock(LOCK_KEY, LOCK_TTL_SECONDS, lock_id) as has_lock:
         if not has_lock:

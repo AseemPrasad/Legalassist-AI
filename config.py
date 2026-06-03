@@ -87,6 +87,9 @@ class Config:
     OCR_ENABLED = _get_bool_env("OCR_ENABLED", False)
     OCR_LANGUAGES = _get_val("OCR_LANGUAGES", "eng+hin")
     OCR_DPI = _get_int_env("OCR_DPI", 300)
+    OCR_CONFIDENCE_THRESHOLD = float(_get_val("OCR_CONFIDENCE_THRESHOLD", "0.5"))
+    CLOUD_OCR_API_KEY = _get_val("CLOUD_OCR_API_KEY", "")
+    CLOUD_OCR_ENDPOINT = _get_val("CLOUD_OCR_ENDPOINT", "")
     
     # --- File Processing ---
     MAX_FILE_SIZE_MB = _get_int_env("MAX_FILE_SIZE_MB", 25)

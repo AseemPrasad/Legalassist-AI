@@ -212,6 +212,63 @@ def _trigger_state_machine_hook(
         )
 
 
+def _broadcast_job_event(
+    job_id: str,
+    event: str,
+    stage: str,
+    progress: int,
+    document_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
+) -> None:
+    """
+    Broadcast a real-time job progress event to WebSocket subscribers.
+    
+    Uses the asyncio job_realtime_bus; safe to call from sync Celery tasks
+    because we fire-and-forget via asyncio.run_coroutine_threadsafe.
+    """
+    try:
+        import asyncio
+        from services.job_realtime import job_realtime_bus
+
+        message = {
+            "event": event,
+            "job_id": job_id,
+            "stage": stage,
+            "progress": progress,
+            "document_id": document_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "payload": payload or {},
+        }
+        if error:
+            message["error"] = error
+
+        # Celery tasks run in separate threads; use the threadsafe approach
+        try:
+            loop = asyncio.get_running_loop()
+            asyncio.run_coroutine_threadsafe(
+                job_realtime_bus.publish(job_id, message),
+                loop
+            )
+        except RuntimeError:
+            # No running loop in this thread — safe to run directly
+            asyncio.run(job_realtime_bus.publish(job_id, message))
+
+        logger.debug(
+            "job_event_broadcasted",
+            job_id=job_id,
+            event=event,
+            stage=stage,
+        )
+    except Exception as e:
+        logger.warning(
+            "job_event_broadcast_failed",
+            job_id=job_id,
+            event=event,
+            error=str(e),
+        )
+
+
 def build_task_context_headers(
     request_id: Optional[str] = None,
     context_user_id: Optional[str] = None,
@@ -502,6 +559,191 @@ class TaskStatus:
 # SUB-TASK DEFINITIONS FOR DOCUMENT ANALYSIS PIPELINE (CHAIN-COMPATIBLE)
 # ============================================================================
 
+@celery_app.task(bind=True, name="analyze_document")
+def analyze_document_task(
+    self,
+    user_id: str,
+    document_id: str,
+    text: Optional[str] = None,
+    file_bytes: Optional[bytes] = None,
+    document_type: str = "unknown",
+    file_path: Optional[str] = None,
+    file_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Orchestrator task for document analysis using Celery chain with apply_async.
+    
+    Chain: extract_text -> summarize -> extract_remedies -> finalize
+    Halts on first error. Integrates PipelineStateManager for persistence.
+    Uses callbacks for async state updates instead of synchronous blocking.
+    """
+    
+    # Idempotency: prevent duplicate processing for same user/document
+    content_parts = []
+    if file_bytes:
+        content_parts.append(hashlib.sha256(file_bytes).hexdigest())
+    if text:
+        content_parts.append(hashlib.sha256(text.encode("utf-8")).hexdigest())
+    content_hash = hashlib.sha256("|".join(content_parts).encode()).hexdigest()[:16] if content_parts else ""
+
+    idemp = IdempotencyManager()
+    idempotency_key = f"analyze:{user_id}:{document_id}:{content_hash}"
+    if not idemp.acquire(idempotency_key, ttl=300):
+        existing = idemp.get_result(idempotency_key)
+        logger.info(
+            "analyze_document_duplicate_skipped",
+            key=idempotency_key,
+            task_id=self.request.id,
+        )
+        return existing or {"status": "duplicate", "task_id": self.request.id}
+
+    start_time = datetime.utcnow()
+
+    try:
+        logger.info(
+            "Starting document analysis (chain-orchestrated async)",
+            task_id=self.request.id,
+            user_id=user_id,
+            document_id=document_id,
+        )
+
+        # Persist initial state
+        _persist_pipeline_state(document_id, user_id, "analysis_started", {"task_id": self.request.id})
+
+        # Build task chain with callbacks for state transitions
+        task_chain = chain(
+            extract_document_text_task.s(
+                user_id=user_id,
+                document_id=document_id,
+                text=text,
+                file_bytes=file_bytes,
+                file_path=file_path,
+                file_url=file_url,
+            ),
+            summarize_document_task.s(),
+            extract_remedies_task.s(),
+            finalize_analysis_task.s(document_type=document_type),
+        )
+
+        # Execute chain asynchronously — returns AsyncResult immediately
+        # The chain result backend will store the final result
+        chain_result = task_chain.apply_async(
+            link=_on_chain_success.s(document_id, user_id, idempotency_key, start_time.isoformat()),
+            link_error=_on_chain_error.s(document_id, user_id, idempotency_key),
+        )
+
+        # Return immediately with chain task ID for polling
+        return {
+            "task_id": self.request.id,
+            "chain_task_id": chain_result.id,
+            "status": "pending",
+            "document_id": document_id,
+            "user_id": user_id,
+            "stage": "analysis_started",
+        }
+
+    except Exception as e:
+        logger.error(
+            "Document analysis chain failed to start",
+            task_id=self.request.id,
+            user_id=user_id,
+            document_id=document_id,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
+        
+        _persist_pipeline_state(document_id, user_id, "analysis_failed", {"error": str(e)})
+        _trigger_state_machine_hook(
+            event="analysis_failed",
+            document_id=document_id,
+            user_id=user_id,
+            error=str(e),
+        )
+        
+        raise
+    finally:
+        clear_request_context()
+
+
+def _persist_pipeline_state(document_id: str, user_id: str, stage: str, data: Optional[Dict] = None) -> None:
+    """Persist pipeline state via PipelineStateManager."""
+    try:
+        from core.app_utils import PipelineStateManager
+        from database import SessionLocal
+        db = SessionLocal()
+        try:
+            PipelineStateManager.update_stage(db, document_id, stage, data)
+            logger.info(
+                "pipeline_state_persisted",
+                document_id=document_id,
+                stage=stage,
+            )
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(
+            "pipeline_state_persist_failed",
+            document_id=document_id,
+            stage=stage,
+            error=str(e),
+        )
+
+
+@celery_app.task(bind=True, name="on_chain_success")
+def _on_chain_success(self, final_result: Dict[str, Any], document_id: str, user_id: str, idempotency_key: str, start_time_iso: str) -> Dict[str, Any]:
+    """Callback fired when the entire chain succeeds."""
+    start_time = datetime.fromisoformat(start_time_iso)
+    analysis_time = (datetime.utcnow() - start_time).total_seconds()
+    final_result["analysis_time_seconds"] = analysis_time
+
+    # Persist completion state
+    _persist_pipeline_state(document_id, user_id, "finalization_complete", final_result)
+
+    # Mark idempotency complete
+    try:
+        idemp = IdempotencyManager()
+        idemp.mark_completed(idempotency_key, final_result)
+    except Exception as e:
+        logger.warning("idempotency_mark_failed", key=idempotency_key, error=str(e))
+
+    # Trigger state machine hook
+    _trigger_state_machine_hook(
+        event="analysis_complete",
+        document_id=document_id,
+        user_id=user_id,
+        result=final_result,
+    )
+
+    logger.info(
+        "Document analysis chain completed (async)",
+        document_id=document_id,
+        analysis_time=analysis_time,
+    )
+
+    return final_result
+
+
+@celery_app.task(bind=True, name="on_chain_error")
+def _on_chain_error(self, exc_info: Any, document_id: str, user_id: str, idempotency_key: str) -> None:
+    """Errback fired when any stage in the chain fails."""
+    error_msg = str(exc_info) if not isinstance(exc_info, Exception) else str(exc_info)
+
+    # Persist failure state
+    _persist_pipeline_state(document_id, user_id, "analysis_failed", {"error": error_msg})
+
+    # Trigger state machine hook
+    _trigger_state_machine_hook(
+        event="analysis_failed",
+        document_id=document_id,
+        user_id=user_id,
+        error=error_msg,
+    )
+
+    logger.error(
+        "Document analysis chain failed (async)",
+        document_id=document_id,
+        error=error_msg,
+    )
 
 @celery_app.task(bind=True, name="extract_document_text")
 def extract_document_text_task(
@@ -544,11 +786,11 @@ def extract_document_text_task(
                     raise ValueError(f"Downloaded file too large: {len(response.content)} bytes exceeds limit of {ValidationConfig.MAX_TEXT_LENGTH} bytes.")
                 content_type = response.headers.get("Content-Type", "")
                 if "application/pdf" in content_type or file_url.lower().endswith(".pdf"):
-                    extracted_text = extract_text_from_pdf(io.BytesIO(resp.content))
+                    extracted_text = extract_text_from_pdf(io.BytesIO(response.content))
                 else:
-                    extracted_text = resp.content.decode("utf-8", errors="ignore")
+                    extracted_text = response.content.decode("utf-8", errors="ignore")
             elif file_path:
-                # Ownership verification: the user must own an Attachment for this path
+                # Ownership verification
                 session = SessionLocal()
                 try:
                     owned = session.query(Attachment).filter(
@@ -581,13 +823,25 @@ def extract_document_text_task(
             text_length=len(extracted_text),
         )
 
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="stage_complete",
+            stage="text_extraction",
+            progress=25,
+            document_id=document_id,
+            payload={"text_length": len(extracted_text)},
+        )
+
         return {
+        result = {
             "user_id": user_id,
             "document_id": document_id,
             "extracted_text": extracted_text,
             "text_length": len(extracted_text),
             "stage": "text_extraction_complete",
         }
+        _persist_pipeline_state(document_id, user_id, "text_extraction_complete", result)
+        return result
 
     except Exception as e:
         logger.error(
@@ -596,10 +850,17 @@ def extract_document_text_task(
             document_id=document_id,
             error=str(e),
         )
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="failed",
+            stage="text_extraction",
+            progress=0,
+            document_id=document_id,
+            error=str(e),
+        )
         raise
     finally:
         clear_request_context()
-
 
 @celery_app.task(bind=True, name="summarize_document")
 def summarize_document_task(
@@ -676,17 +937,37 @@ def summarize_document_task(
             key_points_count=len(key_points),
         )
 
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="stage_complete",
+            stage="summarization",
+            progress=50,
+            document_id=document_id,
+            payload={"key_points_count": len(key_points)},
+        )
+
         return {
+        result = {
             **extraction_result,
             "summary_text": summary_text,
             "key_points": key_points,
             "stage": "summarization_complete",
         }
+        _persist_pipeline_state(document_id, user_id, "summarization_complete", result)
+        return result
 
     except Exception as e:
         logger.error(
             "Stage 2: Summarization failed",
             task_id=self.request.id,
+            document_id=document_id,
+            error=str(e),
+        )
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="failed",
+            stage="summarization",
+            progress=0,
             document_id=document_id,
             error=str(e),
         )
@@ -769,7 +1050,17 @@ def extract_remedies_task(
             remedies_count=len(remedies_list),
         )
 
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="stage_complete",
+            stage="remedy_extraction",
+            progress=75,
+            document_id=document_id,
+            payload={"remedies_count": len(remedies_list)},
+        )
+
         return {
+        result = {
             **summarization_result,
             "remedies": remedies_list,
             "deadlines": deadlines_list,
@@ -778,11 +1069,21 @@ def extract_remedies_task(
             "remedies_data": remedies_data,
             "stage": "remedy_extraction_complete",
         }
+        _persist_pipeline_state(document_id, user_id, "remedy_extraction_complete", result)
+        return result
 
     except Exception as e:
         logger.error(
             "Stage 3: Remedy extraction failed",
             task_id=self.request.id,
+            document_id=document_id,
+            error=str(e),
+        )
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="failed",
+            stage="remedy_extraction",
+            progress=0,
             document_id=document_id,
             error=str(e),
         )
@@ -830,10 +1131,21 @@ def finalize_analysis_task(
             "stage": "finalization_complete",
         }
 
+        _persist_pipeline_state(document_id, user_id, "finalization_complete", result)
+
         logger.info(
             "Stage 4: Analysis finalization completed",
             task_id=self.request.id,
             document_id=document_id,
+        )
+
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="completed",
+            stage="finalization",
+            progress=100,
+            document_id=document_id,
+            payload={"analysis_time_seconds": result.get("analysis_time_seconds", 0)},
         )
 
         return result
@@ -842,6 +1154,14 @@ def finalize_analysis_task(
         logger.error(
             "Stage 4: Analysis finalization failed",
             task_id=self.request.id,
+            document_id=document_id,
+            error=str(e),
+        )
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="failed",
+            stage="finalization",
+            progress=0,
             document_id=document_id,
             error=str(e),
         )
@@ -917,6 +1237,15 @@ def analyze_document_task(
             finalize_analysis_task.s(document_type=document_type),
         )
 
+        # Broadcast start event immediately
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="processing_started",
+            stage="analysis",
+            progress=0,
+            document_id=document_id,
+        )
+
         # Execute chain synchronously to capture result
         chain_result = task_chain.apply()
         final_result = chain_result.get() if hasattr(chain_result, 'get') else chain_result
@@ -930,6 +1259,16 @@ def analyze_document_task(
             task_id=self.request.id,
             document_id=document_id,
             analysis_time=analysis_time,
+        )
+
+        # Broadcast final completion (redundant safety net if chain tasks missed it)
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="completed",
+            stage="analysis",
+            progress=100,
+            document_id=document_id,
+            payload={"analysis_time_seconds": analysis_time},
         )
 
         # Mark idempotency complete and persist result
@@ -953,6 +1292,15 @@ def analyze_document_task(
             document_id=document_id,
             error=str(e),
             error_type=type(e).__name__,
+        )
+
+        _broadcast_job_event(
+            job_id=self.request.id,
+            event="failed",
+            stage="analysis",
+            progress=0,
+            document_id=document_id,
+            error=str(e),
         )
         
         # HOOK: Trigger State Machine transition for failure
