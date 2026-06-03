@@ -34,7 +34,7 @@ class KnowledgeInvalidation(Base):
     recompute_attempts = Column(Integer, default=0, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
-    user = relationship("User")
+    user = relationship("db.models.auth.User")
     case = relationship("Case")
     document = relationship("CaseDocument")
 

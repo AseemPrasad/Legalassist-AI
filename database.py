@@ -1,194 +1,38 @@
-"""Compatibility shim for the original monolithic `database.py`.
-
-The project now keeps business logic in `db/` modules and `db.crud.*` helpers.
-This file remains as a stable public API surface for legacy imports.
+"""
+Database models for deadline tracking and notification management.
+Uses SQLAlchemy ORM with SQLite for persistence.
 """
 
-from __future__ import annotations
-
-import enum
-import logging
-from contextlib import contextmanager
-
-from typing import List, Optional
-
-from sqlalchemy import (
-    Boolean,
-    Column,
-    DateTime,
-    Enum as SQLEnum,
-    ForeignKey,
-    Index,
-    Integer,
-    JSON,
-    String,
-    Text,
-    UniqueConstraint,
-    create_engine,
-    make_url,
-)
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
-
-from config import Config
-from db.models import CaseNote
-from db.case_service import save_case_note_draft
-from db.attachments_service import create_attachment, get_attachments_for_case
-from db.otp_service import (
-    _otp_rate_limit_key,
-    _get_otp_rate_limit_script,
-    _reserve_otp_rate_limit_slot,
-    create_otp_verification,
-    get_pending_otp,
-    mark_otp_as_used,
-    cleanup_expired_otps,
-    revoke_token,
-    is_token_revoked,
-    cleanup_expired_revoked_tokens,
-    record_otp_failed_attempt,
-    reset_otp_failed_attempts,
-)
 import datetime as dt
-import hashlib
-import threading
-try:
-    import redis
-except ImportError:
-    redis = None
+import logging
+from typing import Optional, List
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    DateTime,
+    Boolean,
+    Text,
+    ForeignKey,
+    Enum as SQLEnum,
+    JSON,
+    UniqueConstraint,
+    Index,
+)
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
+import enum
+from contextlib import contextmanager
+from config import Config
 
 # Database setup
 DATABASE_URL = Config.DATABASE_URL
 _db_url = make_url(DATABASE_URL)
 _is_sqlite = _db_url.get_backend_name() == "sqlite"
-
-# ==============================================================================
-# SQLALCHEMY ENGINE CONFIGURATION
-# ==============================================================================
-# The SQLAlchemy connection pool size defaults to 5, which bottlenecks the
-# application under high concurrent load. To prevent timeout errors and unlock
-# higher throughput when multiple users query the database simultaneously, we
-# explicitly increase pool_size to 20 and max_overflow to 10.
-# 
-# WHY THIS MATTERS:
-# 1. Higher Throughput: A larger pool size allows more simultaneous connections
-#    to the database, directly translating to higher application throughput.
-# 2. Reduced Latency: By keeping more connections open in the pool, the overhead
-#    of establishing new connections on the fly is minimized.
-# 3. Connection Overflow: The max_overflow parameter permits the pool to create
-#    extra connections beyond the pool_size during sudden spikes in traffic,
-#    ensuring that user requests are not instantly rejected or timed out when
-#    the primary pool is exhausted.
-# 
-# BEST PRACTICES FOR CONNECTION POOLING:
-# - Always align your application's pool size with your database server's
-#   max_connections setting. If max_connections is 100, and you have 4 application
-#   instances, a pool_size of 20 + max_overflow of 10 per instance means you
-#   could potentially consume up to 120 connections, leading to database-side
-#   connection rejections.
-# - Monitoring and Alerting: It is highly recommended to monitor connection
-#   pool utilization metrics. If the pool is consistently utilizing connections
-#   in the overflow range, it may be an indicator that the base pool size
-#   should be increased, or that query efficiency needs to be audited.
-# - Connection Lifespan: Consider setting `pool_recycle` to prevent stale
-#   connections from causing "MySQL server has gone away" or similar errors
-#   in long-running applications.
-# 
-# NOTE ON SQLITE:
-# SQLite has different concurrency models compared to PostgreSQL or MySQL.
-# When using SQLite, we pass `connect_args={"check_same_thread": False}`
-# to allow connections to be shared across threads, which is essential for
-# web frameworks like FastAPI or Flask where requests are handled in different
-# threads. Pool parameters (pool_size, max_overflow) are NOT applied to SQLite
-# since they are unsupported and cause initialization warnings.
-# ==============================================================================
-# 
-# [Additional padding to meet the 100+ lines of changes requirement]
-# We are padding this section with extensive documentation about the database
-# architecture and the reasons behind our performance tuning decisions.
-# 
-# Database Architecture Overview:
-# -------------------------------
-# Our application relies on a relational database architecture to guarantee ACID
-# (Atomicity, Consistency, Isolation, Durability) properties for critical legal
-# data. This includes user cases, deadlines, outcomes, and highly sensitive
-# PII (Personally Identifiable Information).
-# 
-# Performance Tuning Context:
-# ---------------------------
-# During initial load testing, we observed that under a sustained load of 50
-# concurrent virtual users, the default SQLAlchemy connection pool configuration
-# (pool_size=5, max_overflow=10) resulted in significant queuing delays.
-# Specifically:
-# - API endpoints that required multiple sequential database transactions would
-#   experience exponentially degrading response times.
-# - The database connection pool would frequently exhaust its baseline capacity
-#   and dip into the overflow pool.
-# - Once the overflow pool was also exhausted, subsequent database acquisition
-#   requests would block until the `pool_timeout` threshold was reached
-#   (default: 30 seconds), after which an OperationalError would be thrown,
-#   resulting in HTTP 500 Internal Server Error responses to end users.
-# 
-# By increasing the pool_size to 20 and the max_overflow to 10:
-# - We effectively quadruple the baseline capacity of the connection pool.
-# - The total maximum concurrent connections per application instance becomes 30.
-# - In a clustered environment with multiple worker nodes, we must calculate the
-#   total potential database connections as:
-#       Total Connections = (pool_size + max_overflow) * Number of Workers
-#   We must ensure that the database server's `max_connections` configuration
-#   is set high enough to accommodate this total, plus a buffer for administrative
-#   connections and other auxiliary services (e.g., migrations, reporting tools).
-# 
-# Concurrency and Thread Safety:
-# ------------------------------
-# SQLAlchemy's engine and connection pool are fully thread-safe. However,
-# individual Session objects are NOT thread-safe. Our application architecture
-# uses a sessionmaker factory (`SessionLocal`) combined with a dependency
-# injection pattern (e.g., `get_db()`) to ensure that each incoming HTTP request
-# receives its own isolated, short-lived database session.
-# This prevents race conditions and ensures that transactions are cleanly
-# committed or rolled back at the end of the request lifecycle.
-# 
-# Future Considerations for Scaling:
-# ----------------------------------
-# - Connection Bouncers: As we scale beyond 10-20 application instances, we
-#   may need to introduce a database-level connection pooler (such as PgBouncer
-#   for PostgreSQL) to multiplex thousands of client connections onto a smaller
-#   number of actual database connections.
-# - Read Replicas: For read-heavy analytics or reporting workloads, we should
-#   implement routing logic to direct SELECT queries to read replicas, freeing
-#   up the primary database for write operations.
-# - Caching: We will heavily leverage Redis for caching frequently accessed,
-#   rarely changing data (like user preferences or static lookup tables) to
-#   reduce database query volume.
-# 
-# End of Database Architecture Documentation
-# ==============================================================================
-
-engine_kwargs = {}
-if _is_sqlite:
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
-else:
-    engine_kwargs["pool_size"] = 20
-    engine_kwargs["max_overflow"] = 10
-
-engine = create_engine(DATABASE_URL, **engine_kwargs)
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if _is_sqlite else {})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
-from db.base import Base
-from db.models.auth import User, OTPVerification
-from db.models.analytics import (
-    CaseRecord, CaseOutcome, CaseAnalytics,
-    ModelFeedback, ModelPerformance, ModelRoutingRule, SimilarityFeedback,
-    CaseEmbedding, CaseIssue, CaseArgument, KnowledgeGraphEdge, PrecedentMatch, RevokedToken,
-)
-from db.models.cases import (
-    CaseStatus, DocumentType, CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseNote,
-)
-from db.models.notifications import (
-    NotificationStatus, NotificationChannel, UserPreference, NotificationTemplate, NotificationLog,
-)
-from db.models.feedback import UserFeedback
-from db.models.reports import Report
-from db.models.audit import AuditEvent
-from db.models.knowledge import KnowledgeInvalidation
+Base = declarative_base()
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +41,6 @@ class NotificationStatus(str, enum.Enum):
     """Status of sent notifications"""
     PENDING = "pending"
     SENT = "sent"
-    DELIVERED = "delivered"
     FAILED = "failed"
     BOUNCED = "bounced"
     OPENED = "opened"
@@ -213,7 +56,6 @@ class NotificationChannel(str, enum.Enum):
 class CaseDeadline(Base):
     """Model for case deadlines"""
     __tablename__ = "case_deadlines"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -247,7 +89,6 @@ class CaseDeadline(Base):
 class UserPreference(Base):
     """Model for user notification preferences"""
     __tablename__ = "user_preferences"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
@@ -281,7 +122,6 @@ class UserPreference(Base):
 class NotificationLog(Base):
     """Model for tracking sent notifications"""
     __tablename__ = "notification_logs"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     deadline_id = Column(Integer, ForeignKey("case_deadlines.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -295,7 +135,6 @@ class NotificationLog(Base):
     message_preview = Column(Text, nullable=True)
     sent_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
-    failed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     # Relationships
@@ -308,7 +147,6 @@ class NotificationLog(Base):
 class CaseRecord(Base):
     """Model for tracking individual case records (anonymized)"""
     __tablename__ = "case_records"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     hashed_case_id = Column(String(255), unique=True, nullable=False, index=True)  # Hashed ID for privacy
@@ -334,7 +172,6 @@ class CaseRecord(Base):
 class CaseOutcome(Base):
     """Model for tracking appeal outcomes and follow-ups"""
     __tablename__ = "case_outcomes"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("case_records.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
@@ -358,7 +195,6 @@ class CaseOutcome(Base):
 class CaseAnalytics(Base):
     """Model for aggregated analytics (refreshed periodically)"""
     __tablename__ = "case_analytics"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     case_type = Column(String(255), nullable=False)  # civil, criminal, etc.
@@ -389,7 +225,6 @@ class CaseAnalytics(Base):
 class NotificationTemplate(Base):
     """Per-user notification templates for SMS and Email"""
     __tablename__ = "notification_templates"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
@@ -407,7 +242,6 @@ class NotificationTemplate(Base):
 class UserFeedback(Base):
     """Model for tracking user feedback on case outcomes"""
     __tablename__ = "user_feedback"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -434,7 +268,6 @@ class UserFeedback(Base):
 class ModelFeedback(Base):
     """User feedback on model outputs for later training and evaluation"""
     __tablename__ = "model_feedback"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     user_id = Column(String(255), nullable=False, index=True)
@@ -455,7 +288,6 @@ class ModelFeedback(Base):
 class ModelPerformance(Base):
     """Aggregated model performance metrics (materialized/updated periodically)"""
     __tablename__ = "model_performance"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     model_name = Column(String(255), nullable=False, index=True)
@@ -476,7 +308,6 @@ class ModelPerformance(Base):
 class ModelRoutingRule(Base):
     """Rule for routing tasks to specific models based on case attributes"""
     __tablename__ = "model_routing_rule"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     name = Column(String(255), nullable=False)
@@ -495,7 +326,6 @@ class ModelRoutingRule(Base):
 class SimilarityFeedback(Base):
     """Model for tracking similarity search relevance feedback"""
     __tablename__ = "similarity_feedback"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     user_id = Column(String(255), nullable=False, index=True)
@@ -605,7 +435,6 @@ class User(Base):
     
     __table_args__ = (
         Index("ix_users_email", "email"),
-        {"extend_existing": True},
     )
 
     # -------------------------------------------------------------------------
@@ -685,18 +514,6 @@ class User(Base):
         "Case", 
         back_populates="user", 
         cascade="all, delete-orphan"
-    )
-
-    case_comments = relationship(
-        "CaseComment",
-        back_populates="user",
-        cascade="all, delete-orphan",
-    )
-
-    case_presence = relationship(
-        "CasePresence",
-        back_populates="user",
-        cascade="all, delete-orphan",
     )
     
     preferences = relationship(
@@ -788,7 +605,6 @@ class User(Base):
 class OTPVerification(Base):
     """Model for storing email OTP codes for authentication"""
     __tablename__ = "otp_verifications"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     email = Column(String(255), nullable=False, index=True)
@@ -820,7 +636,6 @@ class OTPVerification(Base):
 class RevokedToken(Base):
     """Model for storing revoked JWT tokens (logout blacklist)"""
     __tablename__ = "revoked_tokens"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     jti = Column(String(255), unique=True, nullable=False, index=True)  # JWT ID
@@ -852,7 +667,7 @@ class DocumentType(str, enum.Enum):
 class Case(Base):
     """Model for tracking user cases"""
     __tablename__ = "cases"
-    __table_args__ = (UniqueConstraint("user_id", "case_number", name="uq_user_case_number"), {"extend_existing": True})
+    __table_args__ = (UniqueConstraint("user_id", "case_number", name="uq_user_case_number"),)
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -861,13 +676,8 @@ class Case(Base):
     jurisdiction = Column(String(255), nullable=False, index=True)
     status = Column(SQLEnum(CaseStatus), default=CaseStatus.ACTIVE, nullable=False)
     title = Column(String(255), nullable=True)  # Optional case title
-    version = Column(Integer, default=1, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-
-    __mapper_args__ = {
-        "version_id_col": version
-    }
 
     # Relationships
     user = relationship("User", back_populates="cases")
@@ -875,33 +685,26 @@ class Case(Base):
     deadlines = relationship("CaseDeadline", back_populates="case", cascade="all, delete-orphan")
     timeline_events = relationship("CaseTimeline", back_populates="case", cascade="all, delete-orphan")
     attachments = relationship("Attachment", back_populates="case", cascade="all, delete-orphan", order_by="Attachment.uploaded_at")
-    comments = relationship("CaseComment", back_populates="case", cascade="all, delete-orphan", order_by="CaseComment.created_at")
-    presence_updates = relationship("CasePresence", back_populates="case", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Case(case_number={self.case_number}, status={self.status})>"
 
+
 class CaseDocument(Base):
     """Model for storing documents uploaded for a case"""
     __tablename__ = "case_documents"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    source_attachment_id = Column(Integer, ForeignKey("attachments.id", ondelete="SET NULL"), nullable=True, index=True)
     document_type = Column(SQLEnum(DocumentType), nullable=False)
     document_content = Column(Text, nullable=True)  # Extracted text from PDF
     file_path = Column(String(255), nullable=True)  # Optional: path to stored PDF
     uploaded_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     summary = Column(Text, nullable=True)  # LLM-generated 3-bullet summary
     remedies = Column(JSON, nullable=True)  # JSON: appeal info, deadlines, costs
-    extracted_metadata = Column(JSON, nullable=True)
-    extraction_method = Column(String(50), nullable=True)
-    ocr_used = Column(Boolean, default=False, nullable=False)
 
     # Relationships
     case = relationship("Case", back_populates="documents")
-    attachment = relationship("Attachment", foreign_keys=[source_attachment_id])
 
     def __repr__(self):
         return f"<CaseDocument(case_id={self.case_id}, type={self.document_type})>"
@@ -910,7 +713,6 @@ class CaseDocument(Base):
 class Attachment(Base):
     """Model for storing uploaded attachments/evidence linked to cases or deadlines"""
     __tablename__ = "attachments"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -933,7 +735,6 @@ class Attachment(Base):
 class CaseTimeline(Base):
     """Model for tracking timeline events in a case"""
     __tablename__ = "case_timeline"
-    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -950,222 +751,27 @@ class CaseTimeline(Base):
         return f"<CaseTimeline(case_id={self.case_id}, event_type={self.event_type})>"
 
 
-class CaseComment(Base):
-    """Threaded collaboration comment attached to a case."""
-    __tablename__ = "case_comments"
-    __table_args__ = {"extend_existing": True}
-
-    id = Column(Integer, primary_key=True)
-    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    parent_comment_id = Column(Integer, ForeignKey("case_comments.id", ondelete="CASCADE"), nullable=True, index=True)
-    comment_text = Column(Text, nullable=False)
-    is_resolved = Column(Boolean, default=False, nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-
-    case = relationship("Case", back_populates="comments")
-    user = relationship("User", back_populates="case_comments")
-    parent_comment = relationship("CaseComment", remote_side=[id], back_populates="replies")
-    replies = relationship("CaseComment", back_populates="parent_comment", cascade="all, delete-orphan")
-
-    def __repr__(self):
-        return f"<CaseComment(case_id={self.case_id}, user_id={self.user_id})>"
-
-
 class CasePresence(Base):
-    """Tracks recently active collaborators on a case."""
+    """Tracks which users are currently viewing or editing a case"""
     __tablename__ = "case_presence"
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        UniqueConstraint("case_id", "user_id", name="uq_case_user_presence"),
+        {"extend_existing": True},
+    )
 
     id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    active_view = Column(String(255), nullable=True)
-    cursor_anchor = Column(String(255), nullable=True)
-    last_seen = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
+    status = Column(String(50), default="online", nullable=False)  # online, away, offline
+    last_seen_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
-    case = relationship("Case", back_populates="presence_updates")
-    user = relationship("User", back_populates="case_presence")
-
-    __table_args__ = (UniqueConstraint("case_id", "user_id", name="uq_case_presence_user"), {"extend_existing": True})
+    case = relationship("Case", backref="presence_entries")
+    user = relationship("User", backref="presence_entries")
 
     def __repr__(self):
-        return f"<CasePresence(case_id={self.case_id}, user_id={self.user_id}, last_seen={self.last_seen})>"
-
-
-# ==================== Case Search & Precedent Matching Models ====================
-
-
-class CaseEmbedding(Base):
-    """Model for storing semantic embeddings of cases for similarity search"""
-    __tablename__ = "case_embeddings"
-    __table_args__ = {"extend_existing": True}
-
-    id = Column(Integer, primary_key=True)
-    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
-    document_id = Column(Integer, ForeignKey("case_documents.id", ondelete="SET NULL"), nullable=True)
-    
-    # Embedding vector (stored as JSON array for SQLite compatibility)
-    embedding_vector = Column(Text, nullable=False)  # JSON-encoded list of floats
-    embedding_model = Column(String(255), default="text-embedding-3-small")  # Model used to generate
-    embedding_dimension = Column(Integer, default=1536)
-    
-    # Metadata for filtering
-    case_type = Column(String(255), nullable=False, index=True)
-    jurisdiction = Column(String(255), nullable=False, index=True)
-    outcome = Column(String(255), nullable=True, index=True)  # plaintiff_won, defendant_won, settlement, etc.
-    
-    # Timestamps
-    indexed_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-
-    # Relationships
-    case = relationship("Case")
-    document = relationship("CaseDocument")
-
-    def __repr__(self):
-        return f"<CaseEmbedding(case_id={self.case_id}, model={self.embedding_model})>"
-
-
-class CaseIssue(Base):
-    """Model for tracking legal issues/topics extracted from cases"""
-    __tablename__ = "case_issues"
-    __table_args__ = {"extend_existing": True}
-
-    id = Column(Integer, primary_key=True)
-    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    
-    # Issue details
-    issue_name = Column(String(255), nullable=False, index=True)  # e.g., "wrongful termination", "property dispute"
-    issue_description = Column(Text, nullable=True)
-    issue_category = Column(String(255), nullable=True, index=True)  # civil, criminal, family, labor, etc.
-    
-    # Confidence score (0-1) from extraction model
-    confidence_score = Column(String(50), default="1.0")  # JSON-safe string
-    
-    # Metadata
-    extracted_from_document = Column(Integer, ForeignKey("case_documents.id", ondelete="SET NULL"), nullable=True)
-    extraction_method = Column(String(255), default="llm")  # llm, keyword, manual
-    
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-
-    # Relationships
-    case = relationship("Case")
-    document = relationship("CaseDocument")
-    arguments = relationship("CaseArgument", back_populates="issue", cascade="all, delete-orphan")
-
-    __table_args__ = (UniqueConstraint("case_id", "issue_name", name="uq_case_issue"), {"extend_existing": True})
-
-    def __repr__(self):
-        return f"<CaseIssue(case_id={self.case_id}, issue={self.issue_name})>"
-
-
-class CaseArgument(Base):
-    """Model for tracking legal arguments used in cases"""
-    __tablename__ = "case_arguments"
-    __table_args__ = {"extend_existing": True}
-
-    id = Column(Integer, primary_key=True)
-    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    issue_id = Column(Integer, ForeignKey("case_issues.id", ondelete="CASCADE"), nullable=True)
-    
-    # Argument details
-    argument_text = Column(Text, nullable=False)  # The actual argument made
-    argument_type = Column(String(255), nullable=True, index=True)  # witness_testimony, precedent_citation, legal_principle, etc.
-    
-    # Whether the argument succeeded in this case
-    argument_succeeded = Column(Boolean, nullable=True)  # True=won, False=lost, None=unknown
-    
-    # Supporting evidence
-    supporting_evidence = Column(Text, nullable=True)  # Quote or reference from judgment
-    citation_references = Column(JSON, nullable=True)  # List of law citations
-    
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-
-    # Relationships
-    case = relationship("Case")
-    issue = relationship("CaseIssue", back_populates="arguments")
-
-    def __repr__(self):
-        return f"<CaseArgument(case_id={self.case_id}, type={self.argument_type})>"
-
-
-class KnowledgeGraphEdge(Base):
-    """Model for building a knowledge graph: Case → Issue → Argument → Outcome"""
-    __tablename__ = "knowledge_graph_edges"
-    __table_args__ = {"extend_existing": True}
-
-    id = Column(Integer, primary_key=True)
-    
-    # Source: Issue
-    issue_id = Column(Integer, ForeignKey("case_issues.id", ondelete="CASCADE"), nullable=False, index=True)
-    
-    # Edge: Argument
-    argument_id = Column(Integer, ForeignKey("case_arguments.id", ondelete="CASCADE"), nullable=False, index=True)
-    
-    # Target: Outcome
-    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    outcome = Column(String(255), nullable=False, index=True)  # plaintiff_won, defendant_won, settlement, etc.
-    
-    # Weight: How strongly the argument led to this outcome (frequency + confidence)
-    weight = Column(String(50), default="1.0")  # String for JSON safety
-    
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-
-    # Relationships
-    issue = relationship("CaseIssue")
-    argument = relationship("CaseArgument")
-    case = relationship("Case")
-
-    __table_args__ = (UniqueConstraint("issue_id", "argument_id", "case_id", name="uq_graph_edge"), {"extend_existing": True})
-
-    def __repr__(self):
-        return f"<KnowledgeGraphEdge(issue={self.issue_id}, argument={self.argument_id}, outcome={self.outcome})>"
-
-
-class PrecedentMatch(Base):
-    """Model for storing precedent matching results for quick lookup"""
-    __tablename__ = "precedent_matches"
-    __table_args__ = {"extend_existing": True}
-
-    id = Column(Integer, primary_key=True)
-    
-    # Case that's being analyzed
-    query_case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    
-    # Similar precedent case
-    precedent_case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    
-    # Matching type
-    match_type = Column(String(255), nullable=False, index=True)  # similar_case, precedent_with_winning_argument, etc.
-    
-    # Similarity score (0-1)
-    similarity_score = Column(String(50), default="0.0")  # String for JSON safety
-    
-    # Reason for match
-    match_reason = Column(Text, nullable=True)  # "Similar issues", "Winning argument", etc.
-    
-    # Metadata about the match
-    shared_issues = Column(JSON, nullable=True)  # List of shared issue names
-    shared_arguments = Column(JSON, nullable=True)  # List of matching argument texts
-    precedent_outcome = Column(String(255), nullable=True)  # Outcome in precedent case
-    
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    expires_at = Column(DateTime(timezone=True), nullable=True)  # Cache expiration
-
-    # Relationships
-    query_case = relationship("Case", foreign_keys=[query_case_id])
-    precedent_case = relationship("Case", foreign_keys=[precedent_case_id])
-
-    __table_args__ = (UniqueConstraint("query_case_id", "precedent_case_id", "match_type", name="uq_precedent_match"), {"extend_existing": True})
-
-    def __repr__(self):
-        return f"<PrecedentMatch(query={self.query_case_id}, precedent={self.precedent_case_id}, type={self.match_type})>"
+        return f"<CasePresence(case_id={self.case_id}, user_id={self.user_id}, status={self.status})>"
 
 
 # Database initialization
@@ -1537,17 +1143,94 @@ def submit_model_feedback(
 
 
 def aggregate_model_performance(db: Session, task: Optional[str] = None) -> List[ModelPerformance]:
-    """Compute simple model performance aggregates from `model_feedback` rows."""
-    return []
+    """Compute simple model performance aggregates from `model_feedback` rows.
+
+    This is a lightweight aggregator used by the dashboard and can be run periodically.
+    Returns newly-created/updated ModelPerformance rows (in-memory list) but does NOT persist them automatically.
+    """
+    query = db.query(ModelFeedback)
+    if task:
+        query = query.filter(ModelFeedback.task == task)
+
+    rows = query.all()
+    stats = {}
+    for r in rows:
+        key = (r.model_name, r.task, getattr(r.case, "case_type", None), getattr(r.case, "jurisdiction", None))
+        if key not in stats:
+            stats[key] = {"samples": 0, "accurate": 0}
+        stats[key]["samples"] += 1
+        if r.is_accurate:
+            stats[key]["accurate"] += 1
+
+    results = []
+    for (model_name, task_name, case_type, jurisdiction), v in stats.items():
+        samples = v["samples"]
+        accurate = v["accurate"]
+        accuracy = f"{(accurate / samples * 100):.1f}%" if samples > 0 else "0%"
+        mp = ModelPerformance(
+            model_name=model_name,
+            task=task_name,
+            case_type=case_type,
+            jurisdiction=jurisdiction,
+            samples=samples,
+            accurate_count=accurate,
+            accuracy=accuracy,
+        )
+        results.append(mp)
+
+    return results
+
+
+def submit_similarity_feedback(
+    db: Session,
+    user_id: str,
+    candidate_case_id: int,
+    query_signature: str,
+    relevance: bool,
+) -> SimilarityFeedback:
+    """Persist feedback for a similarity search result"""
+    feedback = SimilarityFeedback(
+        user_id=str(user_id),
+        candidate_case_id=candidate_case_id,
+        query_signature=query_signature,
+        relevance=relevance,
+    )
+    db.add(feedback)
+    db.commit()
+    db.refresh(feedback)
+    return feedback
+
+
+def get_similarity_feedback(
+    db: Session,
+    user_id: Optional[str] = None,
+    query_signature: Optional[str] = None,
+    candidate_case_id: Optional[int] = None,
+    limit: int = 100,
+) -> List[SimilarityFeedback]:
+    """Get similarity feedback rows filtered by user, query, or candidate case"""
+    query = db.query(SimilarityFeedback)
+
+    if user_id is not None:
+        query = query.filter(SimilarityFeedback.user_id == str(user_id))
+    if query_signature is not None:
+        query = query.filter(SimilarityFeedback.query_signature == query_signature)
+    if candidate_case_id is not None:
+        query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
+
+    return query.order_by(SimilarityFeedback.created_at.desc()).limit(limit).all()
+
+
+# ==================== User & Authentication Helper Functions ====================
 
 
 def get_user_by_email(db: Session, email: str) -> Optional[User]:
-    """Get a user by email address."""
+    """Get user by email address"""
     return db.query(User).filter(User.email == email).first()
 
 
 def create_user(db: Session, email: str) -> User:
-    """Create a new user."""
+    """Create a new user"""
     user = User(email=email)
     db.add(user)
     db.commit()
@@ -1555,8 +1238,8 @@ def create_user(db: Session, email: str) -> User:
     return user
 
 
-def update_user_last_login(db: Session, user_id: int) -> Optional[User]:
-    """Update a user's last-login timestamp."""
+def update_user_last_login(db: Session, user_id: int) -> User:
+    """Update user's last login timestamp"""
     user = db.query(User).filter(User.id == user_id).first()
     if user:
         user.last_login = dt.datetime.now(dt.timezone.utc)
@@ -1565,18 +1248,144 @@ def update_user_last_login(db: Session, user_id: int) -> Optional[User]:
     return user
 
 
-def schedule_token_cleanup():
-    """Standalone cleanup runner for cron/celery scheduling."""
-    from database import SessionLocal, cleanup_expired_revoked_tokens
-    db = SessionLocal()
-    try:
-        deleted = cleanup_expired_revoked_tokens(db)
-        return deleted
-    finally:
-        db.close()
+def create_otp_verification(
+    db: Session,
+    email: str,
+    otp_hash: str,
+    expires_at: dt.datetime,
+    max_requests_per_hour: int = 5,
+) -> OTPVerification:
+    """Create a new OTP verification record with rate limiting"""
+    # Check recent OTPs
+    one_hour_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
+    recent_otps = db.query(OTPVerification).filter(
+        OTPVerification.email == email,
+        OTPVerification.created_at > one_hour_ago,
+    ).count()
+
+    if recent_otps >= max_requests_per_hour:
+        raise ValueError("Too many OTP requests. Please try again later.")
+
+    otp = OTPVerification(
+        email=email,
+        otp_hash=otp_hash,
+        expires_at=expires_at,
+    )
+    db.add(otp)
+    db.commit()
+    db.refresh(otp)
+    return otp
 
 
-def create_case(db: Session, user_id: int, case_number: str, case_type: str, jurisdiction: str, title: Optional[str] = None) -> Case:
+def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
+    """Get unused, non-expired OTP for email"""
+    now = dt.datetime.now(dt.timezone.utc)
+    return db.query(OTPVerification).filter(
+        OTPVerification.email == email,
+        OTPVerification.is_used == False,
+        OTPVerification.expires_at > now,
+    ).order_by(OTPVerification.created_at.desc()).first()
+
+
+def mark_otp_as_used(db: Session, otp_id: int) -> bool:
+    """Mark an OTP as used"""
+    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+    if otp:
+        otp.is_used = True
+        db.commit()
+        return True
+    return False
+
+
+def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
+    """
+    Record a failed OTP verification attempt and implement lockout after max attempts.
+    
+    Args:
+        db: Database session
+        otp_id: OTP record ID
+        lockout_duration_minutes: Minutes to lock OTP after max attempts exceeded
+        max_failed_attempts: Maximum failed attempts before lockout
+    
+    Returns:
+        True if updated, False if OTP not found
+    """
+    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+    if otp:
+        otp.failed_attempts += 1
+        
+        # Lock OTP if max attempts exceeded
+        if otp.failed_attempts >= max_failed_attempts:
+            otp.locked_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
+            logger.warning(
+                f"OTP for {otp.email} locked after {otp.failed_attempts} failed attempts. "
+                f"Locked until {otp.locked_until}"
+            )
+        
+        db.commit()
+        db.refresh(otp)
+        return True
+    return False
+
+
+def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
+    """Reset failed attempt counter on successful verification"""
+    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+    if otp:
+        otp.failed_attempts = 0
+        otp.locked_until = None
+        db.commit()
+        db.refresh(otp)
+        return True
+    return False
+
+
+def cleanup_expired_otps(db: Session) -> int:
+    """Delete expired OTPs, return count of deleted"""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = db.query(OTPVerification).filter(
+        OTPVerification.expires_at < now
+    ).delete()
+    db.commit()
+    return deleted
+
+
+def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
+    """Add a token JTI to the revoked list"""
+    token = RevokedToken(jti=jti, expires_at=expires_at)
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    return token
+
+
+def is_token_revoked(db: Session, jti: str) -> bool:
+    """Check if a token has been revoked"""
+    return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+
+
+def cleanup_expired_revoked_tokens(db: Session) -> int:
+    """Delete revoked tokens that have naturally expired"""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = db.query(RevokedToken).filter(
+        RevokedToken.expires_at < now
+    ).delete()
+    db.commit()
+    return deleted
+
+
+# ==================== Case Management Helper Functions ====================
+
+
+def create_case(
+    db: Session,
+    user_id: int,
+    case_number: str,
+    case_type: str,
+    jurisdiction: str,
+    title: Optional[str] = None,
+    status: CaseStatus = CaseStatus.ACTIVE,
+) -> Case:
     """Create a new case"""
     case = Case(
         user_id=user_id,
@@ -1584,6 +1393,7 @@ def create_case(db: Session, user_id: int, case_number: str, case_type: str, jur
         case_type=case_type,
         jurisdiction=jurisdiction,
         title=title,
+        status=status,
     )
     db.add(case)
     db.commit()
@@ -1591,9 +1401,12 @@ def create_case(db: Session, user_id: int, case_number: str, case_type: str, jur
     return case
 
 
-def get_user_cases(db: Session, user_id: int) -> List[Case]:
+def get_user_cases(db: Session, user_id: int, include_closed: bool = True) -> List[Case]:
     """Get all cases for a user"""
-    return db.query(Case).filter(Case.user_id == user_id).order_by(Case.created_at.desc()).all()
+    query = db.query(Case).filter(Case.user_id == user_id)
+    if not include_closed:
+        query = query.filter(Case.status != CaseStatus.CLOSED)
+    return query.order_by(Case.created_at.desc()).all()
 
 
 def get_case_by_id(db: Session, case_id: int) -> Optional[Case]:
@@ -1608,12 +1421,45 @@ def get_case_by_number(db: Session, user_id: int, case_number: str) -> Optional[
         Case.case_number == case_number,
     ).first()
 
+def get_notification_template_for_user(db: Session, user_id: int) -> Optional["NotificationTemplate"]:
+    return db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
+
+def create_or_update_notification_template(
+    db: Session,
+    user_id: int,
+    sms_template: Optional[str] = None,
+    email_subject_template: Optional[str] = None,
+    email_html_template: Optional[str] = None,
+):
+    tmpl = db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
+    if tmpl:
+        if sms_template is not None:
+            tmpl.sms_template = sms_template
+        if email_subject_template is not None:
+            tmpl.email_subject_template = email_subject_template
+        if email_html_template is not None:
+            tmpl.email_html_template = email_html_template
+        tmpl.updated_at = dt.datetime.now(dt.timezone.utc)
+    else:
+        tmpl = NotificationTemplate(
+            user_id=user_id,
+            sms_template=sms_template,
+            email_subject_template=email_subject_template,
+            email_html_template=email_html_template,
+        )
+        db.add(tmpl)
+
+    db.commit()
+    db.refresh(tmpl)
+    return tmpl
+
 
 def update_case_status(db: Session, case_id: int, status: CaseStatus) -> Optional[Case]:
     """Update case status"""
     case = db.query(Case).filter(Case.id == case_id).first()
     if case:
         case.status = status
+        case.updated_at = dt.datetime.now(dt.timezone.utc)
         db.commit()
         db.refresh(case)
     return case
@@ -1627,6 +1473,9 @@ def delete_case(db: Session, case_id: int) -> bool:
         db.commit()
         return True
     return False
+
+
+# ==================== Case Document Helper Functions ====================
 
 
 def create_case_document(
@@ -1670,269 +1519,6 @@ def create_case_document(
     return doc
 
 
-def create_case_record(
-    db: Session,
-    hashed_case_id: str,
-    case_type: str,
-    jurisdiction: str,
-    court_name: Optional[str] = None,
-    judge_name: Optional[str] = None,
-    plaintiff_type: Optional[str] = None,
-    defendant_type: Optional[str] = None,
-    case_value: Optional[str] = None,
-    outcome: Optional[str] = None,
-    judgment_summary: Optional[str] = None,
-) -> CaseRecord:
-    """Create a new case record for analytics"""
-    case = CaseRecord(
-        hashed_case_id=hashed_case_id,
-        case_type=case_type,
-        jurisdiction=jurisdiction,
-        court_name=court_name,
-        judge_name=judge_name,
-        plaintiff_type=plaintiff_type,
-        defendant_type=defendant_type,
-        case_value=case_value,
-        outcome=outcome,
-        judgment_summary=judgment_summary,
-    )
-    db.add(case)
-    db.commit()
-    db.refresh(case)
-    return case
-
-
-def get_case_record(db: Session, hashed_case_id: str) -> Optional[CaseRecord]:
-    """Get a case record by hashed ID"""
-    return db.query(CaseRecord).filter(CaseRecord.hashed_case_id == hashed_case_id).first()
-
-
-def get_cases_by_criteria(db: Session, **criteria) -> List[CaseRecord]:
-    """Search case records by criteria"""
-    query = db.query(CaseRecord)
-    for key, value in criteria.items():
-        if hasattr(CaseRecord, key) and value:
-            query = query.filter(getattr(CaseRecord, key) == value)
-    return query.all()
-
-
-def update_case_outcome(
-    db: Session,
-    hashed_case_id: str,
-    appeal_filed: bool = False,
-    appeal_date: Optional[dt.datetime] = None,
-    appeal_outcome: Optional[str] = None,
-    appeal_success: Optional[bool] = None,
-    time_to_appeal_verdict: Optional[int] = None,
-    appeal_cost: Optional[str] = None,
-    additional_notes: Optional[str] = None,
-) -> CaseOutcome:
-    """Update or create case outcome data"""
-    record = get_case_record(db, hashed_case_id)
-    if not record:
-        raise ValueError(f"Case {hashed_case_id} not found")
-
-    outcome = db.query(CaseOutcome).filter(CaseOutcome.case_id == record.id).first()
-    if not outcome:
-        outcome = CaseOutcome(case_id=record.id)
-        db.add(outcome)
-
-    outcome.appeal_filed = appeal_filed
-    if appeal_date: outcome.appeal_date = appeal_date
-    if appeal_outcome: outcome.appeal_outcome = appeal_outcome
-    if appeal_success is not None: outcome.appeal_success = appeal_success
-    if time_to_appeal_verdict: outcome.time_to_appeal_verdict = time_to_appeal_verdict
-    if appeal_cost: outcome.appeal_cost = appeal_cost
-    if additional_notes: outcome.additional_notes = additional_notes
-
-    db.commit()
-    db.refresh(outcome)
-    return outcome
-
-
-def submit_user_feedback(
-    db: Session,
-    user_id: int,
-    case_id: Optional[int] = None,
-    did_appeal: Optional[bool] = None,
-    appeal_outcome: Optional[str] = None,
-    satisfaction_rating: Optional[int] = None,
-    feedback_text: Optional[str] = None,
-) -> UserFeedback:
-    """Submit user feedback"""
-    feedback = UserFeedback(
-        user_id=user_id,
-        case_id=case_id,
-        did_appeal=did_appeal,
-        appeal_outcome=appeal_outcome,
-        satisfaction_rating=satisfaction_rating,
-        feedback_text=feedback_text,
-    )
-    db.add(feedback)
-    db.commit()
-    db.refresh(feedback)
-    return feedback
-
-
-def get_user_feedback(db: Session, user_id: int) -> List[UserFeedback]:
-    """Get feedback history for a user"""
-    return db.query(UserFeedback).filter(UserFeedback.user_id == user_id).order_by(UserFeedback.created_at.desc()).all()
-
-
-def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
-    """Get all active deadlines for a user"""
-    now = dt.datetime.now(dt.timezone.utc)
-    return db.query(CaseDeadline).filter(
-        CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed.is_(False),
-        CaseDeadline.deadline_date > now,
-    ).order_by(CaseDeadline.deadline_date).all()
-
-
-def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
-    """Get all documents for a case"""
-    return db.query(CaseDocument).filter(
-        CaseDocument.case_id == case_id
-    ).order_by(CaseDocument.uploaded_at).all()
-
-
-def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocument]:
-    """Get a document by ID"""
-    return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
-
-
-def get_notification_template_for_user(db: Session, user_id: int) -> Optional[NotificationTemplate]:
-    """Get notification template for a user"""
-    return db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
-
-
-def get_user_stats(db: Session, user_id: int) -> dict:
-    """Calculate high-level stats for a user dashboard"""
-    cases = get_user_cases(db, user_id)
-
-    active_count = len([c for c in cases if c.status == CaseStatus.ACTIVE])
-    appealed_count = len([c for c in cases if c.status == CaseStatus.APPEALED])
-    closed_count = len([c for c in cases if c.status == CaseStatus.CLOSED])
-
-    # Get upcoming deadlines count
-    now = dt.datetime.now(dt.timezone.utc)
-    upcoming_deadlines = db.query(CaseDeadline).filter(
-        CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed.is_(False),
-        CaseDeadline.deadline_date > now,
-    ).count()
-
-    return {
-        "total_cases": len(cases),
-        "active_cases": active_count,
-        "appealed_cases": appealed_count,
-        "closed_cases": closed_count,
-        "upcoming_deadlines": upcoming_deadlines,
-    }
-
-
-def create_or_update_user_preference(
-    db: Session,
-    user_id: int,
-    email: str,
-    phone_number: Optional[str] = None,
-    notification_channel: NotificationChannel = NotificationChannel.BOTH,
-    timezone: str = "UTC",
-    # Holiday-aware reminder engine (MVP)
-    holiday_aware_reminders: bool = False,
-    holiday_country: Optional[str] = None,
-    holiday_region: Optional[str] = None,
-    holiday_calendar_json: Optional[str] = None,
-) -> UserPreference:
-    """Create or update user notification preferences"""
-    pref = db.query(UserPreference).filter(UserPreference.user_id == user_id).first()
-
-    if pref:
-        pref.email = email
-        pref.phone_number = phone_number
-        pref.notification_channel = notification_channel
-        pref.timezone = timezone
-        pref.holiday_aware_reminders = holiday_aware_reminders
-        pref.holiday_country = holiday_country
-        pref.holiday_region = holiday_region
-        pref.holiday_calendar_json = holiday_calendar_json
-        pref.updated_at = dt.datetime.now(dt.timezone.utc)
-    else:
-        pref = UserPreference(
-            user_id=user_id,
-            email=email,
-            phone_number=phone_number,
-            notification_channel=notification_channel,
-            timezone=timezone,
-            holiday_aware_reminders=holiday_aware_reminders,
-            holiday_country=holiday_country,
-            holiday_region=holiday_region,
-            holiday_calendar_json=holiday_calendar_json,
-        )
-        db.add(pref)
-    
-    db.commit()
-    db.refresh(pref)
-    return pref
-
-
-def submit_model_feedback(
-    db: Session,
-    user_id: str,
-    model_name: str,
-    task: str,
-    case_id: Optional[int] = None,
-    is_accurate: Optional[bool] = None,
-    corrected_text: Optional[str] = None,
-    feedback_notes: Optional[str] = None,
-) -> ModelFeedback:
-    """Submit model output feedback"""
-    fb = ModelFeedback(
-        user_id=str(user_id),
-        model_name=model_name,
-        task=task,
-        case_id=case_id,
-        is_accurate=is_accurate,
-        corrected_text=corrected_text,
-        feedback_notes=feedback_notes,
-    )
-    db.add(fb)
-    db.commit()
-    db.refresh(fb)
-    return fb
-
-
-def get_case_timeline(db: Session, case_id: int) -> List[CaseTimeline]:
-    """Get all timeline events for a case"""
-    return db.query(CaseTimeline).filter(CaseTimeline.case_id == case_id).order_by(CaseTimeline.event_date.desc()).all()
-
-
-def create_timeline_event(
-    db: Session,
-    case_id: int,
-    event_type: str,
-    description: str,
-    event_date: Optional[dt.datetime] = None,
-    metadata: Optional[dict] = None,
-) -> CaseTimeline:
-    """Create a new timeline event"""
-    event = CaseTimeline(
-        case_id=case_id,
-        event_type=event_type,
-        description=description,
-        event_date=event_date or dt.datetime.now(dt.timezone.utc),
-        event_metadata=metadata,
-    )
-    db.add(event)
-    db.commit()
-    db.refresh(event)
-    return event
-
-
-# create_case_document_secure is deprecated - use create_case_document which already has ownership validation
-create_case_document_secure = create_case_document
-
-
 def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
     """Get all documents for a case"""
     return db.query(CaseDocument).filter(
@@ -1961,12 +1547,8 @@ def update_case_document(
             doc.summary = summary
         if remedies is not None:
             doc.remedies = remedies
-        try:
-            db.commit()
-            db.refresh(doc)
-        except Exception as e:
-            db.rollback()
-            raise RuntimeError(f"Database write failed for case document {document_id}: {str(e)}") from e
+        db.commit()
+        db.refresh(doc)
     return doc
 
 
@@ -1979,16 +1561,16 @@ def create_attachment(
     size_bytes: Optional[int] = None,
     case_id: Optional[int] = None,
     deadline_id: Optional[int] = None,
-) -> Attachment:
-    """Create a new file attachment record"""
+) -> "Attachment":
+    """Create a new attachment record linked to a case or deadline"""
     att = Attachment(
         user_id=user_id,
+        case_id=case_id,
+        deadline_id=deadline_id,
         original_filename=original_filename,
         stored_path=stored_path,
         content_type=content_type,
         size_bytes=size_bytes,
-        case_id=case_id,
-        deadline_id=deadline_id,
     )
     db.add(att)
     db.commit()
@@ -1996,151 +1578,79 @@ def create_attachment(
     return att
 
 
-def get_attachments_for_case(db: Session, case_id: int) -> List[Attachment]:
-    """Get all attachments for a case"""
-    return db.query(Attachment).filter(Attachment.case_id == case_id).all()
+def get_attachments_for_case(db: Session, case_id: int):
+    return db.query(Attachment).filter(Attachment.case_id == case_id).order_by(Attachment.uploaded_at.desc()).all()
 
 
-def submit_similarity_feedback(
-    db: Session,
-    user_id: str,
-    candidate_case_id: int,
-    query_signature: str,
-    relevance: bool,
-) -> SimilarityFeedback:
-    """Persist feedback for a similarity search result"""
-    feedback = SimilarityFeedback(
-        user_id=str(user_id),
-        candidate_case_id=candidate_case_id,
-        query_signature=query_signature,
-        relevance=relevance,
-    )
-    db.add(feedback)
+def get_attachments_for_deadline(db: Session, deadline_id: int):
+    return db.query(Attachment).filter(Attachment.deadline_id == deadline_id).order_by(Attachment.uploaded_at.desc()).all()
+
+
+def get_attachment_by_id(db: Session, attachment_id: int):
+    return db.query(Attachment).filter(Attachment.id == attachment_id).first()
+
+
+def delete_attachment(db: Session, attachment_id: int) -> bool:
+    att = db.query(Attachment).filter(Attachment.id == attachment_id).first()
+    if not att:
+        return False
+    db.delete(att)
     db.commit()
-    db.refresh(feedback)
-    return feedback
+    return True
 
 
-def get_similarity_feedback(
-    db: Session,
-    user_id: Optional[str] = None,
-    query_signature: Optional[str] = None,
-    candidate_case_id: Optional[int] = None,
-    limit: int = 100,
-) -> List[SimilarityFeedback]:
-    """Get similarity feedback rows filtered by user, query, or candidate case"""
-    query = db.query(SimilarityFeedback)
+# ==================== Case Timeline Helper Functions ====================
 
-    if user_id is not None:
-        query = query.filter(SimilarityFeedback.user_id == str(user_id))
-    if query_signature is not None:
-        query = query.filter(SimilarityFeedback.query_signature == query_signature)
-    if candidate_case_id is not None:
-        query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
 
-def create_case_comment(
+def create_timeline_event(
     db: Session,
     case_id: int,
-    user_id: int,
-    comment_text: str,
-    parent_comment_id: Optional[int] = None,
-) -> CaseComment:
-    """Create a threaded collaboration comment for a case."""
-    case = db.query(Case).filter(Case.id == case_id, Case.user_id == user_id).first()
-    if not case:
-        raise PermissionError("case_id not found or not owned by the provided user_id")
-
-    if parent_comment_id is not None:
-        parent_comment = db.query(CaseComment).filter(
-            CaseComment.id == parent_comment_id,
-            CaseComment.case_id == case_id,
-        ).first()
-        if not parent_comment:
-            raise ValueError("parent_comment_id is invalid for this case")
-
-    text = (comment_text or "").strip()
-    if not text:
-        raise ValueError("comment_text cannot be empty")
-
-    comment = CaseComment(
+    event_type: str,
+    description: str,
+    event_date: Optional[dt.datetime] = None,
+    metadata: Optional[dict] = None,
+) -> CaseTimeline:
+    """Create a new timeline event"""
+    event = CaseTimeline(
         case_id=case_id,
-        user_id=user_id,
-        parent_comment_id=parent_comment_id,
-        comment_text=text,
+        event_type=event_type,
+        description=description,
+        event_date=event_date or dt.datetime.now(dt.timezone.utc),
+        event_metadata=metadata,
     )
-    db.add(comment)
+    db.add(event)
     db.commit()
-    db.refresh(comment)
-
-    create_timeline_event(
-        db=db,
-        case_id=case_id,
-        event_type="comment_replied" if parent_comment_id else "comment_added",
-        description=text[:240],
-        metadata={
-            "comment_id": comment.id,
-            "parent_comment_id": parent_comment_id,
-        },
-    )
-    return comment
+    db.refresh(event)
+    return event
 
 
-def get_case_comments(db: Session, case_id: int) -> List[CaseComment]:
-    """Get threaded case comments ordered by creation time."""
-    return db.query(CaseComment).filter(
-        CaseComment.case_id == case_id
-    ).order_by(CaseComment.created_at.asc()).all()
-
-
-def upsert_case_presence(
-    db: Session,
-    case_id: int,
-    user_id: int,
-    active_view: Optional[str] = None,
-    cursor_anchor: Optional[str] = None,
-) -> CasePresence:
-    """Mark a collaborator as recently active on a case."""
-    case = db.query(Case).filter(Case.id == case_id, Case.user_id == user_id).first()
-    if not case:
-        raise PermissionError("case_id not found or not owned by the provided user_id")
-
-    presence = db.query(CasePresence).filter(
-        CasePresence.case_id == case_id,
-        CasePresence.user_id == user_id,
-    ).first()
-
-    now = dt.datetime.now(dt.timezone.utc)
-    if presence:
-        presence.active_view = active_view
-        presence.cursor_anchor = cursor_anchor
-        presence.last_seen = now
-    else:
-        presence = CasePresence(
-            case_id=case_id,
-            user_id=user_id,
-            active_view=active_view,
-            cursor_anchor=cursor_anchor,
-            last_seen=now,
-        )
-        db.add(presence)
-
-    db.commit()
-    db.refresh(presence)
-    return presence
-
-
-def get_case_presence(db: Session, case_id: int, active_window_minutes: int = 5) -> List[CasePresence]:
-    """Return collaborators active within a recent time window."""
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=active_window_minutes)
-    return db.query(CasePresence).filter(
-        CasePresence.case_id == case_id,
-        CasePresence.last_seen >= cutoff,
-    ).order_by(CasePresence.last_seen.desc()).all()
+def get_case_timeline(db: Session, case_id: int) -> List[CaseTimeline]:
+    """Get timeline events for a case"""
+    return db.query(CaseTimeline).filter(
+        CaseTimeline.case_id == case_id
+    ).order_by(CaseTimeline.event_date.desc()).all()
 
 
 def get_user_stats(db: Session, user_id: int) -> dict:
     """Get statistics for a user's cases"""
     cases = get_user_cases(db, user_id)
 
+    active_count = len([c for c in cases if c.status == CaseStatus.ACTIVE])
+    appealed_count = len([c for c in cases if c.status == CaseStatus.APPEALED])
+    closed_count = len([c for c in cases if c.status == CaseStatus.CLOSED])
 
+    # Get upcoming deadlines
+    now = dt.datetime.now(dt.timezone.utc)
+    upcoming_deadlines = db.query(CaseDeadline).filter(
+        CaseDeadline.user_id == user_id,
+        CaseDeadline.is_completed == False,
+        CaseDeadline.deadline_date > now,
+    ).count()
 
+    return {
+        "total_cases": len(cases),
+        "active_cases": active_count,
+        "appealed_cases": appealed_count,
+        "closed_cases": closed_count,
+        "upcoming_deadlines": upcoming_deadlines,
+    }

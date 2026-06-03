@@ -5,11 +5,8 @@ Handles text extraction from images and scanned documents using Tesseract
 
 import logging
 import pytesseract
-import cv2
 import numpy as np
-from typing import Dict, Any, Optional, Tuple
-from pathlib import Path
-import re
+from typing import Dict, Any, Optional
 from config import Config
 
 from core.image_processor import ImageProcessor
@@ -479,3 +476,75 @@ def extract_text_from_image(
     ocr = OCREngine()
     result = ocr.extract_text(image, languages, preprocess)
     return result.get('text', '')
+
+
+# Async non-blocking wrappers
+import asyncio
+
+
+async def extract_text_from_image_async(
+    image: np.ndarray,
+    languages: list = ['eng'],
+    preprocess: bool = True
+) -> str:
+    """Async wrapper for quick text extraction that offloads work to a thread.
+
+    This keeps async event-loops responsive when performing OCR using
+    blocking C-extensions like Tesseract and OpenCV.
+    """
+    ocr = OCREngine()
+    result = await asyncio.to_thread(ocr.extract_text, image, languages, preprocess)
+    return result.get('text', '')
+
+
+class AsyncOCREngine(OCREngine):
+    """Provides async equivalents for heavy OCR operations."""
+
+    async def extract_text_async(self, image: np.ndarray, languages: list = ['eng'], preprocess: bool = True, config: Optional[str] = None) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.extract_text, image, languages, preprocess, config)
+
+    async def extract_text_with_layout_async(self, image: np.ndarray, languages: list = ['eng']) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.extract_text_with_layout, image, languages)
+
+    async def extract_handwriting_async(self, image: np.ndarray, languages: list = ['eng']) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.extract_handwriting, image, languages)
+
+    async def batch_process_images_async(self, image_paths: list, languages: list = ['eng'], callback=None) -> list:
+        """Process multiple images concurrently without blocking the event loop.
+
+        It uses a threadpool for CPU-bound image processing and OCR.
+        """
+        loop = asyncio.get_running_loop()
+        tasks = []
+        results = []
+
+        async def _process(path):
+            try:
+                image = await loop.run_in_executor(None, ImageProcessor.load_image, path)
+                if image is None:
+                    return {'file': path, 'success': False, 'error': 'Failed to load image'}
+                res = await asyncio.to_thread(self.extract_text, image, languages)
+                res['file'] = path
+                return res
+            except Exception as e:
+                return {'file': path, 'success': False, 'error': str(e)}
+
+        for path in image_paths:
+            tasks.append(asyncio.create_task(_process(path)))
+
+        for coro in asyncio.as_completed(tasks):
+            r = await coro
+            results.append(r)
+            if callback:
+                try:
+                    callback(len(results), len(image_paths), r)
+                except Exception:
+                    pass
+
+        return results
+
+    async def detect_language_async(self, image: np.ndarray) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.detect_language, image)
+
+    async def improve_ocr_quality_async(self, image: np.ndarray, languages: list = ['eng'], iterations: int = 3) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.improve_ocr_quality, image, languages, iterations)

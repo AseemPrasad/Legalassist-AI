@@ -4,6 +4,7 @@ Generate professional, multilingual PDF case summaries for export and sharing.
 """
 
 import os
+import re
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -17,17 +18,28 @@ from db.crud.audit import record_audit_event
 logger = logging.getLogger(__name__)
 
 
-def _parse_dt(value) -> Optional[datetime]:
-    """Normalize a datetime value (native datetime or ISO string) to datetime."""
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            return None
-    return None
+# Strict phone-number pattern: requires a separator between digit groups or a
+# country-code prefix, avoiding false matches against case numbers, citations, IDs.
+_PHONE_PATTERN = re.compile(
+    r"(?<!\d)"
+    r"(?:"
+    r"\+\d{1,3}[-.\s]\(?\d{1,5}\)?[-.\s]\d{1,5}(?:[-.\s]\d{1,9})?"      # international
+    r"|"
+    r"\(?\d{3,4}\)?[-.\s]\d{3}[-.\s]\d{4}(?:\s*(?:ext|x|xtn)[.\s]*\d+)?"  # domestic / toll-free
+    r")"
+    r"(?!\d)"
+)
 
+
+def redact_phone_numbers(text: str, replacement: str = "[REDACTED]") -> str:
+    """Replace phone numbers in text with a safe placeholder.
+
+    Uses a strict regex that requires area-code or country-code structure,
+    avoiding false matches against case numbers, citations, or IDs.
+    """
+    if not text:
+        return text
+    return _PHONE_PATTERN.sub(replacement, text)
 
 # Constants for PDF styling
 PRIMARY_COLOR = (44, 62, 80)    # Dark Blue
@@ -688,7 +700,7 @@ def generate_anonymized_pdf(
                 pdf.cell(0, 7, f"Type: {doc.document_type.value}", 0, 1)
                 if doc.summary:
                     pdf.safe_set_font(pdf.main_font, '', 10)
-                    pdf.multi_cell(0, 5, doc.summary)
+                    pdf.multi_cell(0, 5, redact_phone_numbers(doc.summary))
                 pdf.ln(3)
         else:
             pdf.chapter_body("No associated documents for review.")
@@ -746,3 +758,17 @@ def generate_anonymized_pdf(
         return None
     finally:
         db.close()
+
+
+def calculate_optimal_font_size(text: str, container_width: float, max_font_size: float = 12.0) -> float:
+    """
+    Dynamically scales down the font size for longer table headers 
+    to prevent text wrapping and clipping in PDF generation.
+    """
+    estimated_char_width = 6.0
+    text_length = len(text)
+    required_width = text_length * estimated_char_width
+    if required_width > container_width:
+        ratio = container_width / required_width
+        return max(6.0, min(max_font_size, max_font_size * ratio))
+    return max_font_size

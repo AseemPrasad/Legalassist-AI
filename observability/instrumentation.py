@@ -30,9 +30,17 @@ try:
     from opentelemetry.sdk.resources import SERVICE_NAME, Resource
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.instrumentation.flask import FlaskInstrumentor
+    try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    except Exception:
+        FastAPIInstrumentor = None
     from opentelemetry.instrumentation.requests import RequestsInstrumentor
     from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
     from opentelemetry.instrumentation.redis import RedisInstrumentor
+    try:
+        from opentelemetry.instrumentation.celery import CeleryInstrumentor
+    except Exception:
+        CeleryInstrumentor = None
 except ModuleNotFoundError:  # pragma: no cover - optional in some environments
     trace = None
     metrics = None
@@ -638,6 +646,34 @@ def initialize_observability():
     # Setup distributed tracing
     global tracer
     tracer = setup_jaeger_tracing()
+    # Auto-instrument common libraries when opentelemetry instrumentations are available
+    try:
+        if RequestsInstrumentor is not None:
+            RequestsInstrumentor().instrument()
+            log.info("requests_instrumented")
+    except Exception as e:
+        log.warning("requests_instrumentation_failed", error=str(e))
+
+    try:
+        if SQLAlchemyInstrumentor is not None:
+            SQLAlchemyInstrumentor().instrument()
+            log.info("sqlalchemy_instrumented")
+    except Exception as e:
+        log.warning("sqlalchemy_instrumentation_failed", error=str(e))
+
+    try:
+        if RedisInstrumentor is not None:
+            RedisInstrumentor().instrument()
+            log.info("redis_instrumented")
+    except Exception as e:
+        log.warning("redis_instrumentation_failed", error=str(e))
+
+    try:
+        if CeleryInstrumentor is not None:
+            CeleryInstrumentor().instrument()
+            log.info("celery_instrumented")
+    except Exception as e:
+        log.warning("celery_instrumentation_failed", error=str(e))
     
     # Start Prometheus metrics server
     metrics_port = int(os.getenv("PROMETHEUS_METRICS_PORT", "9090"))

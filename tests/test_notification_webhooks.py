@@ -11,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 from twilio.request_validator import RequestValidator
 
 import api.main as api_main
+from api.routes import notifications as notification_routes
 from config import Config
 from database import get_db
 from db.base import Base
@@ -169,3 +170,31 @@ def test_sendgrid_webhook_marks_notification_failed(client, test_db):
     assert refreshed.failed_at is not None
     assert "Bounced Address" in (refreshed.error_message or "")
     assert refreshed.delivered_at is None
+
+
+def test_twilio_payload_parser_maps_delivery_status_and_message_id_candidates():
+    payload = "MessageSid=SM123&MessageStatus=delivered&ErrorCode=&SmsStatus=delivered"
+
+    params = notification_routes._parse_twilio_webhook_payload(payload)
+
+    assert params["MessageSid"] == "SM123"
+    assert notification_routes._twilio_status_to_notification_status(params["MessageStatus"]) == NotificationStatus.DELIVERED
+    candidates = notification_routes._message_id_candidates("<SM123.test@example.com>")
+    assert candidates[0] == "SM123.test@example.com"
+    assert "SM123" in candidates
+
+
+def test_sendgrid_payload_parser_normalizes_single_event_and_failure_status():
+    payload = json.dumps(
+        {
+            "event": "bounce",
+            "sg_message_id": "msg-123.filterdrecv-1.0",
+            "reason": "Mailbox unavailable",
+        }
+    )
+
+    events = notification_routes._parse_sendgrid_webhook_payload(payload)
+
+    assert len(events) == 1
+    assert events[0]["sg_message_id"] == "msg-123.filterdrecv-1.0"
+    assert notification_routes._sendgrid_event_to_notification_status(events[0]["event"]) == NotificationStatus.FAILED

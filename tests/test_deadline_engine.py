@@ -1,4 +1,4 @@
-from core.deadline_engine import calculate_deadline
+from core.deadline_engine import calculate_deadline, get_deadline_first_action
 from datetime import datetime
 
 
@@ -33,3 +33,14 @@ def test_timezone_preserved_and_emergency_extension():
     assert res["deadline"].endswith("-04:00") or res["deadline"].endswith("-05:00")
     # emergency extension applied
     assert res["components"]["emergency_extension_days"] == 2
+
+
+def test_get_deadline_first_action_is_deterministic():
+    assert get_deadline_first_action("appeal") == "File appeal memo"
+    assert get_deadline_first_action("filing") == "Gather filing documents"
+    assert get_deadline_first_action("submission") == "Prepare and submit the required filing"
+    assert get_deadline_first_action("response") == "Draft the response and review supporting records"
+    assert get_deadline_first_action("hearing") == "Consult counsel and prepare the hearing bundle"
+    assert get_deadline_first_action("order") == "Review the order and confirm the next step"
+    assert get_deadline_first_action("manual") == "Review the deadline details and plan the next step"
+    assert get_deadline_first_action(None) == "Review the deadline details and plan the next step"

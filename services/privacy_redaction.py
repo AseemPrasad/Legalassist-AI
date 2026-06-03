@@ -18,7 +18,7 @@ DEFAULT_PRIVACY_PROFILE = "personal_identifiers"
 PRIVACY_PROFILES_ENV = "PRIVACY_REDACTION_PROFILES_JSON"
 
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-PHONE_PATTERN = re.compile(r"(?:(?:\+?\d[\d\s().-]{6,}\d))")
+PHONE_PATTERN = re.compile(r"(?:(?:\+\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})")
 
 DEFAULT_PRIVACY_PROFILES: Dict[str, Dict[str, Any]] = {
     "personal_identifiers": {
@@ -205,6 +205,13 @@ def apply_privacy_profile(
     export_meta = result.setdefault("export", {})
     export_meta["privacy_profile"] = normalize_privacy_profile(profile_name)
     export_meta["privacy_profile_label"] = profile.get("label", export_meta["privacy_profile"])
+
+    if "case_number" in export_meta:
+        export_meta["case_number"] = _redact_case_identifier(
+            export_meta.get("case_number"),
+            anonymized_id,
+            profile,
+        )
 
     case_section = result.get("case")
     if isinstance(case_section, dict):
