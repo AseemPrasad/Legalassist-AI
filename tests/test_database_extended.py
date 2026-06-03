@@ -2,7 +2,7 @@
 import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 from database import (
@@ -16,6 +16,8 @@ from database import (
     CaseStatus,
     DocumentType,
     CaseDocument,
+    NotificationLog,
+    RevokedToken,
     init_db,
     create_case_record,
     update_case_outcome,
@@ -30,6 +32,9 @@ from database import (
     get_pending_otp,
     mark_otp_as_used,
     cleanup_expired_otps,
+    revoke_token,
+    cleanup_expired_revoked_tokens,
+    is_token_revoked,
     create_case,
     get_user_cases,
     get_case_by_id,
@@ -37,7 +42,17 @@ from database import (
     update_case_status,
     delete_case,
     create_case_document,
+    create_timeline_event,
+    create_case_deadline,
+    get_user_deadlines,
+    get_upcoming_deadlines,
 )
+
+
+@pytest.fixture(autouse=True)
+def disable_otp_rate_limiter(monkeypatch):
+    monkeypatch.setattr("db.otp_service._reserve_otp_rate_limit_slot", lambda *args, **kwargs: True)
+    monkeypatch.setattr("database._reserve_otp_rate_limit_slot", lambda *args, **kwargs: 1)
 
 @pytest.fixture(scope="function")
 def test_db():
@@ -95,6 +110,58 @@ class TestDatabaseExtended:
         
         results = get_cases_by_criteria(test_db, jurisdiction="Mumbai")
         assert len(results) == 0
+
+    def test_deadline_queries_handle_naive_datetimes(self, test_db):
+        """Test deadline comparisons and ordering when stored values are naive."""
+        now = datetime.now(timezone.utc)
+
+        case1 = Case(
+            user_id=1,
+            case_number="CASE-NAIVE-1",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case Naive 1",
+        )
+        case2 = Case(
+            user_id=1,
+            case_number="CASE-NAIVE-2",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case Naive 2",
+        )
+        test_db.add_all([case1, case2])
+        test_db.commit()
+        test_db.refresh(case1)
+        test_db.refresh(case2)
+
+        deadline_one = create_case_deadline(
+            test_db,
+            1,
+            case1.id,
+            "Case Naive 1",
+            now + timedelta(days=8),
+            "appeal",
+        )
+        deadline_two = create_case_deadline(
+            test_db,
+            1,
+            case2.id,
+            "Case Naive 2",
+            now + timedelta(days=18),
+            "filing",
+        )
+
+        deadline_one.deadline_date = deadline_one.deadline_date.replace(tzinfo=None)
+        deadline_two.deadline_date = deadline_two.deadline_date.replace(tzinfo=None)
+        test_db.commit()
+
+        upcoming = get_upcoming_deadlines(test_db, days_before=30)
+        assert [deadline.id for deadline in upcoming] == [deadline_one.id, deadline_two.id]
+
+        user_deadlines = get_user_deadlines(test_db, 1)
+        assert [deadline.id for deadline in user_deadlines] == [deadline_one.id, deadline_two.id]
 
     def test_case_outcome_operations(self, test_db):
         """Test CaseOutcome updates"""
@@ -177,10 +244,86 @@ class TestDatabaseExtended:
         assert success == True
         assert get_case_by_id(test_db, case.id) is None
 
+    def test_create_timeline_event(self, test_db):
+        """Timeline events should be created without leaking document helper state."""
+        user = create_user(test_db, "timeline@example.com")
+        case = create_case(test_db, user.id, "CASE-TL-001", "civil", "Delhi")
+
+        event = create_timeline_event(
+            test_db,
+            case.id,
+            "status_changed",
+            "Case moved to hearing stage",
+            metadata={"previous_status": "filed", "new_status": "hearing"},
+        )
+
+        assert event.case_id == case.id
+        assert event.event_type == "status_changed"
+        assert event.description == "Case moved to hearing stage"
+        assert event.event_metadata == {"previous_status": "filed", "new_status": "hearing"}
+        assert event.id is not None
+
     def test_init_db(self):
         """Test database initialization (schema creation)"""
         # This just ensures metadata.create_all doesn't crash
         init_db()
+
+    def test_init_db_creates_notification_status_index(self, monkeypatch):
+        """init_db should create the NotificationLog.status index for existing databases."""
+        from database import Base, NotificationLog, init_db
+
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+
+        with engine.begin() as connection:
+            connection.exec_driver_sql("DROP INDEX IF EXISTS ix_notification_logs_status")
+
+        index_names_before = {index["name"] for index in inspect(engine).get_indexes(NotificationLog.__tablename__)}
+        assert "ix_notification_logs_status" not in index_names_before
+
+        monkeypatch.setattr("db.session.engine", engine)
+        init_db()
+
+        index_names_after = {index["name"] for index in inspect(engine).get_indexes(NotificationLog.__tablename__)}
+        assert "ix_notification_logs_status" in index_names_after
+
+    def test_update_case_document_success_and_failure(self, test_db):
+        """Test update_case_document database persistence and error fallback rollback"""
+        from database import update_case_document as db_shim_update
+        from db.case_service import update_case_document as service_update
+        
+        user = create_user(test_db, "doc_test@example.com")
+        case = create_case(test_db, user.id, "CASE-DOC-001", "civil", "Delhi")
+        doc = create_case_document(test_db, case.id, DocumentType.JUDGMENT, user.id, "Original Content")
+        
+        # Test success using service_update
+        updated = service_update(
+            test_db, doc.id, document_content="Updated Content By Service", summary="New Summary"
+        )
+        assert updated is not None
+        assert updated.document_content == "Updated Content By Service"
+        assert updated.summary == "New Summary"
+        
+        # Test success using db_shim_update
+        updated_shim = db_shim_update(
+            test_db, doc.id, document_content="Updated Content By Shim", summary="New Shim Summary"
+        )
+        assert updated_shim is not None
+        assert updated_shim.document_content == "Updated Content By Shim"
+        assert updated_shim.summary == "New Shim Summary"
+        
+        # Test rollback on commit failure (by mocking db.commit to raise an exception)
+        original_commit = test_db.commit
+        def mock_commit():
+            raise Exception("Mock DB Commit Error")
+        test_db.commit = mock_commit
+        
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                db_shim_update(test_db, doc.id, document_content="Should Fail")
+            assert "Database write failed" in str(exc_info.value)
+        finally:
+            test_db.commit = original_commit
 
 
 class TestAutoDeadlineDeduplication:
@@ -205,6 +348,16 @@ class TestAutoDeadlineDeduplication:
             description="Pre-existing appeal deadline",
         )
         test_db.add(existing)
+        test_db.flush()
+
+        from database import CaseTimeline
+        event = CaseTimeline(
+            case_id=99,
+            event_type="deadline_created",
+            description="Appeal deadline set based on document analysis",
+            event_metadata={"source_days": 30, "document_id": 42}
+        )
+        test_db.add(event)
         test_db.commit()
         test_db.refresh(existing)
 

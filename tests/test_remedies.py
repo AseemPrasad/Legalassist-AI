@@ -15,6 +15,8 @@ from core.app_utils import (
     LANGUAGES,
     DEFAULT_MODEL,
 )
+from datetime import datetime, timezone, timedelta
+from freezegun import freeze_time
 
 
 # ==================== MOCK FIXTURES ====================
@@ -180,6 +182,52 @@ REMEDIES_FIXTURES = {
     7. Important deadline
     Appeal within 30 days; physical eviction could begin anytime after 3 months.
     """,
+    
+    "consumer_complaint_dismissed": """
+    1. What happened?
+    Your consumer complaint against the e-commerce company was dismissed for lack of evidence.
+    
+    2. Can the loser appeal?
+    Yes, you can appeal to the State Consumer Disputes Redressal Commission.
+    
+    3. Appeal timeline
+    45 days from the receipt of the order.
+    
+    4. Appeal court
+    State Consumer Commission (SCDRC)
+    
+    5. Cost estimate
+    ₹2,000-₹5,000 (nominal fees for consumer courts).
+    
+    6. First action
+    Gather missing evidence and draft the appeal memorandum.
+    
+    7. Important deadline
+    45 days is the limit; beyond this, condonation of delay is difficult.
+    """,
+    
+    "motor_accident_compensation": """
+    1. What happened?
+    MACT awarded you ₹12,00,000 compensation for the road accident.
+    
+    2. Can the loser appeal?
+    Yes, the insurance company can appeal to the High Court if they find the award excessive.
+    
+    3. Appeal timeline
+    90 days from the date of the award.
+    
+    4. Appeal court
+    High Court (Appellate Jurisdiction)
+    
+    5. Cost estimate
+    ₹15,000-₹40,000 for legal representation.
+    
+    6. First action
+    Verify if the insurance company has deposited the award amount.
+    
+    7. Important deadline
+    90 days is the window for the insurer to contest; monitor High Court filings.
+    """,
 }
 
 REMEDIES_EDGE_CASES = {
@@ -300,7 +348,11 @@ class TestRemediesParsingWithFixtures:
         remedies = parse_remedies_response(response_text)
         
         assert isinstance(remedies, dict), f"{fixture_name}: should return dict"
-        assert all(isinstance(v, str) for k, v in remedies.items() if not k.startswith("_")), \
+        assert all(
+            isinstance(v, str)
+            for k, v in remedies.items()
+            if k not in {"confidence_score", "evidence_spans"} and not k.startswith("_")
+        ), \
             f"{fixture_name}: all data values should be strings"
     
     def test_criminal_guilty_parsing(self, mock_remedies_response):
@@ -524,6 +576,252 @@ class TestRemediesPerformance:
             remedies = parse_remedies_response(response)
             assert isinstance(remedies, dict)
             assert remedies is not None
+
+
+# ==================== DEADLINE INTEGRATION TESTS (FREEZEGUN) ====================
+
+# Fixed timestamp for deterministic testing
+# This ensures that all deadline calculations are compared against a known start point,
+# eliminating flakiness caused by tests running at different system times.
+FIXED_NOW = datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
+
+class TestRemediesDeadlineIntegration:
+    """
+    Integration tests for deadline calculation logic.
+    Uses freezegun to ensure all time-based comparisons are deterministic.
+    """
+
+    @pytest.fixture
+    def mock_db_session(self):
+        """Mock SQLAlchemy session for deadline tests"""
+        session = MagicMock()
+        # Mock the query chain for duplicate checking
+        session.query.return_value.filter.return_value.first.return_value = None
+        return session
+
+    @freeze_time(FIXED_NOW)
+    def test_deadline_calculation_logic(self, mock_db_session):
+        """
+        Test that _auto_create_deadlines_from_remedies calculates the 
+        correct date relative to the current fixed time.
+        """
+        from case_manager import _auto_create_deadlines_from_remedies
+        
+        # Mock remedies with a 30-day appeal window
+        remedies = {
+            "appeal_days": "30",
+            "appeal_court": "High Court"
+        }
+        
+        # Call the internal function
+        _auto_create_deadlines_from_remedies(
+            db=mock_db_session,
+            user_id=1,
+            case_id=101,
+            case_title="Test Case",
+            remedies=remedies,
+            document_id=501
+        )
+        
+        # Expected deadline: FIXED_NOW + 30 days
+        expected_date = FIXED_NOW + timedelta(days=30)
+        
+        # Verify CaseDeadline was created with the correct date
+        mock_db_session.add.assert_called_once()
+        created_deadline = mock_db_session.add.call_args[0][0]
+        
+        assert created_deadline.deadline_date == expected_date
+        assert created_deadline.deadline_type == "appeal"
+        assert "High Court" in created_deadline.description
+
+    @freeze_time(FIXED_NOW)
+    def test_deadline_parsing_from_various_formats(self, mock_db_session):
+        """
+        Test that the system can handle different 'days' formats 
+        and still calculate the correct deadline date.
+        """
+        from case_manager import _auto_create_deadlines_from_remedies
+        
+        test_cases = [
+            ("15 days", 15),
+            ("90", 90),
+            ("Appeal within 60 days", 60),
+            ("365 days of judgment", 365)
+        ]
+        
+        for input_text, expected_days in test_cases:
+            mock_db_session.reset_mock()
+            remedies = {"appeal_days": input_text}
+            
+            _auto_create_deadlines_from_remedies(
+                db=mock_db_session,
+                user_id=1,
+                case_id=101,
+                case_title="Test",
+                remedies=remedies,
+                document_id=1
+            )
+            
+            expected_date = FIXED_NOW + timedelta(days=expected_days)
+            created_deadline = mock_db_session.add.call_args[0][0]
+            assert created_deadline.deadline_date == expected_date, f"Failed for {input_text}"
+
+    @freeze_time(FIXED_NOW)
+    def test_duplicate_deadline_prevention(self, mock_db_session):
+        """
+        Test that the system prevents duplicate deadlines using the 
+        ±1 day tolerance logic, with a deterministic base time.
+        """
+        from case_manager import _auto_create_deadlines_from_remedies
+        from database import CaseDeadline
+        
+        # Setup: Mock an existing deadline within the tolerance window
+        existing_deadline = MagicMock(spec=CaseDeadline)
+        existing_deadline.id = 999
+        existing_deadline.deadline_date = FIXED_NOW + timedelta(days=30)
+        
+        mock_db_session.query.return_value.filter.return_value.first.return_value = existing_deadline
+        
+        remedies = {"appeal_days": "30"}
+        
+        # This should return early without creating a new deadline
+        _auto_create_deadlines_from_remedies(
+            db=mock_db_session,
+            user_id=1,
+            case_id=101,
+            case_title="Test",
+            remedies=remedies,
+            document_id=1
+        )
+        
+        # Verify add was NOT called
+        assert mock_db_session.add.call_count == 0
+
+    @freeze_time(FIXED_NOW)
+    def test_invalid_days_extraction_handled_gracefully(self, mock_db_session):
+        """
+        Test that non-numeric or extremely long deadlines don't 
+        crash the system or create invalid data.
+        """
+        from case_manager import _auto_create_deadlines_from_remedies
+        
+        invalid_remedies = [
+            {"appeal_days": "unknown"},
+            {"appeal_days": "500"}, # Exceeds 365 max
+            {"appeal_days": ""},
+            {"appeal_days": None}
+        ]
+        
+        for remedies in invalid_remedies:
+            mock_db_session.reset_mock()
+            _auto_create_deadlines_from_remedies(
+                db=mock_db_session,
+                user_id=1,
+                case_id=101,
+                case_title="Test",
+                remedies=remedies,
+                document_id=1
+            )
+            assert mock_db_session.add.call_count == 0
+
+    @freeze_time(FIXED_NOW)
+    def test_deadline_description_generation(self, mock_db_session):
+        """Test that the description properly includes the court name"""
+        from case_manager import _auto_create_deadlines_from_remedies
+        
+        remedies = {
+            "appeal_days": "45",
+            "appeal_court": "Supreme Court of India"
+        }
+        
+        _auto_create_deadlines_from_remedies(
+            db=mock_db_session,
+            user_id=1,
+            case_id=1,
+            case_title="T",
+            remedies=remedies,
+            document_id=1
+        )
+        
+        created = mock_db_session.add.call_args[0][0]
+        assert "Supreme Court of India" in created.description
+
+
+# ==================== ADVANCED SCENARIO TESTS ====================
+
+class TestRemediesAdvancedScenarios:
+    """Test complex scenarios involving multiple components"""
+
+    def test_remedies_extraction_with_ambiguous_text(self):
+        """Test parsing when judgment text contains multiple numbers"""
+        ambiguous_response = """
+        1. What happened?
+        Judgment for ₹5,00,000.
+        2. Can appeal?
+        Yes.
+        3. Appeal timeline
+        The court gave 10 days for stay but 30 days for appeal.
+        4. Appeal court
+        High Court
+        5. Cost
+        5000
+        6. Action
+        Appeal
+        7. Deadline
+        30 days
+        """
+        remedies = parse_remedies_response(ambiguous_response)
+        # Should pick the first valid number in the timeline section
+        # or the most prominent one. Our parser uses _extract_number which
+        # usually finds the first sequence.
+        assert remedies["appeal_days"] in ["10", "30"]
+
+    def test_remedies_with_non_standard_language_output(self):
+        """Test that parser handles non-English numbers or characters gracefully"""
+        hindi_response = """
+        1. क्या हुआ?
+        निर्णय पक्ष में है।
+        2. अपील?
+        हाँ
+        3. समय
+        30 दिन
+        4. न्यायालय
+        उच्च न्यायालय
+        5. लागत
+        5000
+        6. कार्रवाई
+        अपील करें
+        7. समय सीमा
+        30 दिन
+        """
+        remedies = parse_remedies_response(hindi_response)
+        # Note: _extract_number only works for Latin digits
+        # If the LLM uses Devanagari digits, it might fail, which is a known limitation
+        assert remedies["what_happened"] is not None
+
+    @patch("case_manager._timeline_service.create_event")
+    @freeze_time(FIXED_NOW)
+    def test_full_workflow_timeline_linkage(self, mock_create_event, mock_db_session):
+        """Verify that creating a deadline also triggers a timeline event with correct metadata"""
+        from case_manager import _auto_create_deadlines_from_remedies
+        
+        remedies = {"appeal_days": "20", "appeal_court": "Session Court"}
+        
+        _auto_create_deadlines_from_remedies(
+            db=mock_db_session,
+            user_id=1,
+            case_id=10,
+            case_title="Title",
+            remedies=remedies,
+            document_id=99
+        )
+        
+        # Verify timeline event creation
+        mock_create_event.assert_called_once()
+        args, kwargs = mock_create_event.call_args
+        assert kwargs["event_type"] == "deadline_created"
+        assert "20" in str(kwargs["metadata"]["source_days"])
+        assert kwargs["metadata"]["document_id"] == 99
 
 
 if __name__ == "__main__":
