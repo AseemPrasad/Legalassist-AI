@@ -190,7 +190,57 @@ def _open_checkpoint(path: Path) -> Generator[object, None, None]:
             except OSError:
                 pass
 
-
+def extract_metadata_command(args: argparse.Namespace) -> int:
+    """
+    'extract-metadata' command — extract metadata from a judgment.
+    
+    Returns:
+        0 on success, 1 on failure.
+    """
+    from pathlib import Path
+    from document_parser import extract_metadata
+    import json
+    
+    file_path = Path(args.file)
+    if not file_path.exists():
+        raise CLIError(f"File not found: {file_path}")
+    
+    LOGGER.info("extract_metadata_start", file=str(file_path))
+    
+    # Extract metadata
+    metadata = extract_metadata(
+        file_path,
+        enable_llm=args.enable_llm,
+        enable_ocr=args.enable_ocr,
+    )
+    
+    # Format output
+    result = {
+        "file": str(file_path),
+        "metadata": metadata.to_dict(),
+    }
+    
+    output_json = json.dumps(result, ensure_ascii=False, indent=2)
+    
+    # Save to file if specified
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        if output_path.suffix.lower() == '.json':
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(output_json)
+            LOGGER.info("wrote_metadata", path=str(output_path), format="json")
+        else:
+            # Default to JSON
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(output_json)
+            LOGGER.info("wrote_metadata", path=str(output_path), format="json")
+    else:
+        # Print to stdout
+        print(output_json)
+    
+    return 0
 def _fsync_record(fh: object, record: dict) -> None:  # type: ignore[type-arg]
     """Append *record* as a JSON line and sync to disk."""
     fh.write(json.dumps(record, ensure_ascii=False) + "\n")  # type: ignore[union-attr]
@@ -510,7 +560,31 @@ def build_parser() -> argparse.ArgumentParser:
         ("process_batch", "Alias for 'batch'."),
     ]:
         _add_batch_args(subs.add_parser(name, parents=[common], help=help_text))
-
+    # ── extract-metadata (metadata extraction) ───────────────────────────────────
+    p_metadata = subs.add_parser(
+        "extract-metadata",
+        help="Extract metadata from a judgment document.",
+    )
+    p_metadata.add_argument(
+        "--file",
+        required=True,
+        help="Path to the judgment PDF or text file.",
+    )
+    p_metadata.add_argument(
+        "--enable-llm",
+        action="store_true",
+        help="Use LLM for additional metadata extraction.",
+    )
+    p_metadata.add_argument(
+        "--enable-ocr",
+        action="store_true",
+        help="Enable OCR for scanned documents.",
+    )
+    p_metadata.add_argument(
+        "--output",
+        help="Output file path (JSON or CSV). If omitted, output to stdout.",
+    )
+    p_metadata.set_defaults(func=extract_metadata_command)
     return parser
 
 

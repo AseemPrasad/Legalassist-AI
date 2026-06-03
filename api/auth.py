@@ -31,6 +31,17 @@ from api.jwt_auth import (
 
 # Canonical exceptions are imported from api.jwt_auth above
 
+# Import shared JWT exception hierarchy and utilities from the canonical module.
+# Do NOT redefine AuthError, TokenExpiredError, or InvalidTokenError here —
+# redefining them would shadow these imports and break exception handling because
+# verify_token() raises the jwt_auth classes, not any locally defined ones.
+from api.jwt_auth import (
+    AuthError,
+    TokenExpiredError,
+    InvalidTokenError,
+    create_access_token,
+    verify_token,
+)
 
 settings = get_settings()
 security = HTTPBearer(auto_error=False)
@@ -239,7 +250,6 @@ async def get_current_user(
             return _resolve_api_key_user(api_key, db)
         finally:
             db.close()
-
     # Try X-API-Key header
     
     raise HTTPException(

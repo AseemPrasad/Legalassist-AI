@@ -104,6 +104,7 @@ from notifications.reminder_engine import (
     is_reminder_time_for_user,
 )
 from notification_service import NotificationService
+from api.idempotency import IdempotencyManager
 from core.log_redaction import mask_recipient, sanitize_log_text, sanitize_log_value
 
 # This module is imported by app.py, which handles logging configuration
@@ -140,6 +141,7 @@ class _LazyNotificationService:
 
 
 notification_service = _LazyNotificationService()
+notification_dispatch_idempotency = IdempotencyManager()
 
 
 def get_notification_service() -> NotificationService:
@@ -217,8 +219,37 @@ def _shutdown_scheduler_instance(scheduler, *, wait: bool = True):
 
 def _send_deadline_reminders_safe(db, deadline, user_preference, days_left):
     """Send reminders for one deadline and isolate notification service failures."""
+    operation_key = IdempotencyManager.build_operation_key(
+        operation="deadline_reminder_dispatch",
+        principal=str(getattr(deadline, "user_id", "unknown")),
+        parts=[
+            f"deadline:{getattr(deadline, 'id', 'unknown')}",
+            f"days_left:{days_left}",
+            f"channel:{getattr(user_preference, 'notification_channel', 'unknown')}",
+        ],
+    )
+    if not notification_dispatch_idempotency.acquire(operation_key, ttl=15 * 60):
+        logger.info(
+            "scheduler_reminder_dispatch_skipped",
+            deadline_id=getattr(deadline, "id", None),
+            user_id=getattr(deadline, "user_id", None),
+            days_left=days_left,
+        )
+        return []
+
     try:
-        return notification_service.send_reminders(db, deadline, user_preference, days_left)
+        results = notification_service.send_reminders(db, deadline, user_preference, days_left)
+        notification_dispatch_idempotency.mark_completed(
+            operation_key,
+            {
+                "deadline_id": getattr(deadline, "id", None),
+                "user_id": getattr(deadline, "user_id", None),
+                "days_left": days_left,
+                "sent_count": len(results),
+            },
+            ttl=24 * 60 * 60,
+        )
+        return results
     except Exception as exc:
         logger.error(
             "scheduler_notification_dispatch_failed",
@@ -229,6 +260,8 @@ def _send_deadline_reminders_safe(db, deadline, user_preference, days_left):
             exc_info=True,
         )
         return []
+    finally:
+        notification_dispatch_idempotency.release_lock(operation_key)
 
 
 # Reminder time logic moved to notifications.reminder_engine.build_reminder_jobs
@@ -292,6 +325,8 @@ def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], boo
     - Lock acquisition status is logged for observability.
 
     """
+
+    sent_count = 0
 
     lock_id = f"{_instance_id}:{os.getpid()}"
     with distributed_lock(LOCK_KEY, LOCK_TTL_SECONDS, lock_id) as has_lock:

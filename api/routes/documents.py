@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from api.models import DocumentAnalysisRequest, DocumentAnalysisSummary, AnalysisJobResponse
 from api.auth import get_current_user, CurrentUser
 from api.dependencies import get_db_rls
+from api.limiter import RateLimit
 from db.models.cases import Attachment
 
 try:
@@ -90,7 +91,8 @@ def validate_file_path(file_path: str) -> str:
     "/document",
     response_model=AnalysisJobResponse,
     summary="Analyze document asynchronously",
-    description="Upload or provide document text for analysis. Returns immediately with job ID."
+    description="Upload or provide document text for analysis. Returns immediately with job ID.",
+    dependencies=[Depends(RateLimit(requests=10, window=300))],
 )
 async def analyze_document(
     request: DocumentAnalysisRequest,
@@ -263,7 +265,8 @@ async def cancel_analysis(
     "/upload",
     response_model=AnalysisJobResponse,
     summary="Upload document file for analysis",
-    description="Upload a PDF, Word, or text file for legal analysis."
+    description="Upload a PDF, Word, or text file for legal analysis.",
+    dependencies=[Depends(RateLimit(requests=5, window=300))],
 )
 async def upload_document_file(
     http_request: Request,

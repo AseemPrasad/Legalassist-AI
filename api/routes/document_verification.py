@@ -3,7 +3,7 @@ import os
 import logging
 
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from core.blockchain_sim import BlockchainSimulator
 from core.document_verifier import register_document, verify_document
@@ -13,6 +13,8 @@ from api.validation import decode_base64_safe
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["document_verification"])
+
+_MAX_BASE64_BYTES = 10 * 1024 * 1024  # 10 MB
 
 # Use Redis-backed blockchain so all workers share the same chain.
 _redis_url = os.environ.get("REDIS_URL") or ""
@@ -29,9 +31,23 @@ class RegisterRequest(BaseModel):
     file_base64: str
     filename: str = "document"
 
+    @field_validator("file_base64")
+    @classmethod
+    def _limit_base64_size(cls, v: str) -> str:
+        if len(v) > _MAX_BASE64_BYTES:
+            raise ValueError(f"file_base64 exceeds maximum size of {_MAX_BASE64_BYTES} bytes")
+        return v
+
 
 class VerifyRequest(BaseModel):
     file_base64: str
+
+    @field_validator("file_base64")
+    @classmethod
+    def _limit_base64_size(cls, v: str) -> str:
+        if len(v) > _MAX_BASE64_BYTES:
+            raise ValueError(f"file_base64 exceeds maximum size of {_MAX_BASE64_BYTES} bytes")
+        return v
 
 
 @router.post("/documents/register")

@@ -48,6 +48,7 @@ from analytics_engine import AnalyticsAggregator
 from database import init_db, SessionLocal, db_session, CaseRecord
 from db.models import DocumentType
 from config import Config
+from database import init_db
 Config.validate_runtime_security()
 init_db()
 
@@ -161,6 +162,138 @@ def render_localized_legal_help(ui_text=None):
                 )
         else:
             st.write("No NGO records available.")
+
+# ==================== WebSocket Progress Listener ====================
+
+import threading
+import json
+import time
+try:
+    import websocket
+    _WEBSOCKET_AVAILABLE = True
+except ImportError:
+    _WEBSOCKET_AVAILABLE = False
+
+
+class JobProgressListener:
+    """Background WebSocket listener for job progress updates."""
+
+    def __init__(self, job_id: str, api_base_url: str, token: str):
+        self.job_id = job_id
+        self.api_base_url = api_base_url.replace("https://", "wss://").replace("http://", "ws://")
+        self.token = token
+        self.events: list = []
+        self._closed = False
+        self._thread: Optional[threading.Thread] = None
+        self._ws: Optional[websocket.WebSocketApp] = None
+
+    def _on_message(self, ws, message):
+        try:
+            data = json.loads(message)
+            self.events.append(data)
+        except json.JSONDecodeError:
+            pass
+
+    def _on_error(self, ws, error):
+        self.events.append({"event": "error", "error": str(error)})
+
+    def _on_close(self, ws, close_status_code, close_msg):
+        self._closed = True
+
+    def _on_open(self, ws):
+        self.events.append({"event": "connected"})
+
+    def start(self):
+        if not _WEBSOCKET_AVAILABLE:
+            return
+        ws_url = f"{self.api_base_url}/ws/jobs/{self.job_id}/progress?token={self.token}"
+        self._ws = websocket.WebSocketApp(
+            ws_url,
+            on_open=self._on_open,
+            on_message=self._on_message,
+            on_error=self._on_error,
+            on_close=self._on_close,
+        )
+        self._thread = threading.Thread(target=self._ws.run_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._ws:
+            self._ws.close()
+        self._closed = True
+
+    def get_latest_progress(self) -> int:
+        for ev in reversed(self.events):
+            if "progress" in ev:
+                return ev["progress"]
+        return 0
+
+    def is_completed(self) -> bool:
+        for ev in reversed(self.events):
+            if ev.get("event") in ("completed", "failed"):
+                return True
+        return self._closed
+
+    def get_terminal_event(self) -> Optional[dict]:
+        for ev in reversed(self.events):
+            if ev.get("event") in ("completed", "failed"):
+                return ev
+        return None
+
+
+def render_job_progress(job_id: str, api_base_url: str, token: str):
+    """Render a live progress bar using WebSocket events."""
+    if not _WEBSOCKET_AVAILABLE:
+        st.warning("Real-time progress unavailable (websocket-client not installed).")
+        return None
+
+    listener_key = f"ws_listener_{job_id}"
+    if listener_key not in st.session_state:
+        listener = JobProgressListener(job_id, api_base_url, token)
+        listener.start()
+        st.session_state[listener_key] = listener
+        time.sleep(0.5)  # Let connection establish
+
+    listener = st.session_state[listener_key]
+    progress = listener.get_latest_progress()
+
+    # Map stage names to user-friendly labels
+    stage_labels = {
+        "text_extraction": "Extracting document text...",
+        "summarization": "Analyzing legal content...",
+        "remedy_extraction": "Identifying remedies & deadlines...",
+        "finalization": "Finalizing results...",
+        "analysis": "Processing document...",
+    }
+
+    latest_stage = "analysis"
+    for ev in reversed(listener.events):
+        if ev.get("stage"):
+            latest_stage = ev["stage"]
+            break
+
+    stage_label = stage_labels.get(latest_stage, "Processing...")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.progress(progress / 100.0, text=stage_label)
+    with col2:
+        st.markdown(f"**{progress}%**")
+
+    if listener.is_completed():
+        terminal = listener.get_terminal_event()
+        if terminal and terminal.get("event") == "failed":
+            st.error(f"❌ Analysis failed: {terminal.get('error', 'Unknown error')}")
+        listener.stop()
+        del st.session_state[listener_key]
+        return terminal
+
+    # Auto-rerun to animate progress
+    time.sleep(0.3)
+    st.rerun()
+
+    return None
+
 
 # ==================== UI Helper Components ====================
 
@@ -595,7 +728,7 @@ def main():
     st.markdown(ui["app_intro"])
     st.markdown("---")
 
-    language = st.selectbox("🌐 Select your language", ["English", "Hindi", "Bengali", "Urdu"])
+    language = st.selectbox("🌐 Select your language", ["English", "Hindi", "Bengali", "Urdu"], key="judgment_language")
     uploaded_file = st.file_uploader("📄 Upload Judgment PDF / Image", type=["pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp"])
     enable_ocr = False
     ocr_languages = "eng+hin"
@@ -637,17 +770,18 @@ def main():
             st.warning("⚠️ This file is quite large. Processing may take longer than usual.")
             
         # Check page count
-        try:
-            pdf_reader = PdfReader(uploaded_file)
-            num_pages = len(pdf_reader.pages)
-            if num_pages > 100:
-                st.warning(f"⚠️ This document has {num_pages} pages. Summaries of very long judgments may be less precise.")
-            if num_pages > 1000:
-                st.error("🛑 Extremely large PDF (1000+ pages) detected. Character limits will be exceeded, leading to a very poor summary. Please upload a shorter excerpt.")
+        if file_ext == "pdf":
+            try:
+                pdf_reader = PdfReader(uploaded_file)
+                num_pages = len(pdf_reader.pages)
+                if num_pages > 100:
+                    st.warning(f"⚠️ This document has {num_pages} pages. Summaries of very long judgments may be less precise.")
+                if num_pages > 1000:
+                    st.error("🛑 Extremely large PDF (1000+ pages) detected. Character limits will be exceeded, leading to a very poor summary. Please upload a shorter excerpt.")
+                    is_valid_pdf = False
+            except Exception as e:
+                st.error("Could not read PDF metadata. The file might be corrupted.")
                 is_valid_pdf = False
-        except Exception as e:
-            st.error("Could not read PDF metadata. The file might be corrupted.")
-            is_valid_pdf = False
 
     st.markdown("---")
 
@@ -663,7 +797,7 @@ def main():
         st.session_state.last_language = language
 
     current_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest() if uploaded_file else None
-    is_same_file = st.session_state.get("processed_file") == uploaded_file.name and st.session_state.get("processed_file_hash") == current_hash
+    is_same_file = (uploaded_file is not None) and (st.session_state.get("processed_file") == uploaded_file.name) and (st.session_state.get("processed_file_hash") == current_hash)
     if uploaded_file and is_same_file and st.session_state.get("last_language") == language:
         if not client:
             st.error(ui["openrouter_not_configured"])
@@ -678,13 +812,64 @@ def main():
 
                 # Only call LLM if we haven't processed this exact file/content/language combo
                 if st.session_state.get("last_processed") != cache_key:
-                    raw_text = extract_text_from_pdf(uploaded_file, enable_ocr=enable_ocr, ocr_languages=ocr_languages)
-                    safe_text = compress_text(raw_text)
+                    # -----------------------------------------------------------------
+                    # ASYNC PATH: Use API + WebSocket for real-time progress
+                    # -----------------------------------------------------------------
+                    api_base = Config.API_BASE_URL or "http://localhost:8000"
+                    token = st.session_state.get("auth_token", "")
 
-                    prompt = build_summary_prompt(safe_text, language)
+                    if api_base and token and _WEBSOCKET_AVAILABLE:
+                        import requests
 
-                    # ⚡ Best multilingual model for Hindi/Bengali/Urdu
-                    model_id = get_default_model()
+                        # Upload via API to get job_id
+                        upload_resp = requests.post(
+                            f"{api_base}/api/v1/analyze/upload",
+                            headers={"Authorization": f"Bearer {token}"},
+                            files={"file": (uploaded_file.name, file_bytes, "application/pdf")},
+                            data={"document_type": "judgment"},
+                            timeout=30,
+                        )
+                        if upload_resp.status_code == 200:
+                            job_data = upload_resp.json()
+                            job_id = job_data.get("job_id")
+
+                            # Render live WebSocket progress bar
+                            terminal = render_job_progress(job_id, api_base, token)
+                            if terminal and terminal.get("event") == "failed":
+                                raise RuntimeError(terminal.get("error", "Analysis failed"))
+
+                            # Fetch result when complete
+                            result_resp = requests.get(
+                                f"{api_base}/api/v1/analyze/{job_id}/result",
+                                headers={"Authorization": f"Bearer {token}"},
+                                timeout=30,
+                            )
+                            if result_resp.status_code == 200:
+                                result = result_resp.json()
+                                raw_text = result.get("summary", "")
+                                summary = result.get("summary", "")
+                                remedies = result.get("remedies", {})
+                                st.session_state.raw_text = raw_text
+                                st.session_state.summary = summary
+                                st.session_state.remedies = remedies
+                                st.session_state.last_processed = cache_key
+                            else:
+                                raise RuntimeError(f"Failed to fetch result: {result_resp.status_code}")
+                        else:
+                            # Fallback to synchronous path if API upload fails
+                            raw_text = extract_text_from_pdf(uploaded_file, enable_ocr=enable_ocr, ocr_languages=ocr_languages)
+                            safe_text = compress_text(raw_text)
+                    else:
+                        # -----------------------------------------------------------------
+                        # SYNC FALLBACK: Direct local processing (no API/WebSocket)
+                        # -----------------------------------------------------------------
+                        raw_text = extract_text_from_pdf(uploaded_file, enable_ocr=enable_ocr, ocr_languages=ocr_languages)
+                        safe_text = compress_text(raw_text)
+
+                            prompt = build_summary_prompt(safe_text, language)
+
+                        # ⚡ Best multilingual model for Hindi/Bengali/Urdu
+                        model_id = get_default_model()
                     
                     # Use safe_llm_call for robust error handling and retries
                     summary_raw, error = safe_llm_call(
