@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from pdf_exporter import generate_case_pdf
+from docx_exporter import generate_case_docx
 
 
 @dataclass(frozen=True)
@@ -51,7 +52,9 @@ def _get_format_meta(format: str) -> tuple[str, str]:
     fmt = (format or "pdf").lower()
     if fmt == "pdf":
         return "application/pdf", ".pdf"
-    raise ValueError(f"Unsupported format for phase 1: {format}")
+    if fmt == "docx":
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"
+    raise ValueError(f"Unsupported format: {format}")
 
 
 def generate_report(
@@ -81,19 +84,24 @@ def generate_report(
     file_name = _safe_filename(f"{case_id}_{report_type}_{report_id}{ext}")
     file_path = out_dir / file_name
 
-    # Phase 1 only: generate branded PDF.
-    if (format or "pdf").lower() != "pdf":
-        raise ValueError(f"Phase 1 only supports pdf; got {format}")
+    fmt = (format or "pdf").lower()
+    if fmt == "pdf":
+        report_bytes = generate_case_pdf(user_id=int(user_id), case_id=int(case_id))
+        report_format = "pdf"
+    elif fmt == "docx":
+        report_bytes = generate_case_docx(case_id=int(case_id), user_id=int(user_id))
+        report_format = "docx"
+    else:
+        raise ValueError(f"Unsupported format: {format}")
 
-    pdf_bytes = generate_case_pdf(user_id=int(user_id), case_id=int(case_id))
-    if not pdf_bytes:
-        raise RuntimeError("PDF generation returned empty content")
+    if not report_bytes:
+        raise RuntimeError(f"{report_format.upper()} generation returned empty content")
 
-    file_path.write_bytes(pdf_bytes)
+    file_path.write_bytes(report_bytes)
 
     return GeneratedReport(
         report_id=str(report_id),
-        format="pdf",
+        format=report_format,
         file_path=file_path,
         file_name=file_name,
         mime_type=mime_type,
