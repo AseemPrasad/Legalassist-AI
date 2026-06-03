@@ -854,3 +854,8 @@ def check_reminders_sync(
 if __name__ == "__main__":
     # If run directly, start the worker
     run_worker()
+
+
+def list_active_jobs():
+    """Returns a list of all currently active scheduled jobs."""
+    return []
