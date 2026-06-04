@@ -68,16 +68,13 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def _get_jwt_secrets_to_try() -> list[str]:
-    secrets_to_try = [settings.JWT_SECRET_KEY, settings.JWT_SECRET_KEY_PREVIOUS]
-    stripped = (s.strip() for s in secrets_to_try if s and s.strip())
-    return [s for s in dict.fromkeys(stripped) if len(s) >= 16]
-
-
-# JWT token functions delegated to `api.jwt_auth`
-
-
-# Canonical revoke_jwt_token function is imported from api.jwt_auth above
+# JWT token functions delegated to `api.jwt_auth`.
+# The local _get_jwt_secrets_to_try and revoke_jwt_token definitions that
+# previously lived here have been removed.  They duplicated the canonical
+# implementations in api.jwt_auth but with a subtle security difference:
+# the local revoke_jwt_token omitted "nbf" from the require list, meaning
+# a token crafted without a not-before claim could bypass the nbf check on
+# the revocation code path.  All callers now use the imported functions.
 
 
 # ============================================================================
