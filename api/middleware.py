@@ -6,6 +6,22 @@ from typing import Callable
 from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
 import redis
+
+# ---------------------------------------------------------------------------
+# Request size enforcement configuration
+# ---------------------------------------------------------------------------
+
+# Maximum allowed request body in bytes (50 MB).
+MAX_BODY_SIZE: int = 50 * 1024 * 1024
+
+# URL path prefixes whose endpoints accept uploaded/streamed bodies and must
+# therefore have strict size enforcement even when Content-Length is absent.
+UPLOAD_PATH_PREFIXES: tuple = (
+    "/api/v1/analyze",
+    "/api/v1/documents",
+    "/api/v1/cases",
+    "/api/v1/reports",
+)
 import structlog
 
 from observability.instrumentation import (
@@ -58,6 +74,108 @@ return current
             return ttl if ttl > 0 else self.window
         except:
             return self.window
+
+
+async def request_size_limit_middleware(request: Request, call_next: Callable):
+    """Enforce request body size limits, closing two bypass vectors.
+
+    Vector 1 — declared Content-Length:
+        The header value is inspected *before* any body bytes are read.  If the
+        declared size exceeds MAX_BODY_SIZE the request is rejected immediately
+        with 413 Request Entity Too Large.
+
+    Vector 2 — missing Content-Length / Transfer-Encoding: chunked:
+        Clients that omit the header (or explicitly use chunked encoding) used
+        to bypass the size check entirely, because the old code only branched
+        on ``content_length is not None``.
+
+        * Upload-capable paths (UPLOAD_PATH_PREFIXES): the incoming body stream
+          is read chunk-by-chunk with a running byte counter.  The request is
+          aborted with 413 the moment the counter exceeds MAX_BODY_SIZE.  If
+          the body fits, it is re-assembled in memory and injected back so that
+          downstream handlers can read it normally.
+        * All other paths without Content-Length: rejected with 411 Length
+          Required, since non-upload JSON bodies must always declare their size.
+    """
+    path = request.url.path
+    is_upload_path = any(path.startswith(prefix) for prefix in UPLOAD_PATH_PREFIXES)
+    content_length_header = request.headers.get("content-length")
+
+    # ── Case 1: Content-Length header is present ────────────────────────────
+    if content_length_header is not None:
+        try:
+            content_length = int(content_length_header)
+        except ValueError:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": "Malformed Content-Length header."},
+            )
+        if content_length > MAX_BODY_SIZE:
+            logger.warning(
+                "request_size_limit_exceeded",
+                path=path,
+                content_length=content_length,
+                limit=MAX_BODY_SIZE,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                content={
+                    "detail": (
+                        f"Request body too large. "
+                        f"Maximum allowed size is {MAX_BODY_SIZE // (1024 * 1024)} MB."
+                    )
+                },
+            )
+        # Declared size is within limits — pass through.
+        return await call_next(request)
+
+    # ── Case 2: No Content-Length (omitted or chunked) ──────────────────────
+    transfer_encoding = request.headers.get("transfer-encoding", "").lower()
+
+    if is_upload_path:
+        if transfer_encoding == "chunked":
+            # Stream-read and count bytes so the limit is enforced even when
+            # the total size is not declared up front.
+            total = 0
+            chunks: list[bytes] = []
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > MAX_BODY_SIZE:
+                    logger.warning(
+                        "chunked_request_size_exceeded",
+                        path=path,
+                        bytes_received=total,
+                        limit=MAX_BODY_SIZE,
+                    )
+                    return JSONResponse(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        content={
+                            "detail": (
+                                f"Chunked request body too large. "
+                                f"Maximum allowed size is {MAX_BODY_SIZE // (1024 * 1024)} MB."
+                            )
+                        },
+                    )
+                chunks.append(chunk)
+
+            # Re-inject the buffered body so downstream handlers can read it.
+            body = b"".join(chunks)
+
+            async def _receive():
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            request._receive = _receive  # type: ignore[assignment]
+        else:
+            # Upload path with no Content-Length and no chunked encoding —
+            # reject to close the header-omission bypass.
+            return JSONResponse(
+                status_code=status.HTTP_411_LENGTH_REQUIRED,
+                content={"detail": "Content-Length header is required for this endpoint."},
+            )
+    # Non-upload paths without Content-Length (e.g. empty-body GET/DELETE
+    # proxied through the middleware chain) are allowed through.
+
+    return await call_next(request)
 
 
 async def rate_limit_middleware(request: Request, call_next: Callable):

@@ -11,6 +11,7 @@ import structlog
 
 from api.config import get_settings
 from api.middleware import (
+    request_size_limit_middleware,
     rate_limit_middleware,
     add_correlation_id_middleware,
     error_handling_middleware,
@@ -60,12 +61,19 @@ def create_app() -> FastAPI:
     )
     
     # Add middleware
+    # NOTE: FastAPI registers @app.middleware decorators in LIFO order, so the
+    # last-registered middleware runs first on incoming requests. We register
+    # request_size_limit_middleware last so it executes first, rejecting
+    # oversized payloads before any other middleware or handler is invoked.
     app.middleware("http")(add_correlation_id_middleware)
     app.middleware("http")(logging_middleware)
     app.middleware("http")(error_handling_middleware)
-    
+
     if settings.RATE_LIMIT_ENABLED:
         app.middleware("http")(rate_limit_middleware)
+
+    # Outermost guard — must be registered last to execute first.
+    app.middleware("http")(request_size_limit_middleware)
     
     # ========================================================================
     # Include Routers
