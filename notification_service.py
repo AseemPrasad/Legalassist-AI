@@ -4,6 +4,7 @@ Handles delivery tracking and retry logic.
 """
 
 import logging
+import re
 import structlog
 import os
 import re
@@ -212,6 +213,17 @@ def _resolve_notification_template_values(
     if not template:
         return {"sms_template": None, "email_subject_template": None, "email_html_template": None}
     return template.resolve_templates(channel=channel, language=language)
+
+
+def _sanitize_preview(text: str, max_length: int = 160) -> str:
+    """Truncate and strip HTML for safe preview storage."""
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_length:
+        text = text[:max_length].rsplit(" ", 1)[0] + "..."
+    return text
 
 
 @dataclass
@@ -557,7 +569,7 @@ def send_sms_task(
                     status=status,
                     message_id=message_id,
                     error_message=error,
-                    message_preview=_safe_preview(message),
+                    message_preview=_sanitize_preview(html_content, max_length=200),
                 )
                 logger.info("background_sms_notification_logged", deadline_id=deadline_id)
         except Exception as e:
@@ -959,7 +971,13 @@ class NotificationService:
             message=message,
             deadline_id=deadline.id,
             user_id=deadline.user_id,
-            days_left=days_left,
+            channel=NotificationChannel.SMS,
+            recipient=user_preference.phone_number,
+            days_before=days_left,
+            status=status,
+            message_id=message_id,
+            error_message=error,
+            message_preview=_sanitize_preview(message),
         )
 
         try:
