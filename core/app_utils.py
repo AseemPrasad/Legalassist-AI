@@ -2757,6 +2757,36 @@ def get_file_stream(file_obj, chunk_size=65536):
             break
         yield chunk
 
+def _validate_encoding_quality(text: str) -> Tuple[bool, float]:
+    # Placeholder for your encoding check
+    return True, 1.0
+class PipelineStateManager:
+    @staticmethod
+    def get_state(db, doc_id):
+        return db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+
+    @staticmethod
+    def update_stage(db, doc_id, stage, data=None):
+        state = db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+        if not state:
+            state = DocumentProcessingState(document_id=doc_id)
+            db.add(state)
+        state.current_stage = stage
+        if data:
+            current_data = state.stage_data or {}
+            current_data.update(data)
+            state.stage_data = current_data
+        db.commit()
+
+def get_file_stream(file_obj, chunk_size=65536):
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    while True:
+        chunk = file_obj.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
 def process_file_to_disk(uploaded_file) -> str:
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     try:

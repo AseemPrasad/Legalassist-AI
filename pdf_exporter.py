@@ -4,6 +4,7 @@ Generate professional, multilingual PDF case summaries for export and sharing.
 """
 
 import os
+import re
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -17,17 +18,28 @@ from db.crud.audit import record_audit_event
 logger = logging.getLogger(__name__)
 
 
-def _parse_dt(value) -> Optional[datetime]:
-    """Normalize a datetime value (native datetime or ISO string) to datetime."""
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            return None
-    return None
+# Strict phone-number pattern: requires a separator between digit groups or a
+# country-code prefix, avoiding false matches against case numbers, citations, IDs.
+_PHONE_PATTERN = re.compile(
+    r"(?<!\d)"
+    r"(?:"
+    r"\+\d{1,3}[-.\s]\(?\d{1,5}\)?[-.\s]\d{1,5}(?:[-.\s]\d{1,9})?"      # international
+    r"|"
+    r"\(?\d{3,4}\)?[-.\s]\d{3}[-.\s]\d{4}(?:\s*(?:ext|x|xtn)[.\s]*\d+)?"  # domestic / toll-free
+    r")"
+    r"(?!\d)"
+)
 
+
+def redact_phone_numbers(text: str, replacement: str = "[REDACTED]") -> str:
+    """Replace phone numbers in text with a safe placeholder.
+
+    Uses a strict regex that requires area-code or country-code structure,
+    avoiding false matches against case numbers, citations, or IDs.
+    """
+    if not text:
+        return text
+    return _PHONE_PATTERN.sub(replacement, text)
 
 # Constants for PDF styling
 PRIMARY_COLOR = (44, 62, 80)    # Dark Blue
@@ -349,6 +361,12 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
         remedies = case_data.get("remedies")
 
         pdf = LegalAssistPDF()
+        title_str = case.get('title') or case.get('case_number', 'Untitled Case')
+        pdf.set_title(title_str)
+        pdf.set_author("LegalAssist AI")
+        pdf.set_creator("LegalAssist AI Export Engine")
+        pdf.set_subject(f"Case summary for {case.get('case_number')}")
+        pdf.set_keywords(f"LegalAssist, Case Report, {case.get('case_type')}, {case.get('jurisdiction')}")
         pdf.add_page()
 
         # ==================== CASE HEADER ====================
@@ -636,6 +654,11 @@ def generate_anonymized_pdf(
                 anonymized_data = None
 
         pdf = LegalAssistPDF()
+        pdf.set_title(f"Anonymized Brief - {anon_id}")
+        pdf.set_author("LegalAssist AI")
+        pdf.set_creator("LegalAssist AI Anonymization Engine")
+        pdf.set_subject("Anonymized Brief for Third-Party Consultation")
+        pdf.set_keywords(f"Anonymized, Consultation, LegalAssist, {selected_profile}")
         pdf.add_page()
 
         # Header for Anonymized Report
@@ -688,7 +711,7 @@ def generate_anonymized_pdf(
                 pdf.cell(0, 7, f"Type: {doc.document_type.value}", 0, 1)
                 if doc.summary:
                     pdf.safe_set_font(pdf.main_font, '', 10)
-                    pdf.multi_cell(0, 5, doc.summary)
+                    pdf.multi_cell(0, 5, redact_phone_numbers(doc.summary))
                 pdf.ln(3)
         else:
             pdf.chapter_body("No associated documents for review.")
@@ -760,3 +783,8 @@ def calculate_optimal_font_size(text: str, container_width: float, max_font_size
         ratio = container_width / required_width
         return max(6.0, min(max_font_size, max_font_size * ratio))
     return max_font_size
+
+
+def get_supported_pdf_fonts():
+    """Returns a list of fonts supported by the PDF exporter."""
+    return ["Helvetica", "Arial", "Times"]
