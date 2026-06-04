@@ -109,7 +109,9 @@ def _get_format_meta(format: str) -> tuple[str, str]:
     fmt = (format or "pdf").lower()
     if fmt == "pdf":
         return "application/pdf", ".pdf"
-    raise ValueError(f"Unsupported format for phase 1: {format}")
+    if fmt == "docx":
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"
+    raise ValueError(f"Unsupported format: {format}")
 
 
 def generate_report(
@@ -184,7 +186,7 @@ def generate_report(
 
     return GeneratedReport(
         report_id=str(report_id),
-        format="pdf",
+        format=report_format,
         file_path=file_path,
         file_name=file_name,
         mime_type=mime_type,
