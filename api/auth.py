@@ -11,6 +11,7 @@ import secrets
 import hashlib
 
 from api.config import get_settings
+from database import SessionLocal, is_token_revoked
 
 
 settings = get_settings()
@@ -42,14 +43,20 @@ def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -
 
 
 def verify_token(token: str) -> Dict:
-    """Verify JWT token"""
+    """Verify JWT token and check revocation status.
+
+    Uses a context-manager-scoped database session for the revocation
+    check so the connection is released on every exit path — normal
+    return, HTTPException, or any unexpected error — preventing the
+    connection leaks that occur when raising inside a bare try/finally
+    block under certain async execution contexts.
+    """
     try:
         payload = jwt.decode(
             token,
             settings.JWT_SECRET_KEY,
             algorithms=[settings.JWT_ALGORITHM]
         )
-        return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -60,6 +67,19 @@ def verify_token(token: str) -> Dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token"
         )
+
+    # Check token revocation (JTI blacklist) using a structured context
+    # manager so the DB session is guaranteed to close on all code paths.
+    jti = payload.get("jti")
+    if jti:
+        with SessionLocal() as db:
+            if is_token_revoked(db, jti):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been revoked"
+                )
+
+    return payload
 
 
 # ============================================================================
