@@ -2,6 +2,13 @@
 JavaScript/TypeScript Client SDK for Legalassist-AI API
 """
 
+function generateIdempotencyKey() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return `idemp_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
 
 class LegalassistClient {
   constructor(options = {}) {
@@ -28,6 +35,10 @@ class LegalassistClient {
       headers["Authorization"] = `Bearer ${this.token}`;
     }
 
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase())) {
+      headers["Idempotency-Key"] = options.idempotencyKey || generateIdempotencyKey();
+    }
+
     const config = {
       method,
       headers,
@@ -52,15 +63,17 @@ class LegalassistClient {
   async getToken(username, password) {
     return this.request("POST", "/api/v1/auth/token", {
       body: JSON.stringify({ username, password }),
+      idempotencyKey: generateIdempotencyKey(),
     });
   }
 
-  async createApiKey(name, expiresInDays = null) {
+  async createApiKey(name, expiresInDays = null, idempotencyKey = null) {
     return this.request("POST", "/api/v1/auth/api-keys", {
       body: JSON.stringify({
         name,
         expires_in_days: expiresInDays,
       }),
+      idempotencyKey,
     });
   }
 
@@ -85,6 +98,7 @@ class LegalassistClient {
 
     return this.request("POST", "/api/v1/analyze/document", {
       body: JSON.stringify(payload),
+      idempotencyKey: options.idempotencyKey || generateIdempotencyKey(),
     });
   }
 
@@ -136,6 +150,7 @@ class LegalassistClient {
         jurisdiction,
         limit,
       }),
+      idempotencyKey: options.idempotencyKey || generateIdempotencyKey(),
     });
   }
 
@@ -160,6 +175,7 @@ class LegalassistClient {
         report_type: reportType,
         format,
       }),
+      idempotencyKey: options.idempotencyKey || generateIdempotencyKey(),
     });
   }
 
@@ -215,6 +231,7 @@ class LegalassistClient {
         description,
         priority,
       }),
+      idempotencyKey: options.idempotencyKey || generateIdempotencyKey(),
     });
   }
 
@@ -240,7 +257,8 @@ class LegalassistClient {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws/progress/${jobId}`;
 
-    const ws = new WebSocket(wsUrl);
+    const protocols = this.token ? ["access_token", this.token] : [];
+    const ws = new WebSocket(wsUrl, protocols);
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
