@@ -105,6 +105,8 @@ def test_parse_remedies_response():
     assert remedies["cost_estimate"] == "5000-10000"
     assert remedies["first_action"] == "File a certified copy request."
     assert remedies["deadline"] == "The 30 day deadline."
+    assert 0.0 <= remedies["confidence_score"] <= 1.0
+    assert isinstance(remedies["evidence_spans"], list)
 
 @pytest.mark.parametrize("language", core.LANGUAGES)
 def test_all_languages_prompt_building(language):

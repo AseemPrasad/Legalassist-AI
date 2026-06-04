@@ -30,7 +30,7 @@ def test_case_full_timeline_ordering_and_linkage():
         user_id = user.id
 
         # Create case
-        case = create_new_case(user_id=user_id, case_number="TL/1/2026", case_type="civil", jurisdiction="TestLand", title="Timeline Test")
+        case, _ = create_new_case(user_id=user_id, case_number="TL/1/2026", case_type="civil", jurisdiction="TestLand", title="Timeline Test")
         case_id = case.id
 
         # Add a manual deadline
