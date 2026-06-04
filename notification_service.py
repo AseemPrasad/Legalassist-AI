@@ -1126,9 +1126,17 @@ class NotificationService:
                     result = self.send_email_reminder(db, deadline, user_preference, days_left, notification_language)
                     results.append(result)
             else:
-                logger.debug("Notification already sent", 
-                            channel=channel.value, 
-                            days_left=days_left, 
+                logger.info("Notification already sent, reporting as successful",
+                            channel=channel.value,
+                            days_left=days_left,
                             deadline_id=deadline.id)
+                recipient = getattr(user_preference, "phone_number", None) or getattr(user_preference, "email", "unknown")
+                results.append(NotificationResult(
+                    success=True,
+                    channel=channel,
+                    recipient=recipient,
+                    message_id=None,
+                    error=None,
+                ))
 
         return results
