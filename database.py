@@ -1053,29 +1053,46 @@ def get_case_record(db: Session, hashed_case_id: str) -> Optional[CaseRecord]:
     return db.query(CaseRecord).filter(CaseRecord.hashed_case_id == hashed_case_id).first()
 
 
+ALLOWED_CASE_FILTER_FIELDS = frozenset({
+    "case_type",
+    "jurisdiction",
+    "court_name",
+    "judge_name",
+    "plaintiff_type",
+    "defendant_type",
+    "outcome",
+})
+
+
 def get_cases_by_criteria(
     db: Session,
     case_type: Optional[str] = None,
     jurisdiction: Optional[str] = None,
     court_name: Optional[str] = None,
     judge_name: Optional[str] = None,
+    plaintiff_type: Optional[str] = None,
+    defendant_type: Optional[str] = None,
     outcome: Optional[str] = None,
     limit: int = 100,
 ) -> List[CaseRecord]:
-    """Get cases matching specific criteria"""
+    """Get cases matching approved criteria fields only."""
     query = db.query(CaseRecord)
-    
-    if case_type:
-        query = query.filter(CaseRecord.case_type == case_type)
-    if jurisdiction:
-        query = query.filter(CaseRecord.jurisdiction == jurisdiction)
-    if court_name:
-        query = query.filter(CaseRecord.court_name == court_name)
-    if judge_name:
-        query = query.filter(CaseRecord.judge_name == judge_name)
-    if outcome:
-        query = query.filter(CaseRecord.outcome == outcome)
-    
+
+    filters = {
+        "case_type": case_type,
+        "jurisdiction": jurisdiction,
+        "court_name": court_name,
+        "judge_name": judge_name,
+        "plaintiff_type": plaintiff_type,
+        "defendant_type": defendant_type,
+        "outcome": outcome,
+    }
+    for key, value in filters.items():
+        if key not in ALLOWED_CASE_FILTER_FIELDS:
+            continue
+        if value:
+            query = query.filter(getattr(CaseRecord, key) == value)
+
     return query.order_by(CaseRecord.created_at.desc()).limit(limit).all()
 
 
