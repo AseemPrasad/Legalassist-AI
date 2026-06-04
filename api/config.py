@@ -269,94 +269,74 @@ class ConfigSanitizer:
         "SENDGRID_API_KEY",
     }
     
-    @classmethod
-    def is_sensitive(cls, key: str) -> bool:
-        """
-        Determine if a configuration key represents sensitive information.
-        """
-        if key.upper() in cls.EXPLICIT_SENSITIVE_KEYS:
-            return True
-            
-        for pattern in cls.SENSITIVE_KEY_PATTERNS:
-            if pattern.search(key):
-                return True
-                
-        return False
-        
-    @classmethod
-    def mask_string(cls, value: str) -> str:
-        """
-        Mask a string value.
-        - Strings <= 4 chars: completely masked with asterisks
-        - Strings 5-8 chars: show 1st char, mask rest, show last char
-        - Strings > 8 chars: show 1st 2 chars, mask rest, show last 2 chars
-        """
-        if not value:
-            return value
-            
-        length = len(value)
-        if length <= 4:
-            return "*" * length
-        elif length <= 8:
-            return f"{value[0]}{'*' * (length - 2)}{value[-1]}"
-        else:
-            return f"{value[:2]}{'*' * (length - 4)}{value[-2:]}"
+    # Rate Limiting
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_REQUESTS: int = 100  # requests
+    RATE_LIMIT_WINDOW: int = 60  # seconds
+    RATE_LIMIT_BURST: int = 200  # max burst
 
-    @classmethod
-    def sanitize_value(cls, value: any) -> any:
-        """Sanitize an individual value."""
-        if value is None:
-            return value
-        elif isinstance(value, bool):
-            return value
-        elif isinstance(value, (int, float)):
-            return "***"
-        else:
-            return cls.mask_string(str(value))
+    # Trusted proxies for client-IP resolution
+    TRUSTED_PROXIES: list = ["127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+    
+    # Authentication
+    AUTH_ENABLED: bool = True
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRATION_HOURS: int = 24
+    API_KEY_HEADER: str = "X-API-Key"
+    
+    # Database
+    DATABASE_URL: str = os.getenv(
+        "DATABASE_URL", 
+        "postgresql://user:password@localhost:5432/legalassist"
+    )
+    DATABASE_POOL_SIZE: int = 20
+    DATABASE_MAX_OVERFLOW: int = 10
+    
+    # Redis
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    REDIS_CACHE_TTL: int = 3600  # 1 hour
+    
+    # Celery
+    CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1")
+    CELERY_RESULT_BACKEND: str = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/2")
+    CELERY_TASK_TIMEOUT: int = 3600  # 1 hour
+    CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes
+    
+    # File Upload
+    UPLOAD_MAX_SIZE: int = 500 * 1024 * 1024  # 500 MB
+    UPLOAD_EXTENSIONS: list = [".pdf", ".doc", ".docx", ".txt", ".html"]
+    UPLOAD_TEMP_DIR: str = "/tmp/legalassist-uploads"
+    
+    # PDF Export
+    PDF_MAX_PAGES: int = 5000
+    PDF_QUALITY: str = "high"  # low, medium, high
+    
+    # LLM Settings
+    LLM_MAX_TOKENS: int = 2000
+    LLM_TEMPERATURE: float = 0.7
+    LLM_MODEL: str = "gpt-4"
+    LLM_TIMEOUT: int = 120  # seconds
+    
+    # Logging
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_FORMAT: str = "json"
+    
+    # Observability
+    ENABLE_METRICS: bool = True
+    ENABLE_TRACING: bool = True
+    JAEGER_ENABLED: bool = os.getenv("JAEGER_ENABLED", "false").lower() == "true"
+    
+    # Feature Flags
+    ENABLE_OAUTH2: bool = os.getenv("ENABLE_OAUTH2", "true").lower() == "true"
+    ENABLE_WEBSOCKET: bool = os.getenv("ENABLE_WEBSOCKET", "true").lower() == "true"
+    ENABLE_ANALYTICS: bool = os.getenv("ENABLE_ANALYTICS", "true").lower() == "true"
+    
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
 
-    @classmethod
-    def sanitize_dict(cls, config_dict: dict) -> dict:
-        """
-        Recursively sanitize a dictionary, masking sensitive values.
-        Returns a new dictionary; does not mutate the original.
-        """
-        sanitized = {}
-        for k, v in config_dict.items():
-            if isinstance(v, dict):
-                sanitized[k] = cls.sanitize_dict(v)
-            elif cls.is_sensitive(str(k)):
-                sanitized[k] = cls.sanitize_value(v)
-            else:
-                sanitized[k] = v
-        return sanitized
 
-
-def get_config_dict(cls_obj) -> dict:
-    """Extract configuration variables from a class object."""
-    cfg = {}
-    for key in dir(cls_obj):
-        if key.startswith("_"):
-            continue
-        val = getattr(cls_obj, key)
-        if callable(val) or isinstance(val, (classmethod, staticmethod, property)):
-            continue
-        cfg[key] = val
-    return cfg
-
-# Print config to stdout/logger if debug mode is enabled, using the sanitizer
-if Config.DEBUG:
-    try:
-        raw_config = get_config_dict(Config)
-        safe_config = ConfigSanitizer.sanitize_dict(raw_config)
-        logger.debug(f"Active Configuration (Sanitized): {safe_config}")
-        print(f"DEBUG: LegalAssist AI Config Loaded: {safe_config}")
-    except Exception as e:
-        logger.error(f"Failed to dump sanitized configuration: {e}")
-
-# Compatibility layer for legacy imports
-APISettings = Config
-
-def get_settings():
-    """Return the active Config settings."""
-    return Config
-
+def get_settings() -> APISettings:
+    """Get API settings"""
+    return APISettings()

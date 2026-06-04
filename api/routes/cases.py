@@ -235,18 +235,30 @@ async def submit_similarity_result_feedback(
 
 
 def _build_query_signature(request: CaseSearchRequest) -> str:
-    """Derive a stable signature for the current similarity search filters."""
-    parts = [
-        f"jurisdiction={request.jurisdiction}",
-        f"case_type={request.case_type}",
-        f"court_name={request.court_name or ''}",
-        f"judge_name={request.judge_name or ''}",
-        f"plaintiff_type={request.plaintiff_type or ''}",
-        f"defendant_type={request.defendant_type or ''}",
-        f"year_from={request.year_from or ''}",
-        f"year_to={request.year_to or ''}",
-    ]
-    return "|".join(parts)
+    """Derive a stable signature for the current similarity search filters.
+
+    Only fields that actually affect the query are included, so functionally
+    equivalent searches (with different absent optional values) share the
+    same signature and feedback history.
+    """
+    parts = []
+    if request.jurisdiction:
+        parts.append(f"jurisdiction={request.jurisdiction}")
+    if request.case_type and request.case_type != "general":
+        parts.append(f"case_type={request.case_type}")
+    if request.court_name:
+        parts.append(f"court_name={request.court_name}")
+    if request.judge_name:
+        parts.append(f"judge_name={request.judge_name}")
+    if request.plaintiff_type:
+        parts.append(f"plaintiff_type={request.plaintiff_type}")
+    if request.defendant_type:
+        parts.append(f"defendant_type={request.defendant_type}")
+    if request.year_from is not None:
+        parts.append(f"year_from={request.year_from}")
+    if request.year_to is not None:
+        parts.append(f"year_to={request.year_to}")
+    return "|".join(parts) if parts else "default"
 
 
 
