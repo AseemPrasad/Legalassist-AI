@@ -1,34 +1,34 @@
-"""
-Shared utilities for LegalEase AI
-- PDF extraction and text processing
-- LLM prompts and remedies advisor
-- Styling and UI constants
-
-PATCHES APPLIED (2 bugs fixed):
-  FIX-1: Language consistency — remedies LLM system prompt now enforces target language;
-          _normalize_yes_no now returns localized values; _validate_court_name no longer
-          strips non-English court names; render_shareable_result_box passes ui_text down
-          correctly to _build_result_body_html.
-  FIX-2: "What you can do" layout — build_judgment_result_text now emits a structured
-          dict alongside the plain-text string; render_shareable_result_box uses the
-          structured dict to build guaranteed question/answer pairs in the HTML renderer,
-          so questions and answers are always correctly paired and answers are never cut short.
-          max_tokens for remedies raised from 500 → 900.
-"""
-
 import re
 import logging
 import os
 import json
+import io
+import tempfile
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+import html as html_lib
+from contextlib import contextmanager
+
 from openai import OpenAI
 from pypdf import PdfReader
 from langdetect import detect, DetectorFactory, detect_langs
-import pdfplumber
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import html as html_lib
+from contextlib import contextmanager
 
 from config import Config
+from .exceptions import PDFProcessingError, OCRDependencyError, OCRProcessingError
+
+try:
+    from opentelemetry import trace
+    _tracer = trace.get_tracer(__name__)
+except Exception:
+    _tracer = None
+
+# For consistent language detection results
+DetectorFactory.seed = 0
+_LOCALIZED_UI_TEXT_CACHE = {}
+parser_errors = [] # Define this so your function doesn't crash
 
 # For consistent language detection results
 DetectorFactory.seed = 0
@@ -83,6 +83,49 @@ def get_client():
 
 # ==================== TEXT PROCESSING ====================
 
+def _validate_encoding_quality(text: str) -> Tuple[bool, float]:
+    """
+    Validate the quality/readability of the extracted text.
+    Detects if the text is heavily corrupted, mostly garbage characters,
+    or has invalid unicode replacement characters.
+    
+    Returns:
+        Tuple[bool, float]: (is_valid, quality_score_0_to_1)
+    """
+    if not text or not text.strip():
+        return False, 0.0
+        
+    # Count total characters and replacement characters (corrupted bytes)
+    total_chars = len(text)
+    replacement_chars = text.count('\uFFFD')
+    
+    # Calculate ratio of replacement characters
+    replacement_ratio = replacement_chars / total_chars if total_chars > 0 else 0.0
+    
+    # Count printable alphanumeric characters vs total characters
+    alnum_chars = sum(1 for c in text if c.isalnum() or c.isspace())
+    alnum_ratio = alnum_chars / total_chars if total_chars > 0 else 0.0
+    
+    # Compute a quality score from 0.0 to 1.0
+    # Heavily penalize replacement characters and non-alphanumeric/non-space garbage
+    quality = (1.0 - replacement_ratio) * alnum_ratio
+    
+    # We consider it valid if quality score is at least 0.5 and replacement ratio is under 15%
+    is_valid = quality >= 0.5 and replacement_ratio < 0.15
+    
+    # Additional check: detect fragmented text where words are split into single characters
+    # e.g., "J u d g m e n t  o f  t h e  C o u r t"
+    words = [w for w in text.split() if w]
+    if len(words) > 15:
+        avg_word_len = sum(len(w) for w in words) / len(words)
+        if avg_word_len < 2.0:
+            is_valid = False
+            quality = min(quality, 0.3)
+            
+    return is_valid, quality
+
+
+
 def _extract_pages_pypdf(reader: PdfReader) -> str:
     text = ""
     for page in reader.pages:
@@ -90,6 +133,41 @@ def _extract_pages_pypdf(reader: PdfReader) -> str:
         if page_text:
             text += page_text + "\n"
     return text.strip()
+
+
+def _is_image_input(uploaded_file) -> bool:
+    name = (getattr(uploaded_file, "name", "") or "").lower()
+    return name.endswith((".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"))
+
+
+def _read_input_bytes(uploaded_file) -> Optional[bytes]:
+    if hasattr(uploaded_file, "seek"):
+        uploaded_file.seek(0)
+    data = uploaded_file.read() if hasattr(uploaded_file, "read") else None
+    if hasattr(uploaded_file, "seek"):
+        uploaded_file.seek(0)
+    return data
+
+
+def _process_image_with_multimodal_processor(image_bytes: bytes, ocr_languages: str, aggressive_ocr: bool) -> str:
+    from core.multimodal_processor import MultiModalProcessor
+
+    processor = MultiModalProcessor()
+    languages = [lang for lang in ocr_languages.split('+') if lang]
+    result = processor.process_document(
+        image_bytes,
+        file_type='image',
+        languages=languages,
+        enable_ocr=True,
+        aggressive_ocr=aggressive_ocr,
+    )
+    if result.get('success') and result.get('text'):
+        logging.info(
+            "Multi-modal image OCR completed. Confidence: %.2f%%",
+            result.get('confidence', 0),
+        )
+        return result['text']
+    raise ValueError(result.get('error') or 'Image OCR failed to extract readable text.')
 
 
 def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
@@ -157,43 +235,296 @@ def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
 
 
 def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages: str = "eng+hin", ocr_dpi: int = 300):
-    """Extract text from PDF. Uses parser extraction first, then optional OCR fallback."""
-    text = ""
-    try:
-        with pdfplumber.open(uploaded_pdf) as pdf:
-            pages = []
-            for page in pdf.pages:
-                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
-                if page_text:
-                    pages.append(page_text)
-            text = "\n".join(pages).strip()
-            if text:
-                return text
-    except Exception:
-        pass
+    """Extract text from PDFs and image uploads using the OCR Strategy Pattern.
 
-    try:
-        if hasattr(uploaded_pdf, "seek"):
-            uploaded_pdf.seek(0)
-        reader = PdfReader(uploaded_pdf)
-        text = _extract_pages_pypdf(reader)
-        if text:
-            return text
-    except Exception:
-        pass
+    Uses OCRPipeline with LocalOCRProvider and CloudOCRProvider.
+    If local extraction confidence falls below the threshold, automatically
+    falls back to the cloud provider for high-accuracy results.
+    """
+    # Read input bytes early
+    data = _read_input_bytes(uploaded_pdf)
+    if data is None:
+        raise ValueError("Unable to read uploaded file bytes.")
 
-    if not enable_ocr:
-        raise ValueError("No extractable text found. The PDF may be image-only or empty. Re-run with OCR enabled.")
+    # File size protection
+    max_bytes = int(getattr(Config, 'MAX_FILE_SIZE_MB', 25)) * 1024 * 1024
+    if len(data) > max_bytes:
+        raise PDFProcessingError(f"PDF exceeds allowed size of {max_bytes} bytes.")
 
-    try:
-        from pdf2image import convert_from_bytes
-        import pytesseract
-        from pytesseract import Output
-    except Exception as e:
-        raise RuntimeError(
-            f"OCR dependencies are missing ({e}). Install pytesseract, pdf2image, Pillow and Tesseract binaries."
-        ) from e
+    # Reject obvious malicious tokens
+    suspicious_signatures = [b'/JavaScript', b'/JS', b'/Launch', b'/EmbeddedFiles', b'/RichMedia', b'/OpenAction', b'/AA']
+    for sig in suspicious_signatures:
+        if sig in data:
+            raise PDFProcessingError(
+                f"PDF contains active or embedded content ({sig.decode('latin1')}). Processing aborted."
+            )
 
+    # Image uploads bypass the pipeline and go directly to multimodal processor
+    if _is_image_input(uploaded_pdf):
+        if not enable_ocr:
+            raise ValueError("Image uploads require OCR. Re-run with OCR enabled.")
+        image_bytes = _read_input_bytes(uploaded_pdf)
+        if not image_bytes:
+            raise ValueError("Unable to read image bytes for OCR.")
+        try:
+            return _process_image_with_multimodal_processor(image_bytes, ocr_languages, aggressive_ocr=True)
+        except ImportError:
+            raise RuntimeError("OCR dependencies are missing. Install pytesseract, pdf2image, Pillow and Tesseract binaries.")
+        except Exception:
+            return _legacy_image_ocr_fallback(image_bytes, ocr_languages)
+
+    # Build pipeline with configurable threshold
+    threshold = float(getattr(Config, 'OCR_CONFIDENCE_THRESHOLD', 0.5))
+    pipeline = OCRPipeline(
+        primary=LocalOCRProvider(),
+        fallback=CloudOCRProvider(),
+        confidence_threshold=threshold,
+    )
+
+    # Run pipeline
+    result = pipeline.process(data, ocr_languages=ocr_languages, ocr_dpi=ocr_dpi)
+
+    if result.text.strip():
+        return result.text
+
+    # If pipeline returns empty, raise with details
+    error_msg = f"OCR pipeline failed. Primary: {result.provider}/{result.method} (confidence={result.confidence:.2f})"
+    if result.error:
+        error_msg += f" — {result.error}"
+    raise PDFProcessingError(error_msg)
+
+# =============================================================================
+# OCR STRATEGY PATTERN
+# =============================================================================
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Protocol
+
+
+@dataclass
+class OCRResult:
+    """Standardized result from any OCR provider."""
+    text: str
+    confidence: float
+    provider: str
+    method: str
+    ocr_used: bool
+    error: Optional[str] = None
+
+
+class OCRProvider(ABC):
+    """Abstract base class for OCR providers."""
+
+    @abstractmethod
+    def extract(self, file_bytes: bytes, ocr_languages: str = "eng+hin", ocr_dpi: int = 300) -> OCRResult:
+        """Extract text from document bytes. Must return OCRResult with confidence 0-1."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Provider identifier for logging and metrics."""
+        raise NotImplementedError
+
+
+class LocalOCRProvider(OCRProvider):
+    """Local OCR using pdfplumber → pypdf → Tesseract chain."""
+
+    name = "local"
+
+    def extract(self, file_bytes: bytes, ocr_languages: str = "eng+hin", ocr_dpi: int = 300) -> OCRResult:
+        text = ""
+        parser_errors: List[str] = []
+
+        # 1. Try pdfplumber
+        try:
+            with io.BytesIO(file_bytes) as bio:
+                with pdfplumber.open(bio) as pdf:
+                    pages = []
+                    for i, page in enumerate(pdf.pages):
+                        if i >= 2000:  # PDF_MAX_PAGES safety
+                            parser_errors.append("PDF page limit reached: 2000")
+                            break
+                        try:
+                            page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                        except Exception as e:
+                            parser_errors.append(f"pdfplumber page extraction error page={i}: {e}")
+                            continue
+                        if page_text:
+                            pages.append(page_text)
+                    text = "\n".join(pages).strip()
+                    if text:
+                        is_valid, quality = _validate_encoding_quality(text)
+                        if is_valid:
+                            return OCRResult(
+                                text=text,
+                                confidence=quality,
+                                provider=self.name,
+                                method="pdfplumber",
+                                ocr_used=False,
+                            )
+        except Exception as e:
+            parser_errors.append(f"pdfplumber open error: {e}")
+
+        # 2. Fallback to pypdf
+        try:
+            with io.BytesIO(file_bytes) as bio:
+                reader = PdfReader(bio, strict=False)
+                try:
+                    if getattr(reader, 'is_encrypted', False):
+                        reader.decrypt("")
+                except Exception:
+                    pass
+                text = _extract_pages_pypdf(reader)
+                if text:
+                    is_valid, quality = _validate_encoding_quality(text)
+                    if is_valid:
+                        return OCRResult(
+                            text=text,
+                            confidence=quality,
+                            provider=self.name,
+                            method="pypdf",
+                            ocr_used=False,
+                        )
+        except Exception as e:
+            parser_errors.append(f"pypdf read error: {e}")
+
+        # 3. Legacy Tesseract OCR
+        try:
+            text = _legacy_ocr_fallback_bytes(file_bytes, ocr_languages, ocr_dpi)
+            is_valid, quality = _validate_encoding_quality(text)
+            return OCRResult(
+                text=text,
+                confidence=quality if is_valid else 0.3,
+                provider=self.name,
+                method="tesseract",
+                ocr_used=True,
+            )
+        except Exception as e:
+            parser_errors.append(f"legacy OCR error: {e}")
+
+        # All local methods failed
+        return OCRResult(
+            text="",
+            confidence=0.0,
+            provider=self.name,
+            method="failed",
+            ocr_used=False,
+            error="; ".join(parser_errors) if parser_errors else "Local OCR failed",
+        )
+
+
+class CloudOCRProvider(OCRProvider):
+    """Cloud OCR provider (e.g., Google Vision, AWS Textract, Azure Form Recognizer)."""
+
+    name = "cloud"
+
+    def __init__(self, api_key: Optional[str] = None, endpoint: Optional[str] = None):
+        self.api_key = api_key or Config.get("CLOUD_OCR_API_KEY", "")
+        self.endpoint = endpoint or Config.get("CLOUD_OCR_ENDPOINT", "")
+
+    def extract(self, file_bytes: bytes, ocr_languages: str = "eng+hin", ocr_dpi: int = 300) -> OCRResult:
+        """Call cloud OCR API. Placeholder implementation — integrate with your provider."""
+        if not self.api_key:
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                provider=self.name,
+                method="unconfigured",
+                ocr_used=False,
+                error="Cloud OCR API key not configured",
+            )
+
+        try:
+            # Placeholder: replace with actual cloud provider SDK call
+            # Example: Google Vision, AWS Textract, Azure Form Recognizer
+            # import cloud_ocr_sdk
+            # result = cloud_ocr_sdk.process_document(file_bytes, languages=ocr_languages.split('+'))
+            # return OCRResult(text=result.text, confidence=result.confidence, provider=self.name, method="cloud_api", ocr_used=True)
+
+            # For now, simulate high-confidence response
+            logging.warning("CloudOCRProvider.extract() is a placeholder — integrate with your cloud OCR SDK")
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                provider=self.name,
+                method="placeholder",
+                ocr_used=False,
+                error="Cloud OCR not yet integrated — implement with your provider SDK",
+            )
+        except Exception as e:
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                provider=self.name,
+                method="error",
+                ocr_used=False,
+                error=str(e),
+            )
+
+
+class OCRPipeline:
+    """Orchestrates OCR providers with threshold-based fallback."""
+
+    def __init__(
+        self,
+        primary: Optional[OCRProvider] = None,
+        fallback: Optional[OCRProvider] = None,
+        confidence_threshold: float = 0.5,
+    ):
+        self.primary = primary or LocalOCRProvider()
+        self.fallback = fallback or CloudOCRProvider()
+        self.confidence_threshold = confidence_threshold
+
+    def process(self, file_bytes: bytes, ocr_languages: str = "eng+hin", ocr_dpi: int = 300) -> OCRResult:
+        """Run primary provider; if confidence < threshold, try fallback."""
+        result = self.primary.extract(file_bytes, ocr_languages, ocr_dpi)
+
+        if result.confidence >= self.confidence_threshold and result.text.strip():
+            logging.info(
+                "ocr_pipeline_primary_success",
+                provider=result.provider,
+                confidence=result.confidence,
+                method=result.method,
+            )
+            return result
+
+        logging.warning(
+            "ocr_pipeline_primary_low_confidence",
+            provider=result.provider,
+            confidence=result.confidence,
+            error=result.error,
+            falling_back_to=self.fallback.name,
+        )
+
+        fallback_result = self.fallback.extract(file_bytes, ocr_languages, ocr_dpi)
+
+        if fallback_result.text.strip() and fallback_result.confidence >= self.confidence_threshold:
+            logging.info(
+                "ocr_pipeline_fallback_success",
+                provider=fallback_result.provider,
+                confidence=fallback_result.confidence,
+                method=fallback_result.method,
+            )
+            return fallback_result
+
+        # If fallback also fails, return whichever has higher confidence
+        if fallback_result.confidence > result.confidence:
+            return fallback_result
+
+        logging.error(
+            "ocr_pipeline_all_failed",
+            primary_confidence=result.confidence,
+            fallback_confidence=fallback_result.confidence,
+            primary_error=result.error,
+            fallback_error=fallback_result.error,
+        )
+        return result  # Return primary result (may be empty but has error details)
+
+
+def _legacy_ocr_fallback(uploaded_pdf, ocr_languages: str, ocr_dpi: int):
+    """Legacy OCR fallback for backward compatibility"""
     if hasattr(uploaded_pdf, "seek"):
         uploaded_pdf.seek(0)
     data = uploaded_pdf.read() if hasattr(uploaded_pdf, "read") else None
@@ -201,10 +532,25 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
         uploaded_pdf.seek(0)
     if not data:
         raise ValueError("Unable to read PDF bytes for OCR.")
+    return _legacy_ocr_fallback_bytes(data, ocr_languages, ocr_dpi)
 
-    images = convert_from_bytes(data, dpi=ocr_dpi)
+
+def _legacy_ocr_fallback_bytes(file_bytes: bytes, ocr_languages: str, ocr_dpi: int) -> str:
+    """Byte-array version of legacy OCR for use by LocalOCRProvider."""
+    try:
+        from pdf2image import convert_from_bytes
+        import pytesseract
+        from pytesseract import Output
+    except Exception as e:
+        raise OCRDependencyError(
+            f"OCR dependencies are missing ({e}). Install pytesseract, pdf2image, Pillow and Tesseract binaries.",
+            e,
+        ) from e
+
+    images = convert_from_bytes(file_bytes, dpi=ocr_dpi)
     pages_out: List[str] = []
     conf_scores: List[float] = []
+
     for image in images:
         ocr_data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
         page_text = _extract_layout_text_from_tesseract_data(ocr_data)
@@ -220,13 +566,13 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
                 continue
         if vals:
             conf_scores.append(sum(vals) / len(vals))
+
     text = "\n\n".join(pages_out).strip()
     if not text:
-        raise ValueError("OCR completed but no readable text was extracted.")
+        raise OCRProcessingError("OCR completed but no readable text was extracted.")
     if conf_scores:
         logging.info("ocr_confidence_avg=%.2f", sum(conf_scores) / len(conf_scores))
     return text
-
 
 def validate_pdf_metadata(uploaded_file):
     """
@@ -396,6 +742,11 @@ def output_language_mismatch_detected(output_text, language, min_wrong_chars=6):
         allowed_count == 0 or wrong_count / max(allowed_count, 1) > 0.15
     )
 
+def analyze_legal_citations(text: str, known_references: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Extract and validate legal citations from text."""
+    from core.citation_engine import analyze_legal_citations as _analyze_legal_citations
+
+    return _analyze_legal_citations(text, known_references=known_references)
 
 # ==================== LLM PROMPTS ====================
 
@@ -656,7 +1007,172 @@ def _validate_court_name(value: str) -> str:
     return cleaned
 
 
+def _compute_remedies_confidence_and_evidence(remedies: Dict, response_text: str) -> Dict:
+    """Heuristic confidence scoring for remedies extraction.
+
+    Returns a dict:
+      - confidence_score: float 0..1
+      - evidence_spans: list[{field, span_text, snippet_reason}]
+
+    This is deterministic and does not call external services.
+    """
+
+    text = (response_text or "").strip()
+    lower = text.lower()
+
+    def _score_field_present(field: str, *aliases: str) -> float:
+        v = (remedies.get(field) or "").strip()
+        if not v:
+            for alias in aliases:
+                v = (remedies.get(alias) or "").strip()
+                if v:
+                    break
+        if not v:
+            return 0.0
+        # penalize placeholder-y / unknown-y values
+        if v.lower() in {"unknown", "none", "n/a", "not applicable", "null"}:
+            return 0.1
+        return 1.0
+
+    # Fields we care about for remedies confidence
+    required_fields = [
+        "what_happened",
+        "can_appeal",
+        "appeal_days",
+        "appeal_court",
+        "cost_estimate",
+        "first_action",
+        "deadline",
+    ]
+
+    field_scores = {
+        "what_happened": _score_field_present("what_happened"),
+        "can_appeal": _score_field_present("can_appeal"),
+        "appeal_days": _score_field_present("appeal_days"),
+        "appeal_court": _score_field_present("appeal_court"),
+        "cost_estimate": _score_field_present("cost_estimate", "cost"),
+        "first_action": _score_field_present("first_action"),
+        "deadline": _score_field_present("deadline", "important_deadline"),
+    }
+    present_count = sum(1 for f, s in field_scores.items() if s >= 1.0)
+
+    # Base completeness score
+    completeness = present_count / len(required_fields)
+
+    # Strength adjustments
+    # - can_appeal is especially important
+    can_appeal_s = field_scores.get("can_appeal", 0.0)
+    if can_appeal_s < 1.0:
+        completeness *= 0.7
+
+    # - appeal_days and deadline overlap strongly; boost if both present
+    appeal_days_s = field_scores.get("appeal_days", 0.0)
+    deadline_s = field_scores.get("deadline", 0.0)
+    if appeal_days_s >= 1.0 and deadline_s >= 1.0:
+        completeness = min(1.0, completeness + 0.12)
+
+    # - if response text is very short, reduce confidence
+    length_penalty = 0.0
+    if len(lower) < 80:
+        length_penalty = 0.15
+    if len(lower) < 40:
+        length_penalty = 0.25
+
+    confidence = max(0.0, min(1.0, completeness - length_penalty))
+
+    evidence_spans: List[Dict[str, str]] = []
+
+    def _find_span(patterns: List[str], fallback: str) -> str:
+        for pattern in patterns:
+            m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+            if not m:
+                continue
+            span = m.group(0).strip()
+            if len(span) > 220:
+                span = span[:220].rsplit(" ", 1)[0] + "…"
+            return span
+        return fallback
+
+    # Evidence excerpts based on parsing-related regexes
+    # We include evidence spans even when values are missing; fallback indicates absence.
+    evidence_spans.append({
+        "field": "can_appeal",
+        "span_text": _find_span([
+            r"(?:^|\n)\s*\d{1,2}\s*[\.)\:\-]\s*can\s+the\s+loser\s+appeal\??.*",
+            r'"can_appeal"\s*:\s*"?.+?"?(?:,|\n|$)',
+        ], "[no explicit appeal answer found]"),
+        "snippet_reason": "Matched the ‘can the loser appeal’ section in the response.",
+    })
+
+    evidence_spans.append({
+        "field": "appeal_days",
+        "span_text": _find_span([
+            r"(?:^|\n)\s*\d{1,2}\s*[\.)\:\-]\s*(?:appeal\s+timeline|appeal\s+days?)\s*\n\s*[0-9]{1,3}",
+            r'"appeal_days"\s*:\s*"?\d{1,4}"?(?:,|\n|$)',
+        ], "[no appeal days found]"),
+        "snippet_reason": "Looked for a numeric appeal timeline / days value in the response.",
+    })
+
+    evidence_spans.append({
+        "field": "appeal_court",
+        "span_text": _find_span([
+            r"(?:^|\n)\s*\d{1,2}\s*[\.)\:\-]\s*appeal\s+court.*",
+            r'"appeal_court"\s*:\s*"?.+?"?(?:,|\n|$)',
+        ], "[no appeal court found]"),
+        "snippet_reason": "Looked for the ‘appeal court’ section content in the response.",
+    })
+
+    evidence_spans.append({
+        "field": "deadline",
+        "span_text": _find_span([
+            r"(?:^|\n)\s*\d{1,2}\s*[\.)\:\-]\s*(?:important\s+deadline|important\s+dates?).*",
+            r'"(?:important_deadline|deadline)"\s*:\s*"?.+?"?(?:,|\n|$)',
+        ], "[no deadline found]"),
+        "snippet_reason": "Looked for the ‘important deadline’ / ‘important dates’ section content.",
+    })
+
+    evidence_spans.append({
+        "field": "first_action",
+        "span_text": _find_span([
+            r"(?:^|\n)\s*\d{1,2}\s*[\.)\:\-]\s*(?:first\s+action|what\s+should\s+they\s+do\s+first).*",
+            r'"first_action"\s*:\s*"?.+?"?(?:,|\n|$)',
+        ], "[no first action found]"),
+        "snippet_reason": "Looked for the ‘first action’ section in the response.",
+    })
+
+    evidence_spans.append({
+        "field": "what_happened",
+        "span_text": _find_span([
+            r"(?:^|\n)\s*\d{1,2}\s*[\.)\:\-]\s*what\s+happened\??.*",
+            r'"what_happened"\s*:\s*"?.+?"?(?:,|\n|$)',
+        ], "[no ‘what happened’ content found]"),
+        "snippet_reason": "Looked for the ‘what happened’ section in the response.",
+    })
+
+    evidence_spans.append({
+        "field": "cost",
+        "span_text": _find_span([
+            r"(?:^|\n)\s*\d{1,2}\s*[\.)\:\-]\s*(?:cost\s+estimate|rough\s+cost|cost).*",
+            r'"(?:cost_estimate|cost)"\s*:\s*"?.+?"?(?:,|\n|$)',
+        ], "[no cost information found]"),
+        "snippet_reason": "Looked for the cost estimate / cost section in the response.",
+    })
+
+    # Remove obviously empty evidence spans (but keep list always present)
+    # We keep placeholders to show rationale excerpts, but can filter if desired.
+    evidence_spans = [
+        s for s in evidence_spans
+        if s.get("span_text") is not None and str(s.get("span_text")).strip() != ""
+    ]
+
+    return {
+        "confidence_score": float(confidence),
+        "evidence_spans": evidence_spans,
+    }
+
+
 def parse_remedies_response(response_text: str) -> Dict:
+
     """
     Extract structured info from LLM response.
     Prioritizes JSON parsing, with a robust fallback to regex-based line parsing.
@@ -679,6 +1195,7 @@ def parse_remedies_response(response_text: str) -> Dict:
     if not text:
         remedies["_is_partial"] = True
         remedies["_warning"] = "Empty response"
+        remedies.update(_compute_remedies_confidence_and_evidence(remedies, text))
         return remedies
 
     # --- STEP 1: Try JSON parsing ---
@@ -690,7 +1207,7 @@ def parse_remedies_response(response_text: str) -> Dict:
         remedies["appeal_days"] = _clean_answer(str(data.get("appeal_days", "")))
         remedies["appeal_court"] = _validate_court_name(data.get("appeal_court", ""))
         remedies["cost_estimate"] = _clean_answer(data.get("cost_estimate", ""))
-        remedies["cost"] = remedies["cost_estimate"]
+        remedies["cost"] = _clean_answer(data.get("cost", "") or data.get("cost_estimate", ""))
         remedies["first_action"] = _clean_answer(data.get("first_action", ""))
         remedies["important_deadline"] = _clean_answer(data.get("important_deadline", ""))
         remedies["deadline"] = remedies["important_deadline"]
@@ -698,12 +1215,14 @@ def parse_remedies_response(response_text: str) -> Dict:
         # Validation: ensure at least some fields are populated
         populated_fields = [v for k, v in remedies.items() if v and not k.startswith("_")]
         if len(populated_fields) >= 4:
+            remedies.update(_compute_remedies_confidence_and_evidence(remedies, text))
             return remedies
         # If JSON was thin, fall through to regex just in case
 
     # --- STEP 2: Fallback to regex-based line parsing ---
-    # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
-    pattern = r'^([1-9]\d?)\s*[.):‐-]\s*(.*?)$'
+    # Match 0-99 section numbers and a wider set of separators while still
+    # avoiding content like "5000-10000".
+    pattern = r'^(\d{1,2})\s*[\.)\:\]\-\u2010\u2011\u2012\u2013\u2014]\s*(.*?)$'
     sections = {}
     
     for line in text.split('\n'):
@@ -716,6 +1235,7 @@ def parse_remedies_response(response_text: str) -> Dict:
     # If no numbered sections found, return empty dict with partial flag
     if not sections:
         remedies["_is_partial"] = True
+        remedies.update(_compute_remedies_confidence_and_evidence(remedies, text))
         return remedies
     
     # Extract content for each section
@@ -734,43 +1254,63 @@ def parse_remedies_response(response_text: str) -> Dict:
     for num in sections:
         sections[num]["content"] = sections[num]["content"].strip()
     
-    # Map sections to keys based on count
+    # Map sections to keys based on count. Some LLMs emit 0-based numbering,
+    # so normalize the logical positions against the smallest detected index.
+    section_offset = min(sections.keys())
     is_7section = len(sections) >= 7
+
+    def _section_content(logical_number: int) -> str:
+        actual_number = section_offset + logical_number - 1
+        return sections.get(actual_number, {}).get("content", "")
     
     if is_7section:
-        if 1 in sections:
-            remedies["what_happened"] = sections[1]["content"]
-        if 2 in sections:
-            can_appeal_text = sections[2]["content"].lower()
+        if _section_content(1):
+            remedies["what_happened"] = _section_content(1)
+        if _section_content(2):
+            can_appeal_text = _section_content(2).lower()
             remedies["can_appeal"] = "yes" if "yes" in can_appeal_text else "no"
-        if 3 in sections:
+        if _section_content(3):
             # Extract just the number from "30 days"
-            appeal_days_text = sections[3]["content"]
+            appeal_days_text = _section_content(3)
             match = re.search(r'\d+', appeal_days_text)
             remedies["appeal_days"] = match.group() if match else appeal_days_text
-        if 4 in sections:
-            remedies["appeal_court"] = sections[4]["content"]
-        if 5 in sections:
-            remedies["cost_estimate"] = sections[5]["content"]
-            remedies["cost"] = sections[5]["content"]  # Support both keys
-        if 6 in sections:
-            remedies["first_action"] = sections[6]["content"]
-        if 7 in sections:
-            remedies["deadline"] = sections[7]["content"]
+        if _section_content(4):
+            remedies["appeal_court"] = _section_content(4)
+        if _section_content(5):
+            remedies["cost_estimate"] = _section_content(5)
+            remedies["cost"] = _section_content(5)  # Support both keys
+        if _section_content(6):
+            remedies["first_action"] = _section_content(6)
+        if _section_content(7):
+            remedies["deadline"] = _section_content(7)
         remedies["_is_partial"] = False  # Full 7-section response
     else:
         # 5-section format (old) - mark as partial
         remedies["_is_partial"] = True
-        if 1 in sections:
-            remedies["what_happened"] = sections[1]["content"]
-        if 2 in sections:
-            remedies["can_appeal"] = sections[2]["content"].lower()
-        if 3 in sections:
-            remedies["appeal_details"] = sections[3]["content"]
-        if 4 in sections:
-            remedies["first_action"] = sections[4]["content"]
-        if 5 in sections:
-            remedies["deadline"] = sections[5]["content"]
+        if _section_content(1):
+            remedies["what_happened"] = _section_content(1)
+        if _section_content(2):
+            can_appeal_text = _section_content(2).strip()
+            normalized_can_appeal = _normalize_yes_no(can_appeal_text)
+            remedies["can_appeal"] = normalized_can_appeal or can_appeal_text.lower()
+        if _section_content(3):
+            appeal_details = _section_content(3)
+            remedies["appeal_details"] = appeal_details
+
+            appeal_info = extract_appeal_info(appeal_details)
+            if appeal_info["days"]:
+                remedies["appeal_days"] = appeal_info["days"]
+            if appeal_info["court"]:
+                remedies["appeal_court"] = appeal_info["court"]
+            if appeal_info["cost"]:
+                remedies["cost_estimate"] = appeal_info["cost"]
+                remedies["cost"] = appeal_info["cost"]
+        if _section_content(4):
+            remedies["first_action"] = _section_content(4)
+        if _section_content(5):
+            remedies["deadline"] = _section_content(5)
+
+    remedies.update(_compute_remedies_confidence_and_evidence(remedies, text))
 
     return remedies
 
@@ -786,7 +1326,15 @@ def extract_appeal_info(appeal_details_text):
         if keyword.lower() in text.lower():
             info["court"] = keyword
             break
-    cost_match = re.search(r"₹?([\d,]+(?:[-–][\d,]+)?)", text.replace(" ", ""))
+    cost_match = re.search(
+        r"(?:cost|estimated cost|fee|fees|amount|expense|expenses)[^\d₹$£€]*([₹$£€]?\d[\d,]*(?:[-–]\d[\d,]*)?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not cost_match:
+        cost_match = re.search(r"[₹$£€]\s*(\d[\d,]*(?:[-–]\d[\d,]*)?)", text)
+    if not cost_match:
+        cost_match = re.search(r"\b(\d[\d,]*(?:[-–]\d[\d,]*)?)\b", text)
     if cost_match:
         info["cost"] = cost_match.group(1)
     return info
@@ -886,68 +1434,186 @@ def safe_llm_call(
     
     # Attempt the API call multiple times based on the retry configuration
     for attempt in range(retries):
+        if _tracer:
+            with _tracer.start_as_current_span(
+                f"openai.chat.{model}",
+                attributes={
+                    "llm.model": model,
+                    "llm.max_tokens": max_tokens,
+                    "llm.temperature": temperature,
+                    "llm.attempt": attempt + 1,
+                },
+            ) as span:
+                try:
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        timeout=timeout,
+                    )
+                    if hasattr(response, 'usage') and response.usage:
+                        span.set_attribute("llm.prompt_tokens", response.usage.prompt_tokens or 0)
+                        span.set_attribute("llm.completion_tokens", response.usage.completion_tokens or 0)
+                        span.set_attribute("llm.total_tokens", response.usage.total_tokens or 0)
+                    return response.choices[0].message.content.strip(), None
+                except openai.AuthenticationError:
+                    return None, "Authentication failed. Please check your API key in the configuration."
+                except openai.RateLimitError:
+                    if attempt < retries - 1:
+                        wait_time = Config.AI_RETRY_BACKOFF_BASE ** attempt
+                        logging.warning(f"Rate limit hit. Retrying in {wait_time}s... (Attempt {attempt + 1}/{retries})")
+                        time.sleep(wait_time)
+                        continue
+                    return None, "Rate limit exceeded. Please try again in a few minutes."
+                except openai.APITimeoutError:
+                    if attempt < retries - 1:
+                        logging.warning(f"Request timed out. Retrying... (Attempt {attempt + 1}/{retries})")
+                        continue
+                    return None, "The request timed out. The AI server might be busy or your connection is slow."
+                except openai.APIConnectionError:
+                    if attempt < retries - 1:
+                        time.sleep(1)
+                        logging.warning(f"Connection error. Retrying... (Attempt {attempt + 1}/{retries})")
+                        continue
+                    return None, "Could not connect to the AI server. Please check your internet connection."
+                except openai.APIStatusError as e:
+                    if e.status_code == 402:
+                        return None, "AI Service Error: Out of credits. Please top up your provider account."
+                    if attempt < retries - 1:
+                        time.sleep(1)
+                        continue
+                    return None, f"AI Service Error (HTTP {e.status_code}): {str(e)}"
+                except Exception as e:
+                    last_error = str(e)
+                    span.set_attribute("error", True)
+                    span.set_attribute("error.message", last_error)
+                    if attempt < retries - 1:
+                        time.sleep(0.5)
+                        continue
+        else:
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=timeout,
+                )
+                return response.choices[0].message.content.strip(), None
+            except openai.AuthenticationError:
+                return None, "Authentication failed. Please check your API key in the configuration."
+            except openai.RateLimitError:
+                if attempt < retries - 1:
+                    wait_time = Config.AI_RETRY_BACKOFF_BASE ** attempt
+                    logging.warning(f"Rate limit hit. Retrying in {wait_time}s... (Attempt {attempt + 1}/{retries})")
+                    time.sleep(wait_time)
+                    continue
+                return None, "Rate limit exceeded. Please try again in a few minutes."
+            except openai.APITimeoutError:
+                if attempt < retries - 1:
+                    logging.warning(f"Request timed out. Retrying... (Attempt {attempt + 1}/{retries})")
+                    continue
+                return None, "The request timed out. The AI server might be busy or your connection is slow."
+            except openai.APIConnectionError:
+                if attempt < retries - 1:
+                    time.sleep(1)
+                    logging.warning(f"Connection error. Retrying... (Attempt {attempt + 1}/{retries})")
+                    continue
+                return None, "Could not connect to the AI server. Please check your internet connection."
+            except openai.APIStatusError as e:
+                if e.status_code == 402:
+                    return None, "AI Service Error: Out of credits. Please top up your provider account."
+                if attempt < retries - 1:
+                    time.sleep(1)
+                    continue
+                return None, f"AI Service Error (HTTP {e.status_code}): {str(e)}"
+            except Exception as e:
+                last_error = str(e)
+                logging.error(f"Unexpected LLM API Error (Attempt {attempt + 1}): {str(e)}", exc_info=True)
+                if attempt < retries - 1:
+                    time.sleep(0.5)
+                    continue
+    
+    # If all retry attempts failed, return the last error encountered
+    return None, f"An unexpected error occurred after {retries} attempts: {last_error}"
+
+
+async def safe_llm_call_async(
+    client: OpenAI,
+    model: str,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+    timeout: Optional[float] = None,
+    retries: Optional[int] = None
+) -> Tuple[Optional[str], Optional[str]]:
+    """Async wrapper around `safe_llm_call` that offloads blocking client calls to a thread.
+
+    This keeps asyncio event loops responsive while still leveraging the same
+    retry and error-handling semantics as the synchronous helper.
+    """
+    import asyncio as _asyncio
+    import time as _time
+    import openai as _openai
+
+    if timeout is None:
+        timeout = Config.AI_REQUEST_TIMEOUT
+    if retries is None:
+        retries = Config.AI_MAX_RETRIES
+
+    last_error = None
+
+    for attempt in range(retries):
         try:
-            # Execute the completion request
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                timeout=timeout,
-            )
-            
-            # Successfully received a response
-            return response.choices[0].message.content.strip(), None
+            # Offload the blocking client call to a thread
+            def _call():
+                return client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=timeout,
+                )
 
-        except openai.AuthenticationError:
-            # Terminal error: API key is invalid
+            response = await _asyncio.to_thread(_call)
+            if hasattr(response, 'choices') and response.choices:
+                return response.choices[0].message.content.strip(), None
+            return None, "Empty response from LLM"
+        except _openai.AuthenticationError:
             return None, "Authentication failed. Please check your API key in the configuration."
-
-        except openai.RateLimitError:
-            # Recoverable error: Wait and try again if attempts remain
+        except _openai.RateLimitError:
             if attempt < retries - 1:
                 wait_time = Config.AI_RETRY_BACKOFF_BASE ** attempt
                 logging.warning(f"Rate limit hit. Retrying in {wait_time}s... (Attempt {attempt + 1}/{retries})")
-                time.sleep(wait_time)
+                await _asyncio.sleep(wait_time)
                 continue
             return None, "Rate limit exceeded. Please try again in a few minutes."
-
-        except openai.APITimeoutError:
-            # Recoverable error: Network or server was too slow
+        except _openai.APITimeoutError:
             if attempt < retries - 1:
                 logging.warning(f"Request timed out. Retrying... (Attempt {attempt + 1}/{retries})")
                 continue
             return None, "The request timed out. The AI server might be busy or your connection is slow."
-
-        except openai.APIConnectionError:
-            # Recoverable error: Transient network issues
+        except _openai.APIConnectionError:
             if attempt < retries - 1:
-                time.sleep(1)
                 logging.warning(f"Connection error. Retrying... (Attempt {attempt + 1}/{retries})")
+                await _asyncio.sleep(1)
                 continue
             return None, "Could not connect to the AI server. Please check your internet connection."
-
-        except openai.APIStatusError as e:
-            # Handle specific HTTP status codes from the API
+        except _openai.APIStatusError as e:
             if e.status_code == 402:
-                # Specific case for OpenRouter out of credits
                 return None, "AI Service Error: Out of credits. Please top up your provider account."
-            
             if attempt < retries - 1:
-                time.sleep(1)
+                await _asyncio.sleep(1)
                 continue
             return None, f"AI Service Error (HTTP {e.status_code}): {str(e)}"
-
         except Exception as e:
-            # Catch-all for unexpected exceptions
-            logging.error(f"Unexpected LLM API Error (Attempt {attempt + 1}): {str(e)}", exc_info=True)
             last_error = str(e)
-            
+            logging.exception(f"Unexpected async LLM API Error (Attempt {attempt + 1}): {str(e)}")
             if attempt < retries - 1:
-                time.sleep(0.5)
+                await _asyncio.sleep(0.5)
                 continue
-    
-    # If all retry attempts failed, return the last error encountered
+
     return None, f"An unexpected error occurred after {retries} attempts: {last_error}"
 
 
@@ -1089,7 +1755,7 @@ UI_TEXT = {
     "simplified_judgment": "✅ Simplified Judgment",
     "summary_success": "The judgment has been simplified successfully.",
     "remedies_title": "⚖️ What Can You Do Now?",
-    "remedies_spinner": "Analyzing your legal options...",
+    "remedies_spinner": "Fetching remedies advice...",
     "what_happened": "What Happened?",
     "can_appeal": "Can You Appeal?",
     "appeal_details": "Appeal Details",
@@ -1251,17 +1917,38 @@ JSON:
 {json.dumps(text_map, ensure_ascii=False, indent=2)}
 """
     try:
-        response = client.chat.completions.create(
-            model=get_default_model(),
-            messages=[
-                {"role": "system", "content": "You translate UI copy accurately and return valid JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=2200,
-            temperature=0.0,
-            timeout=Config.AI_REQUEST_TIMEOUT,
-        )
-        translated = _parse_json_object(response.choices[0].message.content)
+        if _tracer:
+            with _tracer.start_as_current_span(
+                f"openai.chat.{get_default_model()}",
+                attributes={"llm.model": get_default_model(), "llm.operation": "ui_translation"},
+            ) as span:
+                response = client.chat.completions.create(
+                    model=get_default_model(),
+                    messages=[
+                        {"role": "system", "content": "You translate UI copy accurately and return valid JSON only."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=2200,
+                    temperature=0.0,
+                    timeout=Config.AI_REQUEST_TIMEOUT,
+                )
+                if hasattr(response, 'usage') and response.usage:
+                    span.set_attribute("llm.prompt_tokens", response.usage.prompt_tokens or 0)
+                    span.set_attribute("llm.completion_tokens", response.usage.completion_tokens or 0)
+                    span.set_attribute("llm.total_tokens", response.usage.total_tokens or 0)
+                translated = _parse_json_object(response.choices[0].message.content)
+        else:
+            response = client.chat.completions.create(
+                model=get_default_model(),
+                messages=[
+                    {"role": "system", "content": "You translate UI copy accurately and return valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=2200,
+                temperature=0.0,
+                timeout=Config.AI_REQUEST_TIMEOUT,
+            )
+            translated = _parse_json_object(response.choices[0].message.content)
     except Exception as exc:
         logging.warning("Failed to translate UI text for %s: %s", language, exc)
         return {}
@@ -2049,5 +2736,61 @@ def parse_summary_bullets(raw_text):
     if not final_bullets:
         # Final fallback: return the raw text if all parsing heuristics failed
         return raw_text
-        
     return "\n".join([f"- {b}" for b in final_bullets])
+
+
+def get_file_stream(file_obj, chunk_size=65536):
+    """
+    Generator that yields chunks of a file object.
+    Prevents memory exhaustion by keeping resident memory usage low.
+    """
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    while True:
+        chunk = file_obj.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+def _validate_encoding_quality(text: str) -> Tuple[bool, float]:
+    # Placeholder for your encoding check
+    return True, 1.0
+class PipelineStateManager:
+    @staticmethod
+    def get_state(db, doc_id):
+        return db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+
+    @staticmethod
+    def update_stage(db, doc_id, stage, data=None):
+        state = db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+        if not state:
+            state = DocumentProcessingState(document_id=doc_id)
+            db.add(state)
+        state.current_stage = stage
+        if data:
+            current_data = state.stage_data or {}
+            current_data.update(data)
+            state.stage_data = current_data
+        db.commit()
+
+def get_file_stream(file_obj, chunk_size=65536):
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    while True:
+        chunk = file_obj.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+def process_file_to_disk(uploaded_file) -> str:
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    try:
+        for chunk in get_file_stream(uploaded_file):
+            tmp_file.write(chunk)
+        tmp_file.close()
+        return tmp_file.name
+    except Exception as e:
+        tmp_file.close()
+        if os.path.exists(tmp_file.name):
+            os.remove(tmp_file.name)
+        raise PDFProcessingError(f"Streaming to disk failed: {str(e)}")

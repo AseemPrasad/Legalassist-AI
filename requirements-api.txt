@@ -52,6 +52,9 @@ opentelemetry-instrumentation-redis>=0.41b0
 sentry-sdk>=2.0.0
 
 # Utilities
+# Vector Database & RAG
+chromadb>=0.4.0
+
 tenacity>=8.2.0
 python-dotenv>=1.0.0
 python-dateutil>=2.8.0
@@ -77,3 +80,13 @@ pre-commit>=3.5.0
 # Documentation
 mkdocs>=1.5.0
 mkdocs-material>=9.4.0
+
+# Multi-Modal Document Processing
+Pillow>=10.0.0
+pytesseract>=0.3.10
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+numpy>=1.24.0
+scikit-image>=0.21.0
+imagehash>=4.3.0
+pyheif>=0.7.0
