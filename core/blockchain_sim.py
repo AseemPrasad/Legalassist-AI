@@ -17,6 +17,13 @@ class Block(dict):
     pass
 
 
+class MerkleNode:
+    def __init__(self, val: str, left: Optional[MerkleNode] = None, right: Optional[MerkleNode] = None):
+        self.val = val
+        self.left = left
+        self.right = right
+
+
 class BlockchainSimulator:
     def __init__(self, redis_client=None, redis_key: str = "blockchain:default"):
         self.redis_client = redis_client
@@ -84,3 +91,62 @@ class BlockchainSimulator:
             return None
         idx = block["index"]
         return self.ledger[: idx + 1]
+
+    def _build_merkle_tree(self) -> Optional[MerkleNode]:
+        hashes = [b["data_hash"] for b in self.ledger if "data_hash" in b]
+        if not hashes:
+            return None
+        nodes = [MerkleNode(h) for h in hashes]
+        while len(nodes) > 1:
+            next_level = []
+            for i in range(0, len(nodes), 2):
+                left = nodes[i]
+                if i + 1 < len(nodes):
+                    right = nodes[i + 1]
+                    parent_hash = hashlib.sha256((left.val + right.val).encode("utf-8")).hexdigest()
+                    next_level.append(MerkleNode(parent_hash, left, right))
+                else:
+                    next_level.append(left)
+            nodes = next_level
+        return nodes[0]
+
+    def get_merkle_root(self) -> str:
+        """Return the Merkle root hash for all data_hashes in the ledger."""
+        root = self._build_merkle_tree()
+        return root.val if root else "0" * 64
+
+    def get_merkle_proof(self, data_hash: str) -> List[Dict[str, Any]]:
+        """Generate a Merkle path proof for a given data_hash."""
+        root = self._build_merkle_tree()
+        if not root:
+            return []
+        proof = []
+        def _find_path(node: Optional[MerkleNode], target_val: str) -> bool:
+            if not node:
+                return False
+            if not node.left and not node.right:
+                return node.val == target_val
+            if _find_path(node.left, target_val):
+                if node.right:
+                    proof.append({"sibling": node.right.val, "is_left": False})
+                return True
+            if _find_path(node.right, target_val):
+                if node.left:
+                    proof.append({"sibling": node.left.val, "is_left": True})
+                return True
+            return False
+
+        _find_path(root, data_hash)
+        return proof
+
+    @staticmethod
+    def verify_merkle_proof(target: str, proof: List[Dict[str, Any]], root_hash: str) -> bool:
+        """Verify that a target data_hash resides in the Merkle Tree with the given root_hash."""
+        current = target
+        for step in proof:
+            sibling = step["sibling"]
+            if step["is_left"]:
+                current = hashlib.sha256((sibling + current).encode("utf-8")).hexdigest()
+            else:
+                current = hashlib.sha256((current + sibling).encode("utf-8")).hexdigest()
+        return current == root_hash

@@ -40,6 +40,25 @@ _JURISDICTION_WEEKENDS = {
     "PK": {5, 6},       # Sat–Sun (Pakistan)
 }
 
+COURT_HOLIDAYS = {
+    "IN_SC": [
+        "2026-01-26",  # Republic Day
+        "2026-03-03",  # Holi
+        "2026-08-15",  # Independence Day
+        "2026-10-02",  # Gandhi Jayanti
+        "2026-11-08",  # Diwali
+        "2026-12-25",  # Christmas
+    ],
+    "IN_DHC": [
+        "2026-01-26",
+        "2026-03-03",
+        "2026-08-15",
+        "2026-10-02",
+        "2026-11-08",
+        "2026-12-25",
+    ],
+}
+
 
 def _is_weekend(dt: date, jurisdiction: Optional[str] = None) -> bool:
     # Check jurisdiction-specific weekend days mapped in dictionary
@@ -81,6 +100,10 @@ def calculate_deadline(
                     f"Invalid holiday date format: {h!r}. Expected YYYY-MM-DD."
                 )
         holidays_set = set(holidays)
+
+    if jurisdiction:
+        for h in COURT_HOLIDAYS.get(jurisdiction.upper(), []):
+            holidays_set.add(h)
 
     remaining = max(0, int(business_days))
     current = dt
@@ -137,6 +160,10 @@ def calculate_deadline(
     if emergency_extension_days:
         final += timedelta(days=int(emergency_extension_days))
         final = _roll_forward(final)
+
+    # Recheck if the final date with adjustments lands on a holiday/weekend
+    while (exclude_weekends and _is_weekend(final.date(), jurisdiction)) or (final.date().isoformat() in holidays_set):
+        final = final + timedelta(days=1)
 
     return {
         "deadline": final.isoformat(),

@@ -118,10 +118,21 @@ class LegalRAG:
                     if len(sub_chunk) <= max_chunk_size:
                         semantic_chunks.append(sub_chunk)
                     else:
-                        for i in range(0, len(sub_chunk), max_hard_slice_size):
-                            hard_slice = sub_chunk[i:i + max_hard_slice_size]
-                            if hard_slice.strip():
-                                semantic_chunks.append(hard_slice)
+                        # Soft-split on word boundaries to avoid cutting mid-word
+                        words = sub_chunk.split(" ")
+                        curr_chunk = []
+                        curr_size = 0
+                        for w in words:
+                            if curr_size + len(w) + 1 > max_hard_slice_size:
+                                if curr_chunk:
+                                    semantic_chunks.append(" ".join(curr_chunk))
+                                curr_chunk = [w]
+                                curr_size = len(w)
+                            else:
+                                curr_chunk.append(w)
+                                curr_size += len(w) + 1
+                        if curr_chunk:
+                            semantic_chunks.append(" ".join(curr_chunk))
 
         return [chunk for chunk in semantic_chunks if chunk.strip()]
 
