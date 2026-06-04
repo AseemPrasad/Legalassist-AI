@@ -181,7 +181,17 @@ def validate_file_upload(
         raise ValidationError(
             detail=f"File type '{file.content_type}' not allowed. Allowed: {', '.join(allowed_mime_types)}"
         )
+    # Reject files that declare no MIME type — client-provided content_type
+    # cannot be trusted as the sole gate; absent type is also unacceptable.
+    if not file.content_type:
+        logger.warning("missing_upload_mime_type", filename=file.filename)
+        raise ValidationError(
+            detail="File MIME type is missing. Ensure the file is a supported type."
+        )
 
+    # Content-based validation: inspect magic bytes independently of the
+    # client-supplied content_type.  A malicious actor can set any MIME type
+    # they like; only the actual file header is authoritative.
     if check_magic_bytes and file_ext in MAGIC_BYTES:
         try:
             if hasattr(file.file, 'read'):
@@ -199,7 +209,10 @@ def validate_file_upload(
         except ValidationError:
             raise
         except Exception as exc:
+            # Log and re-raise so the caller is never silently passed a file
+            # whose content could not be verified — fail closed.
             logger.error("magic_bytes_check_failed", filename=file.filename, error=str(exc))
+            raise ValidationError(detail="File content could not be verified. Upload rejected.") from exc
 
     if file.size and file.size > max_size:
         logger.warning("upload_exceeds_max_size", filename=file.filename, size_bytes=file.size, max_size_bytes=max_size)

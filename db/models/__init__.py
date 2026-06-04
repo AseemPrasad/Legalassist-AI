@@ -6,6 +6,7 @@ from .audit import AuditEvent
 from db.immutable_audit_log import ImmutableAuditLog
 from .feedback import UserFeedback
 from .reports import Report, ReportStatus, ReportType, ReportFormat
+from db.models.locks import DocumentProcessingLock, LockAction
 from .analytics import (
     CaseRecord,
     CaseOutcome,

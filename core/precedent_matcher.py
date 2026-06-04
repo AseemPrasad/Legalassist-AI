@@ -208,9 +208,8 @@ class PrecedentMatcher:
             Dict with success statistics
         """
         try:
-            query = db.query(CaseArgument).filter(
-                CaseArgument.argument_text == argument_text
-            )
+            from difflib import SequenceMatcher
+            query = db.query(CaseArgument)
             
             if issue_name:
                 issue = db.query(CaseIssue).filter(
@@ -222,10 +221,22 @@ class PrecedentMatcher:
             all_arguments = query.all()
             if not all_arguments:
                 return {"success_rate": 0, "total_uses": 0, "successful": 0, "failed": 0}
+
+            # Filter candidates using a fuzzy similarity match threshold
+            matched_arguments = []
+            for arg in all_arguments:
+                if not arg.argument_text:
+                    continue
+                ratio = SequenceMatcher(None, arg.argument_text.lower(), argument_text.lower()).ratio()
+                if ratio >= 0.65:
+                    matched_arguments.append(arg)
+
+            if not matched_arguments:
+                return {"success_rate": 0, "total_uses": 0, "successful": 0, "failed": 0}
             
-            successful = sum(1 for arg in all_arguments if arg.argument_succeeded is True)
-            failed = sum(1 for arg in all_arguments if arg.argument_succeeded is False)
-            total = len(all_arguments)
+            successful = sum(1 for arg in matched_arguments if arg.argument_succeeded is True)
+            failed = sum(1 for arg in matched_arguments if arg.argument_succeeded is False)
+            total = len(matched_arguments)
             
             success_rate = (successful / total * 100) if total > 0 else 0
             
