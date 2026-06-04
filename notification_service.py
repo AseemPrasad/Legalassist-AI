@@ -4,6 +4,7 @@ Handles delivery tracking and retry logic.
 """
 
 import logging
+import re
 import structlog
 import os
 from datetime import datetime, timezone
@@ -53,6 +54,17 @@ def _is_debug_or_testing_mode() -> bool:
     return Config.DEBUG or Config.TESTING
 
 logger = structlog.get_logger(__name__)
+
+
+def _sanitize_preview(text: str, max_length: int = 160) -> str:
+    """Truncate and strip HTML for safe preview storage."""
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_length:
+        text = text[:max_length].rsplit(" ", 1)[0] + "..."
+    return text
 
 
 @dataclass
@@ -235,7 +247,7 @@ def send_email_task(
                     status=status,
                     message_id=message_id,
                     error_message=error,
-                    message_preview=html_content,
+                    message_preview=_sanitize_preview(html_content, max_length=200),
                 )
                 logger.info("Background notification logged successfully", deadline_id=deadline_id)
         except Exception as e:
@@ -427,7 +439,7 @@ class NotificationService:
             status=status,
             message_id=message_id,
             error_message=error,
-            message_preview=message,
+            message_preview=_sanitize_preview(message),
         )
 
         return NotificationResult(
