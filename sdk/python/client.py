@@ -5,6 +5,13 @@ import httpx
 from typing import Optional, Dict, Any, List
 import asyncio
 import time
+import uuid
+
+
+def _with_idempotency_headers(headers: Dict[str, str], idempotency_key: Optional[str] = None) -> Dict[str, str]:
+    merged = dict(headers)
+    merged["Idempotency-Key"] = idempotency_key or str(uuid.uuid4())
+    return merged
 
 
 class LegalassistClient:
@@ -56,12 +63,12 @@ class LegalassistClient:
         response = self.client.post(
             f"{self.base_url}/api/v1/auth/token",
             data={"username": username, "password": password},
-            headers=self.headers
+            headers=_with_idempotency_headers(self.headers)
         )
         response.raise_for_status()
         return response.json()
     
-    def create_api_key(self, name: str, expires_in_days: Optional[int] = None) -> Dict[str, Any]:
+    def create_api_key(self, name: str, expires_in_days: Optional[int] = None, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
         """Create new API key"""
         payload = {"name": name}
         if expires_in_days:
@@ -70,7 +77,7 @@ class LegalassistClient:
         response = self.client.post(
             f"{self.base_url}/api/v1/auth/api-keys",
             json=payload,
-            headers=self.headers
+            headers=_with_idempotency_headers(self.headers, idempotency_key)
         )
         response.raise_for_status()
         return response.json()
@@ -93,7 +100,8 @@ class LegalassistClient:
         text: Optional[str] = None,
         file_url: Optional[str] = None,
         document_type: str = "unknown",
-        extract_remedies: bool = True
+        extract_remedies: bool = True,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Analyze document asynchronously
@@ -115,7 +123,7 @@ class LegalassistClient:
         response = self.client.post(
             f"{self.base_url}/api/v1/analyze/document",
             json=payload,
-            headers=self.headers
+            headers=_with_idempotency_headers(self.headers, idempotency_key)
         )
         response.raise_for_status()
         return response.json()
@@ -167,7 +175,8 @@ class LegalassistClient:
         self,
         keywords: Optional[List[str]] = None,
         jurisdiction: str = "US",
-        limit: int = 10
+        limit: int = 10,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Search for cases"""
         payload = {
@@ -179,7 +188,7 @@ class LegalassistClient:
         response = self.client.post(
             f"{self.base_url}/api/v1/cases/search",
             json=payload,
-            headers=self.headers
+            headers=_with_idempotency_headers(self.headers, idempotency_key)
         )
         response.raise_for_status()
         return response.json()
@@ -201,7 +210,8 @@ class LegalassistClient:
         self,
         case_id: str,
         report_type: str = "comprehensive",
-        format: str = "pdf"
+        format: str = "pdf",
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Generate report asynchronously"""
         payload = {
@@ -213,7 +223,7 @@ class LegalassistClient:
         response = self.client.post(
             f"{self.base_url}/api/v1/reports/generate",
             json=payload,
-            headers=self.headers
+            headers=_with_idempotency_headers(self.headers, idempotency_key)
         )
         response.raise_for_status()
         return response.json()
@@ -266,7 +276,8 @@ class LegalassistClient:
         title: str,
         due_date: str,
         description: str = "",
-        priority: str = "medium"
+        priority: str = "medium",
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create new deadline"""
         payload = {
@@ -279,7 +290,7 @@ class LegalassistClient:
         response = self.client.post(
             f"{self.base_url}/api/v1/deadlines",
             json=payload,
-            headers=self.headers
+            headers=_with_idempotency_headers(self.headers, idempotency_key)
         )
         response.raise_for_status()
         return response.json()
