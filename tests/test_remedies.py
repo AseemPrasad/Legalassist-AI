@@ -348,7 +348,11 @@ class TestRemediesParsingWithFixtures:
         remedies = parse_remedies_response(response_text)
         
         assert isinstance(remedies, dict), f"{fixture_name}: should return dict"
-        assert all(isinstance(v, str) for k, v in remedies.items() if not k.startswith("_")), \
+        assert all(
+            isinstance(v, str)
+            for k, v in remedies.items()
+            if k not in {"confidence_score", "evidence_spans"} and not k.startswith("_")
+        ), \
             f"{fixture_name}: all data values should be strings"
     
     def test_criminal_guilty_parsing(self, mock_remedies_response):

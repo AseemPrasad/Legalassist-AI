@@ -1,5 +1,7 @@
 import datetime as dt
+import json
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, JSON, UniqueConstraint
+from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import relationship
 from db.base import Base
 
@@ -19,7 +21,7 @@ class CaseRecord(Base):
     judgment_summary = Column(Text)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
 
-    outcome_data = relationship("CaseOutcome", back_populates="case_record", uselist=False, cascade="all, delete-orphan")
+    outcome_data = relationship("db.models.analytics.CaseOutcome", back_populates="case_record", uselist=False, cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<CaseRecord(id={self.id}, hashed_id='{self.hashed_case_id}', outcome='{self.outcome}')>"
@@ -40,7 +42,7 @@ class CaseOutcome(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
-    case_record = relationship("CaseRecord", back_populates="outcome_data")
+    case_record = relationship("db.models.analytics.CaseRecord", back_populates="outcome_data")
 
     def __repr__(self):
         return f"<CaseOutcome(case_id={self.case_id}, appeal_filed={self.appeal_filed}, appeal_success={self.appeal_success})>"
@@ -89,7 +91,7 @@ class ModelFeedback(Base):
     feedback_notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
-    case = relationship("CaseRecord")
+    case = relationship("db.models.analytics.CaseRecord")
 
     def __repr__(self):
         return f"<ModelFeedback(model={self.model_name}, task={self.task}, accurate={self.is_accurate})>"
@@ -141,10 +143,55 @@ class SimilarityFeedback(Base):
     relevance = Column(Boolean, nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
-    candidate_case = relationship("CaseRecord")
+    candidate_case = relationship("db.models.analytics.CaseRecord")
 
     def __repr__(self):
         return f"<SimilarityFeedback(user_id={self.user_id}, candidate_case_id={self.candidate_case_id}, relevance={self.relevance})>"
+
+
+
+class SafeVector(TypeDecorator):
+    """Dynamically uses pgvector's Vector type on PostgreSQL, falling back to Text on other dialects (SQLite)."""
+    impl = Text
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            try:
+                from pgvector.sqlalchemy import Vector
+                return dialect.type_descriptor(Vector(1536))
+            except ImportError:
+                pass
+        return dialect.type_descriptor(Text)
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        
+        # Handle array-like or numpy object conversions
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+
+        if dialect.name == "postgresql":
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except Exception:
+                    pass
+            return value
+        else:
+            if not isinstance(value, str):
+                return json.dumps(value)
+            return value
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            if not isinstance(value, str):
+                return json.dumps(value)
+            return value
+        return value
 
 
 class CaseEmbedding(Base):
@@ -155,8 +202,8 @@ class CaseEmbedding(Base):
     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
     document_id = Column(Integer, ForeignKey("case_documents.id", ondelete="SET NULL"), nullable=True)
     
-    # Embedding vector (stored as JSON array for SQLite compatibility)
-    embedding_vector = Column(Text, nullable=False)  # JSON-encoded list of floats
+    # Embedding vector (stored dynamically using SafeVector type decorator)
+    embedding_vector = Column(SafeVector, nullable=False)
     embedding_model = Column(String(255), default="text-embedding-3-small")  # Model used to generate
     embedding_dimension = Column(Integer, default=1536)
     
@@ -170,8 +217,8 @@ class CaseEmbedding(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
-    case = relationship("Case")
-    document = relationship("CaseDocument")
+    case = relationship("db.models.cases.Case")
+    document = relationship("db.models.cases.CaseDocument")
 
     def __repr__(self):
         return f"<CaseEmbedding(case_id={self.case_id}, model={self.embedding_model})>"
@@ -200,9 +247,9 @@ class CaseIssue(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
-    case = relationship("Case")
-    document = relationship("CaseDocument")
-    arguments = relationship("CaseArgument", back_populates="issue", cascade="all, delete-orphan")
+    case = relationship("db.models.cases.Case")
+    document = relationship("db.models.cases.CaseDocument")
+    arguments = relationship("db.models.analytics.CaseArgument", back_populates="issue", cascade="all, delete-orphan")
 
     __table_args__ = (UniqueConstraint("case_id", "issue_name", name="uq_case_issue"),)
 
@@ -232,8 +279,8 @@ class CaseArgument(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     # Relationships
-    case = relationship("Case")
-    issue = relationship("CaseIssue", back_populates="arguments")
+    case = relationship("db.models.cases.Case")
+    issue = relationship("db.models.analytics.CaseIssue", back_populates="arguments")
 
     def __repr__(self):
         return f"<CaseArgument(case_id={self.case_id}, type={self.argument_type})>"
@@ -262,9 +309,9 @@ class KnowledgeGraphEdge(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
-    issue = relationship("CaseIssue")
-    argument = relationship("CaseArgument")
-    case = relationship("Case")
+    issue = relationship("db.models.analytics.CaseIssue")
+    argument = relationship("db.models.analytics.CaseArgument")
+    case = relationship("db.models.cases.Case")
 
     __table_args__ = (UniqueConstraint("issue_id", "argument_id", "case_id", name="uq_graph_edge"),)
 
@@ -302,8 +349,8 @@ class PrecedentMatch(Base):
     expires_at = Column(DateTime(timezone=True), nullable=True)  # Cache expiration
 
     # Relationships
-    query_case = relationship("Case", foreign_keys=[query_case_id])
-    precedent_case = relationship("Case", foreign_keys=[precedent_case_id])
+    query_case = relationship("db.models.cases.Case", foreign_keys=[query_case_id])
+    precedent_case = relationship("db.models.cases.Case", foreign_keys=[precedent_case_id])
 
     __table_args__ = (UniqueConstraint("query_case_id", "precedent_case_id", "match_type", name="uq_precedent_match"),)
 

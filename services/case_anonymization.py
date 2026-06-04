@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import hmac
 import os
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
@@ -13,20 +13,48 @@ from sqlalchemy.orm import Session
 from db.session import SessionLocal
 from db.models import Case, CaseDocument, CaseTimeline
 from config import Config
+from services.privacy_redaction import (
+    apply_privacy_profile,
+    get_privacy_profile_definition,
+    normalize_privacy_profile,
+)
+from db.crud.audit import record_audit_event
 
 # Minimum secret length required for anonymization secret
 _MIN_SECRET_LENGTH = 32
+logger = logging.getLogger(__name__)
+
+
+def _check_secret_entropy(secret: str, source: str) -> None:
+    """Raise if the secret has dangerously low entropy.
+
+    A secret composed entirely of one repeated character (e.g. ``"a" * 40``)
+    passes a length check but provides near-zero security.  This guard catches
+    the most common weak-secret patterns used in development that could
+    accidentally reach a non-production environment connected to real data.
+    """
+    if len(set(secret)) < 8:
+        raise ValueError(
+            f"Anonymization secret from {source} has insufficient entropy "
+            f"(fewer than 8 distinct characters). Use a randomly generated secret."
+        )
 
 
 def _get_case_anonymization_secret(override: Optional[str] = None) -> str:
-    """
-    Resolve the anonymization secret.
+    """Resolve the anonymization secret.
 
-    Rules:
-    - If `override` is provided it may only be used in test mode (`Config.TESTING` True).
-    - Prefer `CASE_ANONYMIZATION_SECRET` environment/secret.
-    - Fallback to project `.jwt_secret` file only in non-production environments.
-    - Enforce minimum secret length.
+    Resolution order
+    ----------------
+    1. Test-time ``override`` — only accepted when ``Config.TESTING`` is True.
+    2. ``CASE_ANONYMIZATION_SECRET`` environment variable / Streamlit secret.
+
+    The previous fallback to the ``.jwt_secret`` file has been removed.
+    Reading a secret from a file that may be committed to version control
+    creates a systematic risk: any developer or CI runner with repo read
+    access can forge valid anonymized IDs and, if the same file is used as
+    the JWT secret, forge valid authentication tokens.
+
+    Set ``CASE_ANONYMIZATION_SECRET`` in your environment or secrets manager.
     """
     # Test-time override support
     if override is not None:
@@ -37,33 +65,30 @@ def _get_case_anonymization_secret(override: Optional[str] = None) -> str:
             raise ValueError(f"Anonymization secret must be at least {_MIN_SECRET_LENGTH} characters")
         return secret
 
-    # Primary source: environment / streamlit secrets
+    # Primary (and only) source: environment / streamlit secrets
     secret = os.getenv("CASE_ANONYMIZATION_SECRET", "").strip()
+    if not secret:
+        # Also check via Config._get_val so Streamlit secrets are honoured
+        try:
+            from config import _get_val as _cfg_get
+            secret = str(_cfg_get("CASE_ANONYMIZATION_SECRET", "") or "").strip()
+        except Exception:
+            pass
+
     if secret:
         if len(secret) < _MIN_SECRET_LENGTH:
-            raise ValueError(f"Anonymization secret from environment must be at least {_MIN_SECRET_LENGTH} characters")
+            raise ValueError(
+                f"Anonymization secret from environment must be at least "
+                f"{_MIN_SECRET_LENGTH} characters"
+            )
+        _check_secret_entropy(secret, "environment")
         return secret
 
-    # Secondary fallback: .jwt_secret file (only allowed in non-production)
-    jwt_secret_path = Path(__file__).resolve().parents[1] / ".jwt_secret"
-    if not jwt_secret_path.exists():
-        jwt_secret_path = Path(__file__).resolve().parents[2] / ".jwt_secret"
-
-    if jwt_secret_path.exists():
-        try:
-            file_secret = jwt_secret_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            logger.exception("Failed to read anonymization secret from %s", jwt_secret_path)
-        else:
-            if file_secret:
-                if Config.is_production():
-                    # Disallow falling back to file in production for security
-                    raise RuntimeError("Anonymization secret must be provided via CASE_ANONYMIZATION_SECRET in production")
-                if len(file_secret) < _MIN_SECRET_LENGTH:
-                    raise ValueError(f"Anonymization secret from file must be at least {_MIN_SECRET_LENGTH} characters")
-                return file_secret
-
-    raise RuntimeError("CASE_ANONYMIZATION_SECRET is not configured.")
+    raise RuntimeError(
+        "CASE_ANONYMIZATION_SECRET is not configured. "
+        "Set this environment variable to a randomly generated secret of at least "
+        f"{_MIN_SECRET_LENGTH} characters."
+    )
 
 
 def _generate_anonymized_case_id(case_id: int, created_at: Any, secret_override: Optional[str] = None) -> str:
@@ -88,7 +113,7 @@ def _generate_anonymized_case_id(case_id: int, created_at: Any, secret_override:
     return digest[:12]
 
 
-def generate_anonymized_case_data(case_id: int) -> Optional[Dict[str, Any]]:
+def generate_anonymized_case_data(case_id: int, profile_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
     db: Session = SessionLocal()
     try:
         case = db.query(Case).filter(Case.id == case_id).first()
@@ -97,10 +122,27 @@ def generate_anonymized_case_data(case_id: int) -> Optional[Dict[str, Any]]:
 
         documents = db.query(CaseDocument).filter(CaseDocument.case_id == case_id).all()
         timeline = db.query(CaseTimeline).filter(CaseTimeline.case_id == case_id).all()
+        selected_profile = normalize_privacy_profile(profile_name)
+        profile = get_privacy_profile_definition(selected_profile)
         anonymized_id = _generate_anonymized_case_id(case_id=case_id, created_at=case.created_at)
 
-        return {
+        # Persist the anonymized_id on the Case row so it can be looked up later.
+        if case.anonymized_id != anonymized_id:
+            case.anonymized_id = anonymized_id
+            db.add(case)
+            db.commit()
+            db.refresh(case)
+
+        payload = {
+            "export": {
+                "case_id": case_id,
+                "generated_at": None,
+                "privacy_profile": selected_profile,
+                "privacy_profile_label": profile.get("label", selected_profile),
+            },
             "anonymized_id": anonymized_id,
+            "privacy_profile": selected_profile,
+            "privacy_profile_label": profile.get("label", selected_profile),
             "case_type": case.case_type,
             "jurisdiction": case.jurisdiction,
             "status": case.status.value,
@@ -122,5 +164,21 @@ def generate_anonymized_case_data(case_id: int) -> Optional[Dict[str, Any]]:
             ],
             "created_date": case.created_at.strftime("%B %Y"),
         }
+
+        record_audit_event(
+            db,
+            actor=f"user:{case.user_id}",
+            actor_user_id=case.user_id,
+            action="anonymization_run",
+            resource=f"case:{case_id}",
+            case_id=case_id,
+            metadata={
+                "privacy_profile": selected_profile,
+                "document_count": len(documents),
+                "timeline_events": len(timeline),
+            },
+        )
+
+        return apply_privacy_profile(payload, selected_profile, anonymized_id=anonymized_id)
     finally:
         db.close()

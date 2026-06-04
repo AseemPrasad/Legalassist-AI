@@ -96,6 +96,52 @@ def test_verify_jwt_token_rejects_bad_claims(monkeypatch, test_db):
     assert auth.verify_jwt_token(token_bad_audience) is None
 
 
+def test_verify_jwt_token_rejects_expired_token(monkeypatch, test_db):
+    monkeypatch.setattr(auth, "is_token_revoked", lambda db, jti: False)
+    monkeypatch.setattr(auth, "get_user_by_email", lambda db, email: DummyUser(id=1, email=email))
+
+    now = datetime.now(timezone.utc)
+    expired_token = jwt.encode(
+        {
+            **_valid_payload(),
+            "jti": "jti-expired",
+            "iat": now - timedelta(hours=2),
+            "nbf": now - timedelta(hours=2),
+            "exp": now - timedelta(minutes=1),
+            "iss": auth.Config.JWT_ISSUER,
+            "aud": auth.Config.JWT_AUDIENCE,
+            "type": "access",
+        },
+        auth.JWT_SECRET,
+        algorithm=auth.JWT_ALGORITHM,
+    )
+
+    assert auth.verify_jwt_token(expired_token) is None
+
+
+def test_verify_jwt_token_rejects_future_nbf(monkeypatch, test_db):
+    monkeypatch.setattr(auth, "is_token_revoked", lambda db, jti: False)
+    monkeypatch.setattr(auth, "get_user_by_email", lambda db, email: DummyUser(id=1, email=email))
+
+    now = datetime.now(timezone.utc)
+    future_nbf_token = jwt.encode(
+        {
+            **_valid_payload(),
+            "jti": "jti-nbf",
+            "iat": now,
+            "nbf": now + timedelta(minutes=10),
+            "exp": now + timedelta(hours=1),
+            "iss": auth.Config.JWT_ISSUER,
+            "aud": auth.Config.JWT_AUDIENCE,
+            "type": "access",
+        },
+        auth.JWT_SECRET,
+        algorithm=auth.JWT_ALGORITHM,
+    )
+
+    assert auth.verify_jwt_token(future_nbf_token) is None
+
+
 def test_verify_jwt_token_rejects_revoked_token(monkeypatch, test_db):
     token = auth.create_jwt_token(123, "tester@example.com")
 

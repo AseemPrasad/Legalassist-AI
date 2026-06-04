@@ -17,6 +17,7 @@ from database import (
     KnowledgeGraphEdge,
     CaseEmbedding,
 )
+from core.precedent_ranker import rank_precedents
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ class PrecedentMatcher:
                     results.append(result)
             
             # Sort by weight (relevance)
-            results.sort(key=lambda x: x["weight"], reverse=True)
+            results.sort(key=lambda x: float(x.get("weight", 1.0)), reverse=True)
             
             # Remove duplicates (same precedent case)
             seen = set()
@@ -114,8 +115,10 @@ class PrecedentMatcher:
                 if key not in seen:
                     seen.add(key)
                     unique_results.append(r)
-            
-            return unique_results[:limit]
+
+            # Rank using multi-factor ranking
+            ranked = rank_precedents(db, unique_results)
+            return ranked[:limit]
             
         except Exception as e:
             logger.error(f"Error finding winning precedents: {str(e)}")
@@ -205,9 +208,8 @@ class PrecedentMatcher:
             Dict with success statistics
         """
         try:
-            query = db.query(CaseArgument).filter(
-                CaseArgument.argument_text == argument_text
-            )
+            from difflib import SequenceMatcher
+            query = db.query(CaseArgument)
             
             if issue_name:
                 issue = db.query(CaseIssue).filter(
@@ -219,10 +221,22 @@ class PrecedentMatcher:
             all_arguments = query.all()
             if not all_arguments:
                 return {"success_rate": 0, "total_uses": 0, "successful": 0, "failed": 0}
+
+            # Filter candidates using a fuzzy similarity match threshold
+            matched_arguments = []
+            for arg in all_arguments:
+                if not arg.argument_text:
+                    continue
+                ratio = SequenceMatcher(None, arg.argument_text.lower(), argument_text.lower()).ratio()
+                if ratio >= 0.65:
+                    matched_arguments.append(arg)
+
+            if not matched_arguments:
+                return {"success_rate": 0, "total_uses": 0, "successful": 0, "failed": 0}
             
-            successful = sum(1 for arg in all_arguments if arg.argument_succeeded is True)
-            failed = sum(1 for arg in all_arguments if arg.argument_succeeded is False)
-            total = len(all_arguments)
+            successful = sum(1 for arg in matched_arguments if arg.argument_succeeded is True)
+            failed = sum(1 for arg in matched_arguments if arg.argument_succeeded is False)
+            total = len(matched_arguments)
             
             success_rate = (successful / total * 100) if total > 0 else 0
             

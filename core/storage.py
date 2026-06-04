@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import uuid
@@ -5,17 +6,21 @@ from pathlib import Path
 from typing import Tuple
 from config import Config
 
+logger = logging.getLogger(__name__)
+
 ATTACHMENTS_DIR = Path(Config.ATTACHMENTS_DIR)
 
 # Ensure directory exists
 os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
 
-def safe_filename(name: str) -> str:
-    name = name or "report"
-    name = re.sub(r"[\\/:*?\"<>|]", "_", name)
-    name = name.strip(" .")
-    return name[:180] if len(name) > 180 else name
+def _is_safe_attachment_path(path: str) -> bool:
+    """Return True if the resolved canonical path falls within ATTACHMENTS_DIR."""
+    try:
+        resolved = Path(path).resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+    return resolved.is_relative_to(ATTACHMENTS_DIR.resolve())
 
 
 def save_attachment(file_bytes: bytes, original_filename: str) -> Tuple[str, int]:
@@ -24,19 +29,29 @@ def save_attachment(file_bytes: bytes, original_filename: str) -> Tuple[str, int
     Returns (stored_path, size_bytes).
     """
     ext = Path(original_filename).suffix or ""
-    if Config.ATTACHMENTS_RANDOMIZE_FILENAMES:
+    if not _is_safe_attachment_path(str(ATTACHMENTS_DIR / original_filename)):
+        logger.warning("Traversal detected in original_filename, randomizing", filename=original_filename)
+        stored_name = f"{uuid.uuid4().hex}{ext}"
+    elif Config.ATTACHMENTS_RANDOMIZE_FILENAMES:
         stored_name = f"{uuid.uuid4().hex}{ext}"
     else:
-        stored_name = safe_filename(original_filename)
+        safe_name = Path(original_filename).name
+        stored_name = safe_name
 
     stored_path = ATTACHMENTS_DIR / stored_name
 
+    # Verify the resolved path stays within the attachments directory
+    resolved = stored_path.resolve()
+    if not resolved.is_relative_to(ATTACHMENTS_DIR.resolve()):
+        logger.warning("Blocked resolved path outside attachments directory", path=str(resolved))
+        raise ValueError("Invalid storage path")
+
     # Write file
-    with open(stored_path, "wb") as f:
+    with open(resolved, "wb") as f:
         f.write(file_bytes)
 
-    size = stored_path.stat().st_size
-    return str(stored_path), size
+    size = resolved.stat().st_size
+    return str(resolved), size
 
 
 def get_attachment_path(stored_path: str) -> str:
@@ -44,11 +59,11 @@ def get_attachment_path(stored_path: str) -> str:
     if not stored_path:
         return ""
 
-    resolved = Path(stored_path).resolve()
-    attachments_dir = Path(ATTACHMENTS_DIR).resolve()
-
-    if ".." in stored_path or resolved.is_relative_to(attachments_dir) is False:
+    if not _is_safe_attachment_path(stored_path):
+        logger.warning("Blocked path traversal attempt", path=stored_path)
         return ""
+
+    resolved = Path(stored_path).resolve()
 
     if not resolved.exists():
         return ""

@@ -26,25 +26,29 @@ def fetch_latest_documents_per_case(db: Session, case_ids: List[int]) -> Dict[in
     if not case_ids:
         return {}
     
-    # Subquery to find the max uploaded_at per case
-    subquery = (
+    # Rank documents per case in SQL so the latest row can be selected without
+    # Python-side sorting. Tie-break on id for deterministic results.
+    ranked_docs = (
         db.query(
-            CaseDocument.case_id,
-            func.max(CaseDocument.uploaded_at).label("max_uploaded_at"),
+            CaseDocument.id.label("doc_id"),
+            CaseDocument.case_id.label("case_id"),
+            func.row_number()
+            .over(
+                partition_by=CaseDocument.case_id,
+                order_by=(CaseDocument.uploaded_at.desc(), CaseDocument.id.desc()),
+            )
+            .label("row_number"),
         )
         .filter(CaseDocument.case_id.in_(case_ids))
-        .group_by(CaseDocument.case_id)
         .subquery()
     )
     
-    # Join to get the actual documents
-    latest_docs = db.query(CaseDocument).join(
-        subquery,
-        and_(
-            CaseDocument.case_id == subquery.c.case_id,
-            CaseDocument.uploaded_at == subquery.c.max_uploaded_at,
-        ),
-    ).all()
+    latest_docs = (
+        db.query(CaseDocument)
+        .join(ranked_docs, CaseDocument.id == ranked_docs.c.doc_id)
+        .filter(ranked_docs.c.row_number == 1)
+        .all()
+    )
     
     # Map to dict
     result: Dict[int, CaseDocument] = {}

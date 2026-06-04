@@ -20,6 +20,10 @@ class DocumentDTO:
     uploaded_at: str  # ISO format
     summary: Optional[str]
     has_remedies: bool
+    source_attachment_id: Optional[int]
+    extracted_metadata: Optional[Dict[str, Any]]
+    extraction_method: Optional[str]
+    ocr_used: bool
 
     @staticmethod
     def from_entity(doc: CaseDocument) -> DocumentDTO:
@@ -30,6 +34,10 @@ class DocumentDTO:
             uploaded_at=doc.uploaded_at.isoformat(),
             summary=doc.summary,
             has_remedies=bool(doc.remedies),
+            source_attachment_id=doc.source_attachment_id,
+            extracted_metadata=doc.extracted_metadata,
+            extraction_method=doc.extraction_method,
+            ocr_used=bool(doc.ocr_used),
         )
 
 
@@ -83,6 +91,7 @@ class AttachmentDTO:
     uploaded_at: str  # ISO format
     size_bytes: int
     content_type: str
+    document_id: Optional[int]
 
     @staticmethod
     def from_entity(attachment: Attachment) -> AttachmentDTO:
@@ -93,6 +102,7 @@ class AttachmentDTO:
             uploaded_at=attachment.uploaded_at.isoformat(),
             size_bytes=attachment.size_bytes,
             content_type=attachment.content_type,
+            document_id=attachment.document_id,
         )
 
 

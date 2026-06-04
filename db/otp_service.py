@@ -77,13 +77,6 @@ def _reserve_otp_rate_limit_slot(
     now = dt.datetime.now(dt.timezone.utc)
     window_start = now - dt.timedelta(hours=1)
 
-    recent_email_requests = db.query(OTPVerification).filter(
-        func.lower(OTPVerification.email) == normalized_email,
-        OTPVerification.created_at >= window_start,
-    ).count()
-    if recent_email_requests >= max_requests_per_hour:
-        raise ValueError("Too many OTP requests. Please try again later.")
-
     script = _get_otp_rate_limit_script()
     script(keys=[_otp_rate_limit_key(f"email:{normalized_email}")], args=[3600])
 
@@ -93,6 +86,13 @@ def _reserve_otp_rate_limit_slot(
             script(keys=[_otp_rate_limit_key(f"ip:{normalized_ip}")], args=[3600])
 
     with _OTP_RATE_LIMIT_LOCK:
+        recent_email_requests = db.query(OTPVerification).filter(
+            func.lower(OTPVerification.email) == normalized_email,
+            OTPVerification.created_at >= window_start,
+        ).count()
+        if recent_email_requests >= max_requests_per_hour:
+            raise ValueError("Too many OTP requests. Please try again later.")
+
         email_key = _otp_rate_limit_key(f"email:{normalized_email}")
         email_events = _OTP_RATE_LIMIT_EVENTS.setdefault(email_key, [])
         email_events[:] = [timestamp for timestamp in email_events if timestamp >= window_start]
@@ -141,12 +141,21 @@ def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
     ).order_by(OTPVerification.created_at.desc()).first()
 
 
-def mark_otp_as_used(db: Session, otp_id: int) -> None:
-    """Mark an OTP as used"""
-    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
-    if otp:
-        otp.is_used = True
+def mark_otp_as_used(db: Session, otp_id: int) -> bool:
+    """Mark an OTP as used atomically.
+
+    Performs an UPDATE that only succeeds if the OTP is not already used.
+    Returns True when the row was updated (OTP marked used), False otherwise.
+    """
+    updated = db.query(OTPVerification).filter(
+        OTPVerification.id == otp_id,
+        OTPVerification.is_used == False,
+    ).update({"is_used": True})
+    if updated:
         db.commit()
+        return True
+    # nothing changed (already used or missing)
+    return False
 
 
 def cleanup_expired_otps(db: Session) -> int:

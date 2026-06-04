@@ -22,11 +22,18 @@ from pathlib import Path
 from report_service import _get_reports_base_dir
 from sqlalchemy.orm import Session
 
-from report_service import _get_reports_base_dir
 from api.models import ReportGenerationRequest, ReportGenerationResponse
 from api.auth import get_current_user, CurrentUser
-from celery_app import generate_report_task, TaskStatus, enqueue_task_from_http_request
-from database import get_db, Report
+try:
+    from celery_app import generate_report_task, TaskStatus, enqueue_task_from_http_request
+except Exception:
+    generate_report_task = None
+    TaskStatus = None
+    enqueue_task_from_http_request = None
+from database import Report
+from api.dependencies import get_db_rls
+from db.crud.reports import create_report, get_report_by_id, update_report_status, list_reports_by_user
+from db.crud.audit import record_audit_event
 import structlog
 from datetime import datetime
 
@@ -42,7 +49,7 @@ logger = structlog.get_logger(__name__)
 async def generate_report(
     request: ReportGenerationRequest,
     http_request: Request,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> ReportGenerationResponse:
     """
@@ -67,20 +74,6 @@ async def generate_report(
         report_type=request.report_type
     )
 
-    report_id = str(uuid.uuid4())
-
-    # Create the report record in the database
-    db_report = Report(
-        report_id=report_id,
-        user_id=current_user.user_id,
-        case_id=request.case_id,
-        report_type=request.report_type,
-        format=request.format,
-        status="pending",
-    )
-    db.add(db_report)
-    db.commit()
-    
     # Step 1: Create and persist Report record BEFORE enqueueing task
     # This ensures we have report_id and can track the task reliably
     report_id = str(uuid.uuid4())
@@ -118,19 +111,11 @@ async def generate_report(
         report_id=report_id,
         report_type=request.report_type,
         format=request.format,
+        privacy_profile=request.privacy_profile,
     )
 
     # Save job_id to the database record
     db_report.job_id = task.id
-    db.commit()
-    db.refresh(db_report)
-    
-    # Step 3: Update Report record with actual celery_task_id
-    update_report_status(db, report_id, status="pending")
-    db_report = db.query(db_report.__class__).filter(
-        db_report.__class__.report_id == report_id
-    ).first()
-    db_report.celery_task_id = task.id
     db.commit()
     db.refresh(db_report)
     
@@ -154,7 +139,7 @@ async def generate_report(
 )
 async def get_report_status(
     report_id: str,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> ReportGenerationResponse:
     """
@@ -218,7 +203,7 @@ async def get_report_status(
 )
 async def download_report(
     report_id: str,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """
@@ -298,6 +283,16 @@ async def download_report(
         user_id=current_user.user_id,
         file_path=str(file_path)
     )
+
+    record_audit_event(
+        db,
+        actor=f"user:{current_user.user_id}",
+        actor_user_id=current_user.user_id,
+        action="download_report",
+        resource=f"report:{report_id}",
+        case_id=db_report.case_id,
+        metadata={"report_type": db_report.report_type, "format": db_report.format},
+    )
     
     return FileResponse(
         path=file_path,
@@ -313,7 +308,8 @@ async def download_report(
 async def list_reports(
     limit: int = 10,
     offset: int = 0,
-    db: Session = Depends(get_db),
+    status_filter: str | None = None,
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> dict:
     """
@@ -330,24 +326,6 @@ async def list_reports(
         offset=offset,
         status=status_filter
     )
-    
-    report_dicts = [
-        {
-            "report_id": r.report_id,
-            "case_id": r.case_id,
-            "status": r.status.value,
-            "report_type": r.report_type.value,
-            "format": r.format.value,
-            "file_size_bytes": r.file_size_bytes,
-            "created_at": r.created_at.isoformat(),
-            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
-        }
-        for r in reports
-    ]
-    
-    query = db.query(Report).filter(Report.user_id == current_user.user_id)
-    total = query.count()
-    reports = query.order_by(Report.created_at.desc()).offset(offset).limit(limit).all()
 
     reports_data = []
     for r in reports:
@@ -376,11 +354,14 @@ async def list_reports(
             "created_at": r.created_at,
             "completed_at": r.completed_at
         })
-        
+
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
         "reports": reports_data
     }
+
+
+
 

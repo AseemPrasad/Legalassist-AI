@@ -2,116 +2,188 @@
 CSRF (Cross-Site Request Forgery) protection for API endpoints.
 
 Provides protection against CSRF attacks by:
-- Validating Origin/Referer headers for browser-based requests
-- Supporting double-submit cookie pattern for stateless validation
-- Exempting safe methods (GET, HEAD, OPTIONS) from token checks
+- HMAC-signed tokens bound to authenticated session (user_id + session_id)
+- Double-submit cookie pattern with server-side session binding
+- SameSite=lax cookies preventing cross-site cookie sending
+- Safe methods (GET, HEAD, OPTIONS) exempted automatically
+- Origin/Referer header validation for browser-based requests
 """
 
+import hashlib
+import hmac
+import os
 import secrets
-import logging
-from typing import Optional, Set, Callable
+import structlog
+from typing import Optional, Set
+
 from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-logger = logging.getLogger(__name__)
+from api.errors import StructuredAPIError, structured_error_response
+
+logger = structlog.get_logger(__name__)
 
 SAFE_METHODS: Set[str] = {"GET", "HEAD", "OPTIONS"}
 CSRF_TOKEN_HEADER = "X-CSRF-Token"
 CSRF_COOKIE_NAME = "csrf_token"
+ACCESS_TOKEN_COOKIE_NAME = "access_token"
+CSRF_SESSION_PREFIX = "csrf_session:"
+CSRF_TOKEN_V2_PREFIX = "v2:"
 
 
-class CSRFError(HTTPException):
-    def __init__(self, detail: str = "CSRF validation failed"):
-        super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+class CSRFError(StructuredAPIError):
+    """CSRF validation error with standardized error response."""
+    pass
 
 
-def generate_csrf_token() -> str:
-    """Generate a cryptographically secure CSRF token."""
-    return secrets.token_urlsafe(32)
+def generate_csrf_token(user_id: int, session_id: str) -> str:
+    secret = _get_csrf_secret()
+    message = f"{user_id}:{session_id}"
+    sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
+    return f"{CSRF_TOKEN_V2_PREFIX}{session_id}.{sig[:32]}"
+
+
+def validate_csrf_token(token: str, user_id: int) -> bool:
+    if not token or "." not in token:
+        return False
+    if not token.startswith(CSRF_TOKEN_V2_PREFIX):
+        return False
+    inner = token[len(CSRF_TOKEN_V2_PREFIX):]
+    parts = inner.rsplit(".", 1)
+    if len(parts) != 2:
+        return False
+    session_id, received_sig = parts
+    secret = _get_csrf_secret()
+    message = f"{user_id}:{session_id}"
+    expected_sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()[:32]
+    return hmac.compare_digest(expected_sig, received_sig)
+
+
+_CSRF_SECRET_CACHE: Optional[str] = None
+
+
+def _get_csrf_secret() -> str:
+    global _CSRF_SECRET_CACHE
+    if _CSRF_SECRET_CACHE is not None:
+        return _CSRF_SECRET_CACHE
+
+    from api.config import get_settings
+    settings = get_settings()
+    secret = settings.CSRF_SECRET
+    if not secret or len(secret) < 16:
+        secret = os.environ.get("SECRET_KEY", "")
+        if not secret or len(secret) < 16:
+            is_prod = settings.ENVIRONMENT in ("production", "prod", "live")
+            if is_prod:
+                raise RuntimeError(
+                    "CSRF_SECRET environment variable must be set in production. "
+                    "Auto-generation is not allowed."
+                )
+            logger.warning("csrf_secret_auto_generated", message="CSRF_SECRET not set. Auto-generated per-process secret — cross-worker CSRF will fail in multi-worker deployments.")
+            secret = secrets.token_hex(32)
+    _CSRF_SECRET_CACHE = secret
+    return secret
 
 
 def get_origin(request: Request) -> Optional[str]:
-    """Extract Origin header value."""
-    origin = request.headers.get("origin") or request.headers.get("Origin")
-    return origin
+    return request.headers.get("origin") or request.headers.get("Origin")
 
 
 def get_referer(request: Request) -> Optional[str]:
-    """Extract Referer header value."""
-    referer = request.headers.get("referer") or request.headers.get("Referer")
-    return referer
+    return request.headers.get("referer") or request.headers.get("Referer")
 
 
 def is_same_origin(request: Request, allowed_hosts: Optional[Set[str]] = None) -> bool:
-    """
-    Check if request originates from the same origin.
-
-    Args:
-        request: FastAPI request object
-        allowed_hosts: Set of allowed hostnames
-
-    Returns:
-        True if same origin, False if cross-origin
-    """
     origin = get_origin(request)
+    expected_scheme = request.url.scheme
     if not origin:
-        return True
-
-    allowed_hosts = allowed_hosts or set()
-    if allowed_hosts:
-        from urllib.parse import urlparse
-        parsed = urlparse(origin)
-        return parsed.netloc in allowed_hosts or parsed.netloc in {"localhost", "127.0.0.1"}
-
-    host = request.headers.get("host", "").split(":")[0]
+        referer = get_referer(request)
+        if referer:
+            from urllib.parse import urlparse
+            parsed = urlparse(referer)
+            allowed = allowed_hosts or set()
+            host = request.headers.get("host", "").split(":")[0]
+            if parsed.scheme != expected_scheme:
+                return False
+            if parsed.hostname in allowed or parsed.hostname == host:
+                return True
+            return parsed.hostname == host
+        return False
     from urllib.parse import urlparse
     parsed = urlparse(origin)
-    return parsed.netloc == host or parsed.netloc == f"{host}:{request.url.port or 80}"
+    host = request.headers.get("host", "").split(":")[0]
+    allowed = allowed_hosts or set()
+    if parsed.scheme != expected_scheme:
+        return False
+    if parsed.hostname in allowed:
+        return True
+    return parsed.hostname == host
 
 
-def validate_csrf_request(
+def validate_csrf(
     request: Request,
+    current_user_id: Optional[int] = None,
     allowed_hosts: Optional[Set[str]] = None,
-    require_token: bool = True,
 ) -> None:
-    """
-    Validate CSRF protection for a request.
-
-    Args:
-        request: FastAPI request object
-        allowed_hosts: Set of allowed hostnames for same-origin checks
-        require_token: Whether to require CSRF token header
-
-    Raises:
-        CSRFError: If CSRF validation fails
-    """
     if request.method in SAFE_METHODS:
         return
 
     origin = get_origin(request)
-    if not origin:
+    if origin and not is_same_origin(request, allowed_hosts):
+        logger.warning("csrf_cross_origin_rejected", origin=origin, path=str(request.url.path))
+        raise StructuredAPIError(status_code=status.HTTP_403_FORBIDDEN, error_code="CSRF_ORIGIN_BLOCKED", message="Cross-origin request blocked")
+
+    access_token = request.cookies.get(ACCESS_TOKEN_COOKIE_NAME)
+    cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+    header_token = request.headers.get(CSRF_TOKEN_HEADER) or request.headers.get(CSRF_TOKEN_HEADER.lower())
+
+    if not access_token and not cookie_token:
         return
 
-    if not is_same_origin(request, allowed_hosts):
-        logger.warning("csrf_cross_origin_rejected", origin=origin, path=str(request.url.path))
-        raise CSRFError(detail="Cross-origin requests not allowed")
+    if not access_token:
+        if not header_token:
+            raise StructuredAPIError(status_code=status.HTTP_403_FORBIDDEN, error_code="CSRF_MISSING_TOKEN", message=f"Missing CSRF token. Include '{CSRF_TOKEN_HEADER}' header.")
+        if not hmac.compare_digest(header_token, cookie_token or ""):
+            raise StructuredAPIError(status_code=status.HTTP_403_FORBIDDEN, error_code="CSRF_TOKEN_MISMATCH", message="CSRF token mismatch")
+        return
 
-    if require_token:
-        token = request.headers.get(CSRF_TOKEN_HEADER) or request.headers.get(CSRF_TOKEN_HEADER.lower())
-        if not token:
-            logger.warning("csrf_missing_token", path=str(request.url.path))
-            raise CSRFError(detail=f"Missing CSRF token. Include '{CSRF_TOKEN_HEADER}' header.")
+    if current_user_id is None:
+        from api.jwt_auth import InvalidTokenError, TokenExpiredError, verify_token
+
+        try:
+            payload = verify_token(access_token)
+            current_user_id = int(payload.get("sub"))
+            request.state.csrf_user_id = current_user_id
+        except TokenExpiredError as exc:
+            raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="TOKEN_EXPIRED", message=str(exc))
+        except (InvalidTokenError, TypeError, ValueError):
+            raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_TOKEN", message="Invalid token")
+
+    if not cookie_token:
+        raise StructuredAPIError(status_code=status.HTTP_403_FORBIDDEN, error_code="CSRF_MISSING_COOKIE", message="Missing CSRF cookie")
+
+    if not header_token:
+        raise StructuredAPIError(status_code=status.HTTP_403_FORBIDDEN, error_code="CSRF_MISSING_TOKEN", message=f"Missing CSRF token. Include '{CSRF_TOKEN_HEADER}' header.")
+
+    if not validate_csrf_token(header_token, current_user_id):
+        logger.warning("csrf_token_invalid", path=str(request.url.path), user_id=current_user_id)
+        raise StructuredAPIError(status_code=status.HTTP_403_FORBIDDEN, error_code="CSRF_TOKEN_INVALID", message="Invalid or expired CSRF token")
+
+    if not hmac.compare_digest(header_token, cookie_token):
+        raise StructuredAPIError(status_code=status.HTTP_403_FORBIDDEN, error_code="CSRF_TOKEN_MISMATCH", message="CSRF token mismatch")
+
+
+def validate_csrf_request(
+    request: Request,
+    current_user_id: Optional[int] = None,
+    allowed_hosts: Optional[Set[str]] = None,
+) -> None:
+    """Validate CSRF for a given request. Convenience wrapper around validate_csrf."""
+    return validate_csrf(request, current_user_id=current_user_id, allowed_hosts=allowed_hosts)
 
 
 class CSRFProtectionMiddleware(BaseHTTPMiddleware):
-    """
-    Middleware for automatic CSRF protection on state-mutating endpoints.
-
-    Usage:
-        app.add_middleware(CSRFProtectionMiddleware, allowed_hosts={"api.example.com"})
-    """
-
     def __init__(
         self,
         app,
@@ -120,44 +192,85 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
     ):
         super().__init__(app)
         self.allowed_hosts = allowed_hosts or set()
-        self.exempt_paths = exempt_paths or {"/health", "/ready", "/metrics"}
+        self.exempt_paths = exempt_paths or {
+            "/health", "/ready", "/metrics",
+            "/docs", "/openapi.json", "/redoc",
+            "/api/v1/auth/sso/google", "/api/v1/auth/sso/google/callback",
+            "/api/v1/auth/sso/microsoft", "/api/v1/auth/sso/microsoft/callback",
+        }
 
     async def dispatch(self, request: Request, call_next):
-        path = request.url.path
+        path = request.url.path.rstrip("/") or "/"
 
-        if path in self.exempt_paths or request.method in SAFE_METHODS:
+        if path in self.exempt_paths:
             return await call_next(request)
 
-        origin = get_origin(request)
-        if origin and not is_same_origin(request, self.allowed_hosts):
-            logger.warning("csrf_blocked", origin=origin, path=path)
-            return JSONResponse(
-                status_code=status.HTTP_403_FORBIDDEN,
-                content={"detail": "Cross-origin request blocked"},
+        if request.method not in SAFE_METHODS:
+            try:
+                validate_csrf(request, allowed_hosts=self.allowed_hosts)
+            except StructuredAPIError as exc:
+                return structured_error_response(
+                    status_code=exc.status_code,
+                    error_code=exc.error_code,
+                    message=exc.message,
+                    request=request,
+                )
+
+        user_id = getattr(request.state, "csrf_user_id", None)
+        response = await call_next(request)
+
+        access_token = request.cookies.get(ACCESS_TOKEN_COOKIE_NAME)
+        csrf_cookie = request.cookies.get(CSRF_COOKIE_NAME)
+
+        if request.method in SAFE_METHODS and (not csrf_cookie or access_token):
+            if user_id is None and access_token:
+                try:
+                    from api.jwt_auth import verify_token
+                    payload = verify_token(access_token)
+                    user_id = int(payload.get("sub", 0))
+                    request.state.csrf_user_id = user_id
+                except Exception:
+                    user_id = 0
+            session_id = secrets.token_urlsafe(16)
+            token = generate_csrf_token(int(user_id) if str(user_id).isdigit() else 0, session_id)
+            response.set_cookie(
+                CSRF_COOKIE_NAME,
+                token,
+                httponly=True,
+                samesite="lax",
+                secure=True,
+                path="/",
+                max_age=3600 * 8,
             )
+            response.headers["X-CSRF-Token"] = token
+            return response
 
-        return await call_next(request)
+        if request.method not in SAFE_METHODS and (user_id or access_token):
+            resolved_user_id = int(user_id) if str(user_id).isdigit() else None
+            jwt_jti = None
+            if resolved_user_id is None and access_token:
+                try:
+                    payload = verify_token(access_token)
+                    resolved_user_id = int(payload.get("sub"))
+                    jwt_jti = payload.get("jti")
+                except Exception:
+                    resolved_user_id = None
+
+            if resolved_user_id is not None and jwt_jti:
+                token = generate_csrf_token(resolved_user_id, jwt_jti)
+                response.set_cookie(
+                    CSRF_COOKIE_NAME,
+                    token,
+                    httponly=True,
+                    samesite="lax",
+                    secure=True,
+                    path="/",
+                    max_age=3600 * 8,
+                )
+                response.headers["X-CSRF-Token"] = token
+
+        return response
 
 
-def csrf_protected(func: Callable) -> Callable:
-    """
-    Decorator to add CSRF protection to a specific endpoint.
-
-    Usage:
-        @router.post("/endpoint")
-        @csrf_protected
-        async def my_endpoint(request: Request, ...):
-            ...
-    """
-    async def wrapper(request: Request, *args, **kwargs):
-        allowed_hosts = getattr(request.app.state, "csrf_allowed_hosts", None)
-        validate_csrf_request(request, allowed_hosts=allowed_hosts)
-        return await func(request, *args, **kwargs)
-    return wrapper
-
-
-def set_csrf_headers(response, token: str) -> None:
-    """Set CSRF-related headers on response."""
-    response.headers["X-CSRF-Token"] = token
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
+CSRFError = StructuredAPIError
+validate_csrf_request = validate_csrf

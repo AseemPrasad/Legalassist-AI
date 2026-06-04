@@ -10,6 +10,10 @@ env/
 # Environment variables
 .env
 
+# Secret files — must never be committed
+.jwt_secret
+*.secret
+
 # Streamlit secrets
 .streamlit/secrets.toml
 
@@ -22,6 +26,13 @@ legalassist.db
 .vscode/
 .idea/
 
+# Backup files
+*.bak
+
+# Secrets
+.jwt_secret
+secrets/
+
 # Generic
 *.db
 *.log
@@ -31,3 +42,8 @@ requirements.txt
 requirements.in
 /.venv
 .exports/
+
+.jwt_secret
+
+# Backup files
+*.bak

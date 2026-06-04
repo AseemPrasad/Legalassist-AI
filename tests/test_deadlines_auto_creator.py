@@ -7,8 +7,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import services.deadlines_auto_creator as deadlines_auto_creator
-from database import Base, Case, CaseDeadline, CaseTimeline
-from db.models import User
+from db.base import Base
+from db.models import Case, CaseDeadline, CaseTimeline, User
 from services.deadlines_auto_creator import _extract_days_from_text, _validate_days_value
 
 
@@ -309,3 +309,42 @@ def test_auto_create_deadlines_from_remedies_rejects_invalid_appeal_days(monkeyp
     mock_create_event.assert_called_once()
     assert mock_create_event.call_args.kwargs["event_type"] == "deadline_skipped"
     assert mock_create_event.call_args.kwargs["metadata"]["reason"] == "appeal_days_invalid"
+
+
+def test_auto_create_deadlines_from_remedies_includes_low_confidence_telemetry(monkeypatch, test_db):
+    _seed_case_context(test_db, user_id=1, case_id=42)
+
+    mock_create_event = MagicMock()
+    monkeypatch.setattr(
+        deadlines_auto_creator,
+        "timeline_service",
+        types.SimpleNamespace(create_event=mock_create_event),
+    )
+
+    remedies = {
+        "appeal_days": "30",
+        "appeal_court": "High Court",
+        "confidence_score": 0.42,
+        "evidence_spans": [
+            {
+                "field": "appeal_days",
+                "span_text": "3. Appeal timeline 30 days",
+                "snippet_reason": "Matched appeal timeline section.",
+            }
+        ],
+    }
+
+    deadlines_auto_creator.auto_create_deadlines_from_remedies(
+        db=test_db,
+        user_id=1,
+        case_id=42,
+        case_title="Boundary Case",
+        remedies=remedies,
+        document_id=99,
+    )
+
+    mock_create_event.assert_called_once()
+    metadata = mock_create_event.call_args.kwargs["metadata"]
+    assert metadata["remedies_confidence_score"] == 0.42
+    assert metadata["remedies_low_confidence"] is True
+    assert metadata["remedies_evidence_spans"] == remedies["evidence_spans"]

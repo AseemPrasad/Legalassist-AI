@@ -1,14 +1,14 @@
 """Compatibility shim for the original monolithic `database.py`.
 
-The project now keeps business logic in `db/` modules and `db.crud.*` helpers.
-This file remains as a stable public API surface for legacy imports.
+The project has moved models and CRUD helpers into the `db/` package, but many
+existing imports still point at `database`. This module re-exports the pieces
+needed by the current codebase and keeps the authentication/OTP security path
+working while the refactor continues.
 """
 
 from __future__ import annotations
 
-from db.attachments_service import create_attachment, get_attachments_for_case
 import datetime as dt
-import hashlib
 import threading
 import time
 from config import Config
@@ -22,80 +22,55 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from db.base import Base
-from db.case_service import (
-    create_case,
-    create_case_document,
-    create_case_record,
-    create_timeline_event,
-    delete_case,
-    get_case_by_id,
-    get_case_by_number,
-    get_case_document_by_id,
-    get_case_documents,
-    get_case_record,
-    get_case_timeline,
-    get_cases_by_criteria,
-    get_user_cases,
-    get_user_stats,
-    submit_model_feedback,
-    update_case_document,
-    update_case_outcome,
-    update_case_status,
-)
-from db.crud.feedback import get_user_feedback, submit_user_feedback
-from db.crud.notifications import (
-    create_case_deadline,
-    get_notification_history,
-    get_notification_template_for_user,
-    get_upcoming_deadlines,
-    has_notification_been_sent,
-    log_notification,
-)
+from db.session import engine, SessionLocal, init_db, db_session, get_db, _to_utc_datetime, _datetime_for_db
+_OTP_RATE_LIMIT_LOCK = threading.RLock()
+_OTP_RATE_LIMIT_EVENTS: dict[str, list[dt.datetime]] = {}
+
+
+def _otp_rate_limit_key(identifier: str) -> str:
+    normalized = str(identifier).strip().lower().replace("@", "")
+    if not normalized:
+        raise ValueError("OTP request identifier is required")
+    return f"otp:rate:{normalized}"
+
+
 from db.models import (
-    Attachment,
-    Case,
-    CaseAnalytics,
-    CaseArgument,
+    User,
+    OTPVerification,
+    NotificationStatus,
+    NotificationChannel,
+    NotificationLog,
+    NotificationTemplate,
+    UserPreference,
     CaseDeadline,
+    Case,
     CaseDocument,
-    CaseEmbedding,
-    CaseIssue,
-    CaseOutcome,
-    CaseRecord,
-    CaseStatus,
+    Attachment,
     CaseTimeline,
+    CaseStatus,
     DocumentType,
-    KnowledgeGraphEdge,
+    UserFeedback,
+    CaseRecord,
+    CaseOutcome,
+    CaseAnalytics,
     ModelFeedback,
     ModelPerformance,
     ModelRoutingRule,
-    NotificationChannel,
-    NotificationLog,
-    NotificationStatus,
-    NotificationTemplate,
-    OTPVerification,
+    SimilarityFeedback,
+    RevokedToken,
+    CaseEmbedding,
+    CaseIssue,
+    CaseArgument,
+    KnowledgeGraphEdge,
     PrecedentMatch,
-    Report,
 )
-from db.notifications_service import create_or_update_user_preference, get_user_deadlines
-from db.otp_service import (
-    _get_otp_rate_limit_script,
-    _otp_rate_limit_key,
-    _reserve_otp_rate_limit_slot,
-    cleanup_expired_otps,
-    cleanup_expired_revoked_tokens,
-    create_otp_verification,
-    create_user,
-    get_pending_otp,
-    record_otp_failed_attempt,
-    get_user_by_email,
-    is_token_revoked,
-    mark_otp_as_used,
-    revoke_token,
-    reset_otp_failed_attempts,
-    update_user_last_login,
+from db.crud.notifications import (
+    create_case_deadline,
+    get_upcoming_deadlines,
+    has_notification_been_sent,
+    log_notification,
+    get_notification_history,
 )
-from db.session import db_session, engine, get_db, init_db, SessionLocal, _datetime_for_db, _to_utc_datetime
 
 __all__ = [
     "Base",
@@ -134,15 +109,12 @@ __all__ = [
     "CaseArgument",
     "KnowledgeGraphEdge",
     "PrecedentMatch",
-    "Report",
     "create_case_deadline",
     "get_upcoming_deadlines",
-    "get_prefs_by_user_ids",
     "get_user_deadlines",
     "has_notification_been_sent",
     "log_notification",
     "get_notification_history",
-    "get_notification_template_for_user",
     "create_or_update_user_preference",
     "create_user",
     "get_user_by_email",
@@ -154,116 +126,54 @@ __all__ = [
     "record_otp_failed_attempt",
     "reset_otp_failed_attempts",
     "cleanup_expired_otps",
-    "record_otp_failed_attempt",
-    "reset_otp_failed_attempts",
-    "revoke_token",
-    "is_token_revoked",
-    "cleanup_expired_revoked_tokens",
     "create_case",
     "get_user_cases",
     "get_case_by_id",
     "get_case_by_number",
     "update_case_status",
     "delete_case",
-    "get_user_stats",
     "create_case_document",
     "get_case_documents",
     "get_case_document_by_id",
-    "update_case_document",
     "create_case_record",
     "get_case_record",
     "get_cases_by_criteria",
     "update_case_outcome",
-    "get_user_feedback",
     "submit_user_feedback",
+    "get_user_feedback",
     "submit_model_feedback",
     "get_case_timeline",
     "create_timeline_event",
     "create_attachment",
     "get_attachments_for_case",
-    "submit_similarity_feedback",
-    "get_similarity_feedback",
-    "aggregate_model_performance",
 ]
 
 
 # ==================== Legacy Helper Functions ====================
-# Note: get_user_by_email, create_user, update_user_last_login are imported
-# from db.otp_service to ensure consistent OTP service behavior
 
 
-_OTP_RATE_LIMIT_WINDOW_SECONDS = 60 * 60
-_OTP_RATE_LIMIT_SCRIPT = """
-local current = redis.call('INCR', KEYS[1])
-if current == 1 then
-    redis.call('EXPIRE', KEYS[1], ARGV[1])
-end
-return current
-"""
-_otp_rate_limit_client = None
-_otp_rate_limit_script = None
-_otp_rate_limit_lock = threading.Lock()
+def get_user_by_email(db: Session, email: str) -> Optional[User]:
+    """Get a user by email address"""
+    return db.query(User).filter(User.email == email).first()
 
 
-def _otp_rate_limit_key(identifier: str) -> str:
-    normalized = str(identifier).strip().lower()
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-    return f"otp:rate:{digest}"
+def create_user(db: Session, email: str) -> User:
+    """Create a new user"""
+    user = User(email=email)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
 
 
-def _get_otp_rate_limit_script():
-    global _otp_rate_limit_client, _otp_rate_limit_script
-
-    if _otp_rate_limit_script is not None:
-        return _otp_rate_limit_script
-
-    with _otp_rate_limit_lock:
-        if _otp_rate_limit_script is None:
-            if redis is None:
-                raise RuntimeError("Redis is required for OTP rate limiting but is not installed.")
-
-            redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
-            _otp_rate_limit_client = redis.from_url(redis_url, decode_responses=True)
-            _otp_rate_limit_script = _otp_rate_limit_client.register_script(_OTP_RATE_LIMIT_SCRIPT)
-
-    return _otp_rate_limit_script
-
-
-def _reset_otp_rate_limit_connection():
-    """Reset connection state for self-healing after Redis disconnection."""
-    global _otp_rate_limit_client, _otp_rate_limit_script
-    with _otp_rate_limit_lock:
-        _otp_rate_limit_client = None
-        _otp_rate_limit_script = None
-
-
-def _reserve_otp_rate_limit_slot(identifier: str, max_requests_per_hour: int, label: str = "identifier") -> int:
-    normalized_identifier = str(identifier).strip().lower()
-    if not normalized_identifier:
-        raise ValueError(f"{label} is required for OTP rate limiting")
-
-    try:
-        script = _get_otp_rate_limit_script()
-        current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
-    except (redis.ConnectionError, redis.TimeoutError, OSError, IOError) as exc:
-        _reset_otp_rate_limit_connection()
-        script = _get_otp_rate_limit_script()
-        current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
-
-    if current > max_requests_per_hour:
-        raise ValueError("Too many OTP requests. Please try again later.")
-
-    return current
-
-
-def _safe_reserve_otp_slot(identifier: str, max_requests_per_hour: int, label: str = "identifier") -> int:
-    try:
-        return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour, label=label)
-    except TypeError:
-        try:
-            return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour, label)
-        except TypeError:
-            return _reserve_otp_rate_limit_slot(identifier, max_requests_per_hour)
+def update_user_last_login(db: Session, user_id: int) -> Optional[User]:
+    """Update last login timestamp for a user"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.last_login = dt.datetime.now(dt.timezone.utc)
+        db.commit()
+        db.refresh(user)
+    return user
 
 
 def create_otp_verification(
@@ -274,20 +184,14 @@ def create_otp_verification(
     max_requests_per_hour: int = 5,
     requester_ip: Optional[str] = None,
 ) -> OTPVerification:
-    """Create a new OTP verification record with rate limiting."""
-    _safe_reserve_otp_slot(email, max_requests_per_hour, label="Email")
-    if requester_ip:
-        _safe_reserve_otp_slot(requester_ip, max_requests_per_hour, label="IP")
-
-    otp = OTPVerification(
-        email=email,
-        otp_hash=otp_hash,
-        expires_at=expires_at,
-    )
-    db.add(otp)
-    db.commit()
-    db.refresh(otp)
-    return otp
+    """Create a new OTP verification record"""
+    with _OTP_RATE_LIMIT_LOCK:
+        _reserve_otp_rate_limit_slot(db, email, max_requests_per_hour, requester_ip=requester_ip)
+        otp = OTPVerification(email=email, otp_hash=otp_hash, expires_at=expires_at)
+        db.add(otp)
+        db.commit()
+        db.refresh(otp)
+        return otp
 
 
 def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
@@ -302,11 +206,11 @@ def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
 
 def mark_otp_as_used(db: Session, otp_id: int) -> bool:
     """Atomically mark OTP as used. Returns True only if OTP was not already used."""
-    result = db.query(OTPVerification).filter(
-        OTPVerification.id == otp_id,
-        OTPVerification.is_used == False
-    ).update({"is_used": True}, synchronize_session=False)
     try:
+        result = db.query(OTPVerification).filter(
+            OTPVerification.id == otp_id,
+            OTPVerification.is_used == False,
+        ).update({"is_used": True}, synchronize_session=False)
         db.commit()
         return result > 0
     except Exception:
@@ -464,25 +368,9 @@ def create_case_document(
     summary: Optional[str] = None,
     remedies: Optional[dict] = None,
 ) -> CaseDocument:
-    """Create a new case document.
-
-    Security: enforce that `case_id` belongs to `user_id` (server-side ownership
-    validation), consistent with create_case_deadline.
-    """
-    try:
-        normalized_case_id = int(case_id)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("case_id must be an integer matching cases.id") from exc
-
-    # Ownership validation (prevents attaching documents to another user's case)
-    case = db.query(Case).filter(Case.id == normalized_case_id).first()
-    if not case or case.user_id != user_id:
-        raise PermissionError(
-            "case_id not found or not owned by the provided user_id"
-        )
-
+    """Create a new case document"""
     doc = CaseDocument(
-        case_id=normalized_case_id,
+        case_id=case_id,
         document_type=document_type,
         document_content=document_content,
         file_path=file_path,
@@ -609,7 +497,7 @@ def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
     now = dt.datetime.now(dt.timezone.utc)
     return db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed.is_(False),
+        CaseDeadline.is_completed == False,
         CaseDeadline.deadline_date > now,
     ).order_by(CaseDeadline.deadline_date).all()
 
@@ -631,6 +519,49 @@ def get_notification_template_for_user(db: Session, user_id: int) -> Optional[No
     return db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
 
 
+def _reserve_otp_rate_limit_slot(
+    db: Session,
+    email: str,
+    max_requests_per_hour: int,
+    requester_ip: Optional[str] = None,
+) -> bool:
+    """Reserve an OTP request slot for the email, with optional IP tracking."""
+    if max_requests_per_hour <= 0:
+        raise ValueError("Too many OTP requests. Please try again later.")
+
+    normalized_email = str(email).strip().lower()
+    if not normalized_email:
+        raise ValueError("OTP request email is required")
+
+    now = dt.datetime.now(dt.timezone.utc)
+    window_start = now - dt.timedelta(hours=1)
+
+    with _OTP_RATE_LIMIT_LOCK:
+        recent_email_requests = db.query(OTPVerification).filter(
+            func.lower(OTPVerification.email) == normalized_email,
+            OTPVerification.created_at >= window_start,
+        ).count()
+        if recent_email_requests >= max_requests_per_hour:
+            raise ValueError("Too many OTP requests. Please try again later.")
+
+        email_key = _otp_rate_limit_key(f"email:{normalized_email}")
+        email_events = _OTP_RATE_LIMIT_EVENTS.setdefault(email_key, [])
+        email_events[:] = [ts for ts in email_events if ts >= window_start]
+        if len(email_events) >= max_requests_per_hour:
+            raise ValueError("Too many OTP requests. Please try again later.")
+        email_events.append(now)
+
+        if requester_ip:
+            normalized_ip = str(requester_ip).strip().lower()
+            if normalized_ip:
+                ip_key = _otp_rate_limit_key(f"ip:{normalized_ip}")
+                ip_events = _OTP_RATE_LIMIT_EVENTS.setdefault(ip_key, [])
+                ip_events[:] = [ts for ts in ip_events if ts >= window_start]
+                ip_events.append(now)
+
+    return True
+
+
 def get_user_stats(db: Session, user_id: int) -> dict:
     """Calculate high-level stats for a user dashboard"""
     cases = get_user_cases(db, user_id)
@@ -643,7 +574,7 @@ def get_user_stats(db: Session, user_id: int) -> dict:
     now = dt.datetime.now(dt.timezone.utc)
     upcoming_deadlines = db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed.is_(False),
+        CaseDeadline.is_completed == False,
         CaseDeadline.deadline_date > now,
     ).count()
 
@@ -754,8 +685,45 @@ def create_timeline_event(
     return event
 
 
-# create_case_document_secure is deprecated - use create_case_document which already has ownership validation
-create_case_document_secure = create_case_document
+def create_case_document(
+    db: Session,
+    case_id: int,
+    document_type: DocumentType,
+    user_id: int,
+    document_content: Optional[str] = None,
+    file_path: Optional[str] = None,
+    summary: Optional[str] = None,
+    remedies: Optional[dict] = None,
+) -> CaseDocument:
+    """Create a new case document.
+
+    Security: enforce that `case_id` belongs to `user_id` (server-side ownership
+    validation), consistent with create_case_deadline.
+    """
+    try:
+        normalized_case_id = int(case_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("case_id must be an integer matching cases.id") from exc
+
+    # Ownership validation (prevents attaching documents to another user's case)
+    case = db.query(Case).filter(Case.id == normalized_case_id).first()
+    if not case or case.user_id != user_id:
+        raise PermissionError(
+            "case_id not found or not owned by the provided user_id"
+        )
+
+    doc = CaseDocument(
+        case_id=normalized_case_id,
+        document_type=document_type,
+        document_content=document_content,
+        file_path=file_path,
+        summary=summary,
+        remedies=remedies,
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    return doc
 
 
 def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
@@ -786,8 +754,12 @@ def update_case_document(
             doc.summary = summary
         if remedies is not None:
             doc.remedies = remedies
-        db.commit()
-        db.refresh(doc)
+        try:
+            db.commit()
+            db.refresh(doc)
+        except Exception as e:
+            db.rollback()
+            raise RuntimeError(f"Database write failed for case document {document_id}: {str(e)}") from e
     return doc
 
 

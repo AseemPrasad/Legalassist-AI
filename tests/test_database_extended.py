@@ -52,6 +52,7 @@ from database import (
 @pytest.fixture(autouse=True)
 def disable_otp_rate_limiter(monkeypatch):
     monkeypatch.setattr("db.otp_service._reserve_otp_rate_limit_slot", lambda *args, **kwargs: True)
+    monkeypatch.setattr("database._reserve_otp_rate_limit_slot", lambda *args, **kwargs: 1)
 
 @pytest.fixture(scope="function")
 def test_db():
@@ -280,11 +281,49 @@ class TestDatabaseExtended:
         index_names_before = {index["name"] for index in inspect(engine).get_indexes(NotificationLog.__tablename__)}
         assert "ix_notification_logs_status" not in index_names_before
 
-        monkeypatch.setattr("database.engine", engine)
+        monkeypatch.setattr("db.session.engine", engine)
         init_db()
 
         index_names_after = {index["name"] for index in inspect(engine).get_indexes(NotificationLog.__tablename__)}
         assert "ix_notification_logs_status" in index_names_after
+
+    def test_update_case_document_success_and_failure(self, test_db):
+        """Test update_case_document database persistence and error fallback rollback"""
+        from database import update_case_document as db_shim_update
+        from db.case_service import update_case_document as service_update
+        
+        user = create_user(test_db, "doc_test@example.com")
+        case = create_case(test_db, user.id, "CASE-DOC-001", "civil", "Delhi")
+        doc = create_case_document(test_db, case.id, DocumentType.JUDGMENT, user.id, "Original Content")
+        
+        # Test success using service_update
+        updated = service_update(
+            test_db, doc.id, document_content="Updated Content By Service", summary="New Summary"
+        )
+        assert updated is not None
+        assert updated.document_content == "Updated Content By Service"
+        assert updated.summary == "New Summary"
+        
+        # Test success using db_shim_update
+        updated_shim = db_shim_update(
+            test_db, doc.id, document_content="Updated Content By Shim", summary="New Shim Summary"
+        )
+        assert updated_shim is not None
+        assert updated_shim.document_content == "Updated Content By Shim"
+        assert updated_shim.summary == "New Shim Summary"
+        
+        # Test rollback on commit failure (by mocking db.commit to raise an exception)
+        original_commit = test_db.commit
+        def mock_commit():
+            raise Exception("Mock DB Commit Error")
+        test_db.commit = mock_commit
+        
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                db_shim_update(test_db, doc.id, document_content="Should Fail")
+            assert "Database write failed" in str(exc_info.value)
+        finally:
+            test_db.commit = original_commit
 
 
 class TestAutoDeadlineDeduplication:
@@ -309,6 +348,16 @@ class TestAutoDeadlineDeduplication:
             description="Pre-existing appeal deadline",
         )
         test_db.add(existing)
+        test_db.flush()
+
+        from database import CaseTimeline
+        event = CaseTimeline(
+            case_id=99,
+            event_type="deadline_created",
+            description="Appeal deadline set based on document analysis",
+            event_metadata={"source_days": 30, "document_id": 42}
+        )
+        test_db.add(event)
         test_db.commit()
         test_db.refresh(existing)
 
