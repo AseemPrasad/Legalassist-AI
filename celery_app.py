@@ -410,42 +410,14 @@ def enqueue_task_from_http_request(
 
 
 # ============================================================================
-# RESULT REDACTION FOR PII PROTECTION
+# TRACE CONTEXT PROPAGATION
 # ============================================================================
 
-
-def _redact_task_result(result: Any) -> Any:
-    """Redact sensitive fields from task results before storing in Redis.
-
-    Task results may contain:
-    - LLM output (summary_text, key_points, remedies_list from legal docs)
-    - Extracted text from uploaded PDFs
-    - Party names, addresses, case details
-
-    This function removes or truncates these fields to reduce the PII
-    exposure window during the result_expires TTL.
-    """
-    if not isinstance(result, dict):
-        return result
-
-    redacted = result.copy()
-
-    # Strip full text output — keep only summary info
-    sensitive_keys = {
-        "summary_text",
-        "key_points",
-        "remedies_list",
-        "extracted_text",
-        "raw_content",
-        "document_content",
-        "analysis_output",
-        "summary",
-    }
-    for key in sensitive_keys:
-        if key in redacted:
-            redacted[key] = "[REDACTED]"  # placeholder
-
-    return redacted
+@before_task_publish.connect
+def _inject_tracing_headers(sender=None, headers=None, **kwargs):
+    """Inject OpenTelemetry trace context into every task message."""
+    if propagate is not None:
+        propagate.inject(headers)
 
 
 # ============================================================================
