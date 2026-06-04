@@ -10,6 +10,8 @@ from unittest.mock import Mock, patch, MagicMock
 # Set test environment variables before imports
 os.environ["DEBUG"] = "0"
 os.environ["TESTING"] = "1"
+os.environ["JWT_SECRET"] = "test-secret-key-value-12345"
+os.environ["APP_ALLOWED_HOSTS"] = "localhost"
 os.environ["OTP_EXPIRY_MINUTES"] = "10"
 os.environ["OTP_MAX_FAILED_ATTEMPTS"] = "5"
 os.environ["OTP_LOCKOUT_MINUTES"] = "15"
@@ -67,6 +69,33 @@ class TestOTPBruteForceProtection:
         # Verify it starts with 0 failed attempts
         assert otp_record.failed_attempts == 0
         assert otp_record.locked_until is None
+
+    def test_otp_failure_backoff_increases_lock_duration(self, db_session):
+        """Test that failed OTP attempts apply increasing backoff."""
+        email = "backoff@example.com"
+        otp_hash = _hash_otp("123456")
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        otp_record = OTPVerification(
+            email=email,
+            otp_hash=otp_hash,
+            expires_at=expires_at,
+        )
+        db_session.add(otp_record)
+        db_session.commit()
+
+        from database import record_otp_failed_attempt
+
+        record_otp_failed_attempt(db_session, otp_record.id)
+        db_session.refresh(otp_record)
+        first_lockout = otp_record.locked_until
+        assert first_lockout is not None
+
+        record_otp_failed_attempt(db_session, otp_record.id)
+        db_session.refresh(otp_record)
+        second_lockout = otp_record.locked_until
+        assert second_lockout is not None
+        assert second_lockout > first_lockout
 
     def test_otp_lockout_after_max_attempts(self, db_session):
         """Test that OTP is locked after maximum failed attempts"""
@@ -161,7 +190,7 @@ class TestOTPBruteForceProtection:
 
         assert not success
         assert token is None
-        assert "Invalid OTP code" in message or "attempts remaining" in message
+        assert "Invalid or expired OTP" in message or "Too many failed attempts" in message
 
         # Verify failed attempt was recorded in database
         # Need to create a fresh session to see the changes from verify_otp_and_create_token
