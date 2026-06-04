@@ -199,8 +199,12 @@ async def error_handling_middleware(request: Request, call_next: Callable):
 
 
 async def logging_middleware(request: Request, call_next: Callable):
-    """Log request metadata and emit tracing/metrics events."""
-
+    """Log all requests and responses
+    
+    Note: Error handling and tracing blocks are strictly enclosed inside this
+    async function scope to prevent global scope exception masking.
+    """
+    
     start_time = time.time()
     endpoint = request.url.path
     request_id = getattr(request.state, "request_id", request.headers.get("X-Correlation-Id") or generate_correlation_id())
