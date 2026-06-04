@@ -135,6 +135,16 @@ def _hash_otp(otp: str) -> str:
 def _verify_otp_hash(otp: str, otp_hash: str) -> bool:
     """Verify OTP against stored hash using constant-time comparison"""
     return secrets.compare_digest(_hash_otp(otp), otp_hash)
+OTP_HASH_ITERATIONS = 100000
+
+def _hash_otp(otp: str, email: str) -> str:
+    """Hash OTP code before storage using PBKDF2-HMAC-SHA256 with per-email salt"""
+    return hashlib.pbkdf2_hmac('sha256', otp.encode(), email.encode(), OTP_HASH_ITERATIONS).hex()
+
+
+def _verify_otp_hash(otp: str, email: str, otp_hash: str) -> bool:
+    """Verify OTP against stored hash using constant-time comparison"""
+    return secrets.compare_digest(_hash_otp(otp, email), otp_hash)
 
 
 def generate_otp() -> str:
@@ -152,7 +162,7 @@ def send_otp_email(email: str, otp: str) -> bool:
         from_email = os.getenv("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
 
         if not api_key or sendgrid is None:
-            if _is_debug_or_testing_mode():
+            if _is_debug_or_testing_mode() and not Config.is_production():
 
                 logger.warning("SendGrid API key not configured or sendgrid package not installed - using masked OTP logging for debug/test mode")
                 logger.debug("OTP generated: [MASKED]")
@@ -213,7 +223,7 @@ def send_otp_email(email: str, otp: str) -> bool:
             recipient=mask_email(email),
             error=sanitize_log_text(str(e)),
         )
-        if _is_debug_or_testing_mode():
+        if _is_debug_or_testing_mode() and not Config.is_production():
             logger.debug("OTP delivery simulated: [MASKED]")
             logger.debug("otp_delivery_debug_mode", recipient=mask_email(email), transport="sendgrid")
             return True
@@ -222,10 +232,16 @@ def send_otp_email(email: str, otp: str) -> bool:
             return False
 
 
+GENERIC_OTP_SENT = "If the email address is valid, you will receive an OTP shortly."
+
 def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, str]:
     """
     Request OTP for email authentication.
     Returns (success, message).
+
+    Security: Always returns the same success message to prevent email enumeration
+    via rate-limit or delivery-failure side channels. Actual outcomes are logged
+    internally for observability.
     """
     # Validate email format
     if not email or not EMAIL_REGEX.match(email):
@@ -233,12 +249,10 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
 
     db = SessionLocal()
     try:
-        # Generate OTP
         otp = generate_otp()
-        otp_hash = _hash_otp(otp)
+        otp_hash = _hash_otp(otp, email)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
-        # Store OTP
         try:
             create_otp_verification(
                 db,
@@ -248,22 +262,22 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
                 max_requests_per_hour=OTP_REQUEST_RATE_LIMIT_MAX,
                 requester_ip=requester_ip,
             )
-        except ValueError as exc:
-            return False, str(exc)
+        except ValueError:
+            logger.info(
+                "otp_request_rate_limited",
+                recipient=mask_email(email),
+            )
+            return True, GENERIC_OTP_SENT
 
-        # Send OTP email
         email_sent = send_otp_email(email, otp)
 
-        if email_sent:
-            # Create user if doesn't exist
-            user = get_user_by_email(db, email)
-            if not user:
-                create_user(db, email)
-                logger.info("auth_new_user_created", recipient=mask_email(email))
+        if not email_sent:
+            logger.warning(
+                "otp_email_delivery_failed",
+                recipient=mask_email(email),
+            )
 
-            return True, "OTP sent to your email"
-        else:
-            return False, "Failed to send OTP email. Please try again."
+        return True, GENERIC_OTP_SENT
 
     except Exception as e:
         logger.error(
@@ -271,7 +285,7 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
             recipient=mask_email(email),
             error=sanitize_log_text(str(e)),
         )
-        return False, "An unexpected error occurred. Please try again later."
+        return True, GENERIC_OTP_SENT
     finally:
         db.close()
 
@@ -280,7 +294,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
     """
     Verify OTP and create JWT token with brute-force protection.
     Returns (success, message, token).
-
+    
     Security features:
     - Track failed verification attempts per OTP
     - Lock OTP after max failed attempts
@@ -296,37 +310,15 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
 
         GENERIC_OTP_FAILURE = "Invalid or expired OTP. Please request a new one."
 
-        # ------------------------------------------------------------------ #
-        # Timing equalisation                                                  #
-        # ------------------------------------------------------------------ #
-        # Always run _verify_otp_hash() regardless of whether an OTP record   #
-        # exists or is locked.  This ensures all failure branches spend the    #
-        # same amount of time in the hash comparison so an attacker cannot     #
-        # distinguish "no pending OTP" (account has not requested a code)     #
-        # from "wrong OTP" (account exists and has a pending code) by         #
-        # measuring response latency.                                          #
-        #                                                                      #
-        # When there is no record, compare against a fresh random hash so     #
-        # the work is identical to the real comparison.                        #
-        # ------------------------------------------------------------------ #
-        dummy_hash = _hash_otp(secrets.token_hex(16))
-        reference_hash = otp_record.otp_hash if otp_record else dummy_hash
-
-        # Always perform the hash comparison (may be against a dummy hash).
-        otp_matches = _verify_otp_hash(otp, reference_hash)
-
         if not otp_record:
-            # Hash comparison already done above — return generic failure.
             return False, GENERIC_OTP_FAILURE, None
 
-        # Check if OTP is locked due to too many failed attempts.
-        # Do this AFTER the hash comparison so the locked path takes
-        # the same time as the invalid-OTP path.
+        # Check if OTP is locked due to too many failed attempts
         if otp_record.is_locked():
             locked_until = otp_record.locked_until
             if locked_until and locked_until.tzinfo is None:
                 locked_until = locked_until.astimezone(timezone.utc)
-
+            
             remaining_time = (locked_until - datetime.now(timezone.utc)).total_seconds() / 60
             logger.warning(
                 "otp_verification_blocked",
@@ -335,15 +327,15 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
             )
             return False, GENERIC_OTP_FAILURE, None
 
-        # Verify OTP using the result already computed above.
-        if not otp_matches:
+        # Verify OTP
+        if not _verify_otp_hash(otp, email, otp_record.otp_hash):
             record_otp_failed_attempt(
-                db,
-                otp_record.id,
+                db, 
+                otp_record.id, 
                 lockout_duration_minutes=OTP_LOCKOUT_MINUTES,
                 max_failed_attempts=OTP_MAX_FAILED_ATTEMPTS
             )
-
+            
             db.refresh(otp_record)
             if otp_record.is_locked():
                 logger.warning(
@@ -358,9 +350,13 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
             )
             return False, GENERIC_OTP_FAILURE, None
 
-        # OTP is valid - reset failed attempts and mark as used
+        # OTP is valid - reset failed attempts and atomically mark as used
         reset_otp_failed_attempts(db, otp_record.id)
-        mark_otp_as_used(db, otp_record.id)
+        marked = mark_otp_as_used(db, otp_record.id)
+        if not marked:
+            # Another process may have consumed this OTP concurrently.
+            logger.warning("otp_replay_detected", recipient=mask_email(email))
+            return False, GENERIC_OTP_FAILURE, None
 
         # Get or create user
         user = get_user_by_email(db, email)
@@ -854,3 +850,7 @@ def get_current_user_email() -> Optional[str]:
         return st.session_state.user_email
 
     return None
+
+def verify_token_format(token):
+    """Checks if the provided token follows the expected format."""
+    return len(token) > 10

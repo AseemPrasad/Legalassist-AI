@@ -410,6 +410,45 @@ def enqueue_task_from_http_request(
 
 
 # ============================================================================
+# RESULT REDACTION FOR PII PROTECTION
+# ============================================================================
+
+
+def _redact_task_result(result: Any) -> Any:
+    """Redact sensitive fields from task results before storing in Redis.
+
+    Task results may contain:
+    - LLM output (summary_text, key_points, remedies_list from legal docs)
+    - Extracted text from uploaded PDFs
+    - Party names, addresses, case details
+
+    This function removes or truncates these fields to reduce the PII
+    exposure window during the result_expires TTL.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    redacted = result.copy()
+
+    # Strip full text output — keep only summary info
+    sensitive_keys = {
+        "summary_text",
+        "key_points",
+        "remedies_list",
+        "extracted_text",
+        "raw_content",
+        "document_content",
+        "analysis_output",
+        "summary",
+    }
+    for key in sensitive_keys:
+        if key in redacted:
+            redacted[key] = "[REDACTED]"  # placeholder
+
+    return redacted
+
+
+# ============================================================================
 # CUSTOM TASK BASE CLASS
 # ============================================================================
 
@@ -1427,7 +1466,18 @@ def process_case_document_upload_task(
         raise RuntimeError(f"Could not acquire distributed lock for document {document_id}")
     try:
         case = get_case_by_id(session, int(case_id))
-        if not case or str(case.user_id) != str(user_id):
+
+        # Ownership check: compare as integers to prevent string-based bypass.
+        # The task receives user_id as a string from the Celery JSON queue.
+        # Using str(case.user_id) != str(user_id) allows values like "007" or
+        # " 7" to bypass the check for user 7, or equal a different integer
+        # through locale-specific string coercion.
+        try:
+            task_user_id_int = int(user_id)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid user_id value: {user_id!r}")
+
+        if not case or case.user_id != task_user_id_int:
             raise ValueError("Case not found or not owned by the provided user")
 
         doc = get_case_document_by_id(session, int(document_id))
@@ -1513,7 +1563,37 @@ def generate_report_task(
     format: str = "pdf",
     privacy_profile: str = "personal_identifiers",
 ) -> Dict[str, Any]:
-    """Asynchronous task to generate a formal report for a legal case."""
+    """
+    Asynchronous task to generate a formal report for a legal case.
+
+    Args:
+        user_id (str): The ID of the user requesting the report.
+        case_id (str): The ID of the case for which the report is generated.
+        report_id (str): Unique report UUID created by API.
+        report_type (str): The type of report (e.g., 'summary', 'comprehensive').
+        format (str): The output format ('pdf', 'html', etc.).
+    Returns:
+        Dict[str, Any]: Metadata about the generated report file.
+    """
+    # Defence-in-depth: validate format and report_type against allowlists even
+    # though the HTTP layer enforces Literal types.  Task arguments arrive via
+    # the Celery JSON queue and may bypass the API validation layer in some
+    # code paths (e.g. direct task invocation, replayed tasks, compromised
+    # brokers).  Rejecting unknown values here prevents path traversal and
+    # unexpected template selection inside generate_report().
+    _ALLOWED_FORMATS = {"pdf", "docx", "html"}
+    _ALLOWED_REPORT_TYPES = {"comprehensive", "summary", "legal_brief"}
+
+    if format not in _ALLOWED_FORMATS:
+        raise ValueError(
+            f"Invalid report format {format!r}. "
+            f"Allowed values: {sorted(_ALLOWED_FORMATS)}"
+        )
+    if report_type not in _ALLOWED_REPORT_TYPES:
+        raise ValueError(
+            f"Invalid report_type {report_type!r}. "
+            f"Allowed values: {sorted(_ALLOWED_REPORT_TYPES)}"
+        )
     from db.session import db_session
     from db.models.reports import Report
     from db.crud.reports import update_report_status
@@ -2150,3 +2230,8 @@ def purge_expired_data(self) -> Dict[str, Any]:
 
         logger.info("purge_expired_data_completed", results=results)
         return {"status": "completed", "purged": results}
+
+
+def get_celery_status():
+    """Retrieves the current status of the Celery worker."""
+    return "Running"

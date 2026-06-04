@@ -250,6 +250,7 @@ class SMSClient:
             lambda e: any(x in str(e) for x in ("503", "429", "Service Unavailable", "Too Many Requests"))
             or getattr(e, "status_code", None) in (429, 503)
             or getattr(e, "status", None) in (429, 503)
+            or any(err in str(e).lower() for err in ("timeout", "connection", "connect", "unreachable"))
         ),
         reraise=True
     )
@@ -319,6 +320,7 @@ class EmailClient:
             lambda e: any(x in str(e) for x in ("503", "429", "Service Unavailable", "Too Many Requests"))
             or getattr(e, "status_code", None) in (429, 503)
             or getattr(e, "status", None) in (429, 503)
+            or any(err in str(e).lower() for err in ("timeout", "connection", "connect", "unreachable"))
         ),
         reraise=True
     )

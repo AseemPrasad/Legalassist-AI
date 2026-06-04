@@ -361,6 +361,12 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
         remedies = case_data.get("remedies")
 
         pdf = LegalAssistPDF()
+        title_str = case.get('title') or case.get('case_number', 'Untitled Case')
+        pdf.set_title(title_str)
+        pdf.set_author("LegalAssist AI")
+        pdf.set_creator("LegalAssist AI Export Engine")
+        pdf.set_subject(f"Case summary for {case.get('case_number')}")
+        pdf.set_keywords(f"LegalAssist, Case Report, {case.get('case_type')}, {case.get('jurisdiction')}")
         pdf.add_page()
 
         # ==================== CASE HEADER ====================
@@ -648,6 +654,11 @@ def generate_anonymized_pdf(
                 anonymized_data = None
 
         pdf = LegalAssistPDF()
+        pdf.set_title(f"Anonymized Brief - {anon_id}")
+        pdf.set_author("LegalAssist AI")
+        pdf.set_creator("LegalAssist AI Anonymization Engine")
+        pdf.set_subject("Anonymized Brief for Third-Party Consultation")
+        pdf.set_keywords(f"Anonymized, Consultation, LegalAssist, {selected_profile}")
         pdf.add_page()
 
         # Header for Anonymized Report
@@ -772,3 +783,8 @@ def calculate_optimal_font_size(text: str, container_width: float, max_font_size
         ratio = container_width / required_width
         return max(6.0, min(max_font_size, max_font_size * ratio))
     return max_font_size
+
+
+def get_supported_pdf_fonts():
+    """Returns a list of fonts supported by the PDF exporter."""
+    return ["Helvetica", "Arial", "Times"]
