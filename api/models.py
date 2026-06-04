@@ -2,7 +2,7 @@
 Pydantic models for API requests/responses
 """
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field, EmailStr
 
 
@@ -263,12 +263,12 @@ class AnonymizedShareResponse(BaseModel):
 class ReportGenerationRequest(BaseModel):
     """Request to generate a report"""
     case_id: str
-    report_type: str = "comprehensive"  # comprehensive, summary, legal_brief
+    report_type: Literal["comprehensive", "summary", "legal_brief"] = "comprehensive"
     include_remedies: bool = True
     include_timeline: bool = True
     include_similar_cases: bool = True
-    format: str = "pdf"  # pdf, docx, html
-    style: str = "formal"  # formal, casual
+    format: Literal["pdf", "docx", "html"] = "pdf"
+    style: Literal["formal", "casual"] = "formal"
     privacy_profile: str = "personal_identifiers"
 
 

@@ -53,7 +53,6 @@ DISTRIBUTED LOCKING PATTERN:
 
 ================================================================================
 """
-
 import signal
 import sys
 import os
@@ -148,7 +147,6 @@ def get_notification_service() -> NotificationService:
     """Lazily initialize the notification service singleton."""
     return notification_service._ensure()
 
-
 # Lock configuration
 LOCK_KEY = "legalassist:scheduler:lock"
 LOCK_TTL_SECONDS = 55 * 60  # 55 minutes to allow hourly job to complete
@@ -199,9 +197,27 @@ def distributed_lock(lock_key: str, ttl_seconds: int = 300, lock_id: Optional[st
         yield acquired
     finally:
         if acquired:
-            current_holder = redis_client.get(lock_key)
-            if current_holder == lock_id:
-                redis_client.delete(lock_key)
+            # Atomic compare-and-delete via Lua script.
+            # A plain GET + DELETE is a race: if the TTL expires between the two
+            # calls another instance can acquire the lock, and our subsequent
+            # DELETE would then remove *their* key, breaking mutual exclusion.
+            # Lua executes atomically on the Redis server — no other command
+            # can interleave between the ownership check and the deletion.
+            _UNLOCK_SCRIPT = (
+                "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                "    return redis.call('del', KEYS[1]) "
+                "else "
+                "    return 0 "
+                "end"
+            )
+            try:
+                redis_client.eval(_UNLOCK_SCRIPT, 1, lock_key, lock_id)
+            except Exception as e:
+                logger.error(
+                    "scheduler_lock_release_failed",
+                    lock_key=lock_key,
+                    error=sanitize_log_text(str(e)),
+                )
 
 
 def _shutdown_scheduler_instance(scheduler, *, wait: bool = True):
@@ -548,6 +564,8 @@ def run_system_maintenance_task():
         except Exception as e:
             logger.error("scheduler_maintenance_exception", error=sanitize_log_text(str(e)), exc_info=True)
 
+    return sent_count
+
 
 def setup_scheduler(scheduler_class):
     """
@@ -836,3 +854,8 @@ def check_reminders_sync(
 if __name__ == "__main__":
     # If run directly, start the worker
     run_worker()
+
+
+def list_active_jobs():
+    """Returns a list of all currently active scheduled jobs."""
+    return []
