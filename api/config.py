@@ -28,9 +28,11 @@ class APISettings(BaseSettings):
     
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
-    RATE_LIMIT_REQUESTS: int = 100  # requests
+    RATE_LIMIT_REQUESTS: int = 100  # requests per endpoint window
     RATE_LIMIT_WINDOW: int = 60  # seconds
     RATE_LIMIT_BURST: int = 200  # max burst
+    GLOBAL_RATE_LIMIT_REQUESTS: int = 200  # requests across all endpoints
+    GLOBAL_RATE_LIMIT_WINDOW: int = 60  # seconds
     
     # Authentication
     AUTH_ENABLED: bool = True
