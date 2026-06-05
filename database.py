@@ -1079,6 +1079,16 @@ def get_cases_by_criteria(
     return query.order_by(CaseRecord.created_at.desc()).limit(limit).all()
 
 
+def _escape_like_pattern(value: str) -> str:
+    """Escape SQL LIKE wildcard characters in a user-supplied string.
+
+    Both ``%`` and ``_`` are prefixed with the escape character (``\\``) so
+    they are treated as literals rather than wildcards when used in a LIKE
+    expression with ``escape='\\'``.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def submit_user_feedback(
     db: Session,
     user_id: int,
