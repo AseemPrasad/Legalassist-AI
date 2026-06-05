@@ -20,7 +20,7 @@ from observability.integration import initialize_observability_for_environment
 from observability.instrumentation import get_metrics
 
 # Import routes
-from api.routes import documents, cases, reports, analytics, deadlines, auth, health
+from api.routes import documents, cases, reports, analytics, deadlines, auth, health, webhooks
 
 settings = get_settings()
 logger = structlog.get_logger(__name__)
@@ -78,6 +78,7 @@ def create_app() -> FastAPI:
     app.include_router(analytics.router)
     app.include_router(deadlines.router)
     app.include_router(auth.router)
+    app.include_router(webhooks.router)
     # Model feedback & optimization
     from api.routes import models as models_router
     app.include_router(models_router.router)
