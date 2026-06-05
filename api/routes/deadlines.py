@@ -3,12 +3,15 @@ Deadline Endpoints
 GET /api/v1/deadlines/upcoming - Get user's upcoming deadlines
 GET /api/v1/deadlines/{deadline_id} - Get deadline details
 POST /api/v1/deadlines - Create new deadline
+PUT /api/v1/deadlines/{deadline_id} - Update deadline
 """
 from fastapi import APIRouter, HTTPException, status, Depends
 from api.models import DeadlineResponse, UpcomingDeadlinesResponse
 from api.auth import get_current_user, CurrentUser
 import structlog
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from sqlalchemy.orm import Session
+from database import get_db, CaseDeadline, Case
 
 router = APIRouter(prefix="/api/v1/deadlines", tags=["deadlines"])
 logger = structlog.get_logger(__name__)
@@ -186,29 +189,74 @@ async def update_deadline(
     title: str = None,
     due_date: datetime = None,
     priority: str = None,
-    current_user: CurrentUser = Depends(get_current_user)
+    description: str = None,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> DeadlineResponse:
-    """Update a deadline"""
-    
+    """Update a deadline and persist changes to the database."""
+
+    try:
+        deadline_pk = int(deadline_id)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="deadline_id must be an integer",
+        )
+
+    deadline = db.query(CaseDeadline).filter(CaseDeadline.id == deadline_pk).first()
+    if not deadline:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deadline not found",
+        )
+
+    case = db.query(Case).filter(Case.id == deadline.case_id).first()
+    if not case or str(case.user_id) != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deadline not found",
+        )
+
+    if title is not None:
+        deadline.case_title = title
+    if due_date is not None:
+        if due_date.tzinfo is None:
+            due_date = due_date.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if due_date < now:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Deadline date must be in the future",
+            )
+        deadline.deadline_date = due_date
+    if priority is not None:
+        deadline.deadline_type = priority
+    if description is not None:
+        deadline.description = description
+
+    db.commit()
+    db.refresh(deadline)
+
+    now = datetime.now(timezone.utc)
+    days_until = (deadline.deadline_date - now).days
+
     logger.info(
-        "Updating deadline",
-        deadline_id=deadline_id,
-        user_id=current_user.user_id
-    )
-    
-    # In production, fetch and update from database
-    now = datetime.utcnow()
-    return DeadlineResponse(
-        deadline_id=deadline_id,
+        "Deadline updated",
+        deadline_id=deadline.id,
         user_id=current_user.user_id,
-        case_id="case_001",
-        title=title or "Updated Deadline",
-        description="Updated description",
-        due_date=due_date or (now + timedelta(days=7)),
-        days_until_due=7,
-        priority=priority or "medium",
-        status="pending",
+    )
+
+    return DeadlineResponse(
+        deadline_id=str(deadline.id),
+        user_id=str(deadline.user_id),
+        case_id=str(deadline.case_id),
+        title=deadline.case_title,
+        description=deadline.description or "",
+        due_date=deadline.deadline_date,
+        days_until_due=max(0, days_until),
+        priority=deadline.deadline_type,
+        status="completed" if deadline.is_completed else "pending",
         reminder_enabled=True,
         reminder_days=7,
-        created_at=now
+        created_at=deadline.created_at,
     )
