@@ -1,6 +1,6 @@
-# Deadline Notification System - Architecture Diagrams
+# Deadline Notification System - Architecture & Pipeline Layouts
 
-## System Architecture
+## System Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

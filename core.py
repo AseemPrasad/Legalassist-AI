@@ -2,21 +2,22 @@ import io
 from pypdf import PdfReader
 import pdfplumber
 import re
+import json
 import logging
 from pathlib import Path
 from typing import Dict, Optional, List, Union, Any
+from datetime import datetime
+from config import Config
 
-# Allow this module to coexist with the core/ package so imports such as
-# `from core.app_utils import ...` continue to resolve.
-__path__ = [str(Path(__file__).with_name("core"))]
-
-# Allow this module to coexist with the core/ package so imports such as
-# `from core.app_utils import ...` continue to resolve.
-__path__ = [str(Path(__file__).with_name("core"))]
-
-# Allow this module to coexist with the core/ package so imports such as
-# `from core.app_utils import ...` continue to resolve.
-__path__ = [str(Path(__file__).with_name("core"))]
+# Custom Exception Imports
+from core.exceptions import (
+    LegalAssistError,
+    InputReadingError,
+    PDFProcessingError,
+    OCRDependencyError,
+    OCRProcessingError,
+    LLMResponseParsingError,
+)
 
 # Allow this module to coexist with the core/ package so imports such as
 # `from core.app_utils import ...` continue to resolve.
@@ -35,7 +36,18 @@ DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 # PDF DATA EXTRACTION (OCR & PARSING)
 # =============================================================================
 
-def _read_pdf_bytes(pdf_input: Union[str, Path, object]) -> Optional[bytes]:
+def _resolve_safe_pdf_path(pdf_input: Union[str, Path]) -> Path:
+    """Resolve and validate that a PDF path is within the allowed attachments directory."""
+    path = Path(pdf_input)
+    resolved = path.resolve(strict=False)
+    allowed = Path(Config.ATTACHMENTS_DIR).resolve()
+    if not resolved.is_relative_to(allowed):
+        LOGGER.warning("blocked_arbitrary_file_read", path=str(resolved), allowed=str(allowed))
+        raise InputReadingError("File path is not within the allowed attachments directory")
+    return resolved
+
+
+def _read_pdf_bytes(pdf_input: Union[str, Path, object]) -> bytes:
     """
     Safely reads PDF content into a byte stream.
     
@@ -43,24 +55,37 @@ def _read_pdf_bytes(pdf_input: Union[str, Path, object]) -> Optional[bytes]:
         pdf_input: A file path (str/Path) or a file-like object (Streamlit upload).
         
     Returns:
-        Optional[bytes]: The raw PDF bytes if successful, else None.
+        bytes: The raw PDF bytes.
+        
+    Raises:
+        InputReadingError: If the input cannot be read or is invalid.
     """
-    """Read PDF bytes when possible for OCR conversion."""
     if isinstance(pdf_input, (str, Path)):
         try:
-            with open(pdf_input, "rb") as f:
+            resolved = _resolve_safe_pdf_path(pdf_input)
+            with open(resolved, "rb") as f:
                 return f.read()
-        except Exception:
-            return None
+        except InputReadingError:
+            raise
+        except Exception as e:
+            raise InputReadingError(f"Failed to read PDF file at {pdf_input}", e)
+
+    # Handle file-like objects (e.g., Streamlit UploadedFile)
     try:
         if hasattr(pdf_input, "seek"):
             pdf_input.seek(0)
         data = pdf_input.read()
         if hasattr(pdf_input, "seek"):
             pdf_input.seek(0)
+        
+        if not data:
+            raise InputReadingError("PDF input stream is empty")
+            
         return data
-    except Exception:
-        return None
+    except Exception as e:
+        if isinstance(e, InputReadingError):
+            raise e
+        raise InputReadingError("Failed to read from PDF input stream", e)
 
 
 def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
@@ -133,7 +158,32 @@ def extract_text_with_diagnostics(
     ocr_languages: str = "eng+hin",
     ocr_dpi: int = 300,
 ) -> Dict[str, Any]:
-    """Extract text using PDF parsers, optionally falling back to OCR with confidence."""
+    """
+    Extract text using PDF parsers, optionally falling back to OCR with confidence.
+    
+    This function attempts multiple extraction strategies in order:
+    1. pdfplumber (best for complex layouts)
+    2. pypdf (legacy fallback)
+    3. Tesseract OCR (if enabled and necessary)
+    
+    Args:
+        pdf_input: Path to PDF or file-like object.
+        enable_ocr: If True, uses OCR if standard extraction yields no text.
+        ocr_languages: Tesseract language string.
+        ocr_dpi: Resolution for image conversion.
+        
+    Returns:
+        Dict[str, Any]: A dictionary containing:
+            - 'text': Extracted string.
+            - 'method': The tool that succeeded.
+            - 'ocr_used': Boolean flag.
+            - 'confidence': Average OCR confidence (0-100) or None.
+            
+    Raises:
+        PDFProcessingError: If extraction fails across all methods.
+        OCRDependencyError: If OCR is needed but missing.
+        InputReadingError: If the input cannot be read.
+    """
     text = ""
     diagnostics: Dict[str, Any] = {
         "text": "",
@@ -143,17 +193,12 @@ def extract_text_with_diagnostics(
     }
 
     # 1. Try pdfplumber (more robust for complex layouts).
-    # For file-like objects (e.g. Streamlit UploadedFile), read bytes and wrap
-    # in io.BytesIO first to guarantee a seekable stream, since not all upload
-    # implementations expose the full file-object interface that pdfplumber
-    # expects.  Path/str inputs are passed directly.
     try:
         if isinstance(pdf_input, (str, Path)):
-            pdfplumber_input = pdf_input
+            pdfplumber_input = _resolve_safe_pdf_path(pdf_input)
         else:
+            # _read_pdf_bytes now raises InputReadingError
             raw_bytes = _read_pdf_bytes(pdf_input)
-            if raw_bytes is None:
-                raise ValueError("Could not read bytes from the provided PDF input.")
             pdfplumber_input = io.BytesIO(raw_bytes)
 
         with pdfplumber.open(pdfplumber_input) as pdf:
@@ -163,22 +208,28 @@ def extract_text_with_diagnostics(
                 if page_text:
                     pages_text.append(page_text)
             text = "\n".join(pages_text).strip()
+            
             if text:
                 diagnostics.update({"text": text, "method": "pdfplumber", "ocr_used": False})
                 LOGGER.info("Extracted text using pdfplumber.")
                 return diagnostics
+    except InputReadingError:
+        # Re-raise input errors immediately
+        raise
     except Exception as e:
         LOGGER.warning(f"pdfplumber extraction failed: {e}. Falling back to pypdf.")
 
     # 2. Fallback to pypdf
     try:
         if isinstance(pdf_input, (str, Path)):
-            with open(pdf_input, "rb") as f:
+            resolved = _resolve_safe_pdf_path(pdf_input)
+            with open(resolved, "rb") as f:
                 reader = PdfReader(f)
                 text = _extract_pages_pypdf(reader)
         else:
             reader = PdfReader(pdf_input)
             text = _extract_pages_pypdf(reader)
+            
         if text:
             diagnostics.update({"text": text, "method": "pypdf", "ocr_used": False})
             LOGGER.info("Extracted text using pypdf fallback.")
@@ -186,56 +237,59 @@ def extract_text_with_diagnostics(
     except Exception as e:
         LOGGER.warning(f"pypdf extraction failed: {e}")
 
+    # If we get here, standard extraction failed.
     if not enable_ocr:
-        raise ValueError("No extractable text found. The PDF may be image-only or empty. Re-run with OCR enabled.")
+        raise PDFProcessingError(
+            "No extractable text found and OCR is disabled. "
+            "The PDF may be image-only, scanned, or empty."
+        )
 
     # 3. OCR path for scanned/image PDFs
     try:
         from pdf2image import convert_from_bytes, convert_from_path
         import pytesseract
         from pytesseract import Output
-    except Exception as e:
-        raise RuntimeError(
-            f"OCR dependencies are missing ({e}). Install pytesseract, pdf2image, Pillow and Tesseract binaries."
+    except ImportError as e:
+        raise OCRDependencyError(
+            f"OCR dependencies are missing: {e}. "
+            "Please install pytesseract, pdf2image, and ensure Tesseract/Poppler binaries are in PATH."
         ) from e
 
     try:
         images = []
         if isinstance(pdf_input, (str, Path)):
-            images = convert_from_path(str(pdf_input), dpi=ocr_dpi)
+            resolved = _resolve_safe_pdf_path(pdf_input)
+            images = convert_from_path(str(resolved), dpi=ocr_dpi)
         else:
             data = _read_pdf_bytes(pdf_input)
-            if not data:
-                raise ValueError("Unable to read PDF bytes for OCR.")
             images = convert_from_bytes(data, dpi=ocr_dpi)
     except Exception as e:
-        raise RuntimeError(f"Failed to convert PDF pages to images for OCR: {e}") from e
+        raise OCRProcessingError(f"Failed to convert PDF pages to images for OCR: {e}", e)
 
     if not images:
-        raise ValueError("OCR could not read any pages from PDF.")
+        raise OCRProcessingError("OCR engine failed: no images generated from PDF pages.")
 
     ocr_pages: List[str] = []
     confidences: List[float] = []
-    for image in images:
-        data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
-        ocr_text = _extract_layout_text_from_tesseract_data(data)
-        if ocr_text:
-            ocr_pages.append(ocr_text)
-        raw_conf = data.get("conf", [])
-        valid_conf = []
-        for c in raw_conf:
-            try:
-                val = float(c)
-                if val >= 0:
-                    valid_conf.append(val)
-            except Exception:
-                continue
-        if valid_conf:
-            confidences.append(sum(valid_conf) / len(valid_conf))
+    
+    for i, image in enumerate(images):
+        try:
+            data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
+            ocr_text = _extract_layout_text_from_tesseract_data(data)
+            if ocr_text:
+                ocr_pages.append(ocr_text)
+            
+            raw_conf = data.get("conf", [])
+            valid_conf = [float(c) for c in raw_conf if str(c).replace('.','',1).isdigit() and float(c) >= 0]
+            if valid_conf:
+                confidences.append(sum(valid_conf) / len(valid_conf))
+        except Exception as e:
+            LOGGER.error(f"OCR failed on page {i+1}: {e}")
+            continue
 
     final_text = "\n\n".join(ocr_pages).strip()
     if not final_text:
-        raise ValueError("OCR completed but no readable text was extracted.")
+        raise OCRProcessingError("OCR completed but no readable text was extracted. The image quality may be too low.")
 
     avg_conf = round(sum(confidences) / len(confidences), 2) if confidences else None
     diagnostics.update(
@@ -344,6 +398,20 @@ def compress_text(text: str, limit: int = 6000) -> str:
 
     return head.strip() + "\n\n... [TRUNCATED] ...\n\n" + tail.strip()
 
+
+def parse_llm_json(raw_text: str) -> Dict[str, Any]:
+    try:
+        # Strip markdown code blocks if the AI adds them
+        clean_json = raw_text.replace("```json", "").replace("
+```", "").strip()
+        return json.loads(clean_json)
+    except:
+        return {
+            "summary": raw_text, 
+            "confidence_score": 0.3, 
+            "explanation": "Could not parse metadata. Please verify details manually."
+        }
+
 # -----------------------------
 # Detect English leakage
 # -----------------------------
@@ -358,25 +426,17 @@ def english_leakage_detected(output_text: str, threshold: int = 5) -> bool:
 # -----------------------------
 def build_summary_prompt(safe_text: str, language: str) -> str:
     return f"""
-You are LegalEase AI — an expert judicial-simplification and translation engine.
-
-MISSION:
-Convert the judgment text into a simple, citizen-friendly summary.
-
-INSTRUCTIONS:
-1. Extract ONLY the final judgment outcome.
-2. Remove all legal jargon and case history.
-3. Produce AT LEAST 5 bullet points. More than 5 is allowed if needed.
-4. Write ONLY in {language}. ZERO English allowed if language ≠ English.
-5. Each bullet must be 1–2 very short sentences.
-6. Put every bullet point on its own new line.
-7. No extra headings. No disclaimers.
+You are LegalEase AI. Convert the judgment text into a simple summary.
+OUTPUT FORMAT: You MUST return a valid JSON object ONLY. Do not output anything else.
+{{
+  "summary": "5+ bullet points in {language}",
+  "key_entities": ["List of extracted entities like Acts, Dates, Names"],
+  "confidence_score": 0.0 to 1.0,
+  "explanation": "Explain why this summary is reliable."
+}}
 
 TEXT TO ANALYZE:
 {safe_text}
-
-OUTPUT REQUIRED:
-- Minimum 5 bullet points in {language} only
 """
 
 def build_retry_prompt(safe_text: str, language: str) -> str:
@@ -501,7 +561,19 @@ def _validate_court_name(value: Optional[str]) -> Optional[str]:
     # rather than discarding it — trust the LLM output for unknown courts.
     return cleaned
 
-def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[str]]]:
+
+def _compute_remedies_quality_metadata(remedies: Dict[str, Any], response_text: str) -> Dict[str, Any]:
+    try:
+        from core.app_utils import _compute_remedies_confidence_and_evidence
+
+        return _compute_remedies_confidence_and_evidence(remedies, response_text)
+    except Exception:
+        return {
+            "confidence_score": 0.0,
+            "evidence_spans": [],
+        }
+
+def parse_remedies_response(response_text: str) -> Dict[str, Any]:
     """
     Analyzes and parses the structured response from the Remedies LLM.
     
@@ -513,7 +585,10 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
         response_text: The raw text generated by the AI model.
         
     Returns:
-        Optional[Dict[str, Optional[str]]]: A dictionary of structured remedies info.
+        Dict[str, Any]: A dictionary of structured remedies info.
+        
+    Raises:
+        LLMResponseParsingError: If the response is empty or completely unparseable.
     """
     mapping = {
         1: "what_happened",
@@ -524,7 +599,7 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
         6: "first_action",
         7: "deadline",
     }
-    remedies: Dict[str, str] = {
+    remedies: Dict[str, Any] = {
         "what_happened": "",
         "can_appeal": "",
         "appeal_days": "",
@@ -536,10 +611,10 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
         "appeal_details": "", # For backward compatibility in app.py
         "_is_partial": False, # New field for status
     }
+    
     text = response_text.strip()
     if not text:
-        LOGGER.warning("parse_remedies_response: empty response text")
-        return remedies
+        raise LLMResponseParsingError("Received empty response from the AI model.")
 
     # Use the more robust parsing from cli.py
     marker_pattern = re.compile(r"(?m)^\s*(?:\*\*)?(\d{1,2})(?:\*\*)?\s*[\.|\)|:|-]\s*(.*)$")
@@ -547,29 +622,36 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
 
     if not matches:
         LOGGER.warning("parse_remedies_response: no numbered sections found")
+        remedies["_is_partial"] = True
+        remedies.update(_compute_remedies_quality_metadata(remedies, text))
         return remedies
 
     parsed_sections = 0
     for idx, match in enumerate(matches):
-        section_num = int(match.group(1))
-        key = mapping.get(section_num)
-        if not key:
-            continue
+        try:
+            section_num = int(match.group(1))
+            key = mapping.get(section_num)
+            if not key:
+                continue
 
-        start = match.end()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        inline_text = _clean_answer(match.group(2))
-        block_text = _clean_answer(text[start:end])
-        section_text = _clean_answer(" ".join(part for part in [inline_text, block_text] if part))
-        cleaned = _strip_question_label(key, section_text)
-        
-        if cleaned is not None:
-            remedies[key] = cleaned
-            parsed_sections += 1
+            start = match.end()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+            inline_text = _clean_answer(match.group(2))
+            block_text = _clean_answer(text[start:end])
+            section_text = _clean_answer(" ".join(part for part in [inline_text, block_text] if part))
+            cleaned = _strip_question_label(key, section_text)
+            
+            if cleaned is not None:
+                remedies[key] = cleaned
+                parsed_sections += 1
+        except Exception as e:
+            LOGGER.error(f"Error parsing section {idx+1}: {e}")
+            continue
 
     if parsed_sections == 0:
         LOGGER.warning("parse_remedies_response: no valid sections parsed")
         remedies["_is_partial"] = True
+        remedies.update(_compute_remedies_quality_metadata(remedies, text))
         return remedies
 
     # Normalization & Compatibility
@@ -604,4 +686,31 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
     if missing:
         remedies["_is_partial"] = True
 
+    remedies.update(_compute_remedies_quality_metadata(remedies, text))
+
     return remedies
+
+from datetime import datetime
+
+def parse_timeline(raw_text: str) -> List[Dict[str, str]]:
+    try:
+        clean_json = raw_text.replace("```json", "").replace("```", "").strip()
+        events = json.loads(clean_json)
+        
+        # Helper to convert "12 Jan 2025" or "2025-01-12" into a sortable object
+        def parse_date(date_str):
+            if not date_str or date_str == 'N/A':
+                return datetime(9999, 12, 31)
+            try:
+                # Add common formats your LLM might output
+                for fmt in ("%Y-%m-%d", "%d %b %Y", "%d %B %Y", "%Y/%m/%d"):
+                    try: return datetime.strptime(date_str, fmt)
+                    except: continue
+                return datetime(9999, 12, 31)
+    except Exception:
+                return datetime(9999, 12, 31)
+
+        return sorted(events, key=lambda x: parse_date(x.get('date')))
+    except Exception as e:
+        LOGGER.error(f"Timeline parsing failed: {e}")
+        return []

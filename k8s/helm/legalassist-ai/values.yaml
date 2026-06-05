@@ -3,7 +3,7 @@
 replicaCount: 3
 
 image:
-  repository: legalassist-ai
+  repository: ghcr.io/AseemPrasad/legalassist-ai
   tag: latest
   pullPolicy: IfNotPresent
 
@@ -45,14 +45,14 @@ ingress:
     cert-manager.io/cluster-issuer: "letsencrypt-prod"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
   hosts:
-    - host: legalassist.example.com
+    - host: REPLACE_ME_WITH_YOUR_DOMAIN
       paths:
         - path: /
           pathType: Prefix
   tls:
     - secretName: legalassist-tls
       hosts:
-        - legalassist.example.com
+        - REPLACE_ME_WITH_YOUR_DOMAIN
 
 resources:
   limits:
@@ -71,8 +71,9 @@ autoscaling:
 
 livenessProbe:
   httpGet:
-    path: /_stcore/health
+    path: /api/v1/health/live
     port: http
+    scheme: HTTP
   initialDelaySeconds: 60
   periodSeconds: 30
   timeoutSeconds: 10
@@ -80,8 +81,9 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /_stcore/health
+    path: /api/v1/health/ready
     port: http
+    scheme: HTTP
   initialDelaySeconds: 20
   periodSeconds: 10
   timeoutSeconds: 5
@@ -92,7 +94,7 @@ postgresql:
   enabled: true
   auth:
     username: legal_user
-    password: changeme  # Change in production!
+    password: ""
     database: legalassist_db
   primary:
     persistence:
@@ -111,7 +113,7 @@ redis:
   enabled: true
   auth:
     enabled: true
-    password: changeme  # Change in production!
+    password: ""
   master:
     persistence:
       enabled: true
@@ -133,7 +135,7 @@ prometheus:
 # Grafana Configuration
 grafana:
   enabled: true
-  adminPassword: changeme  # Change in production!
+  adminPassword: ""
   persistence:
     enabled: true
     size: 5Gi
@@ -159,9 +161,14 @@ env:
 
 # Secrets (reference external secret management)
 secrets:
+  create: false
   externalSecrets:
     enabled: false
     backendType: aws-secrets-manager  # or vault, etc.
+  openaiApiKey: ""
+  twilioAccountSid: ""
+  twilioAuthToken: ""
+  sendgridApiKey: ""
 
 # Network Policies
 networkPolicy:
