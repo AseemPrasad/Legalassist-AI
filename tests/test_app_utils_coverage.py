@@ -6,6 +6,8 @@ HTML rendering helpers, localize_yes_no, parse_summary_bullets, and edge cases.
 
 import io
 import json
+import sys
+import types
 import pytest
 from unittest.mock import MagicMock, patch
 from pypdf import PdfWriter
@@ -20,6 +22,7 @@ from core.app_utils import (
     _build_qa_group_html,
     _build_legal_help_group_html,
     _build_result_body_html,
+    render_shareable_result_box,
     localize_yes_no,
     _normalize_yes_no,
     _plain_text_from_markdown,
@@ -271,6 +274,11 @@ class TestBuildLegalHelpGroupHtml:
 
 
 class TestBuildResultBodyHtml:
+    def _extract_result_content(self, html):
+        start = html.index('<main class="result-content">') + len('<main class="result-content">')
+        end = html.index('</main>', start)
+        return html[start:end]
+
     def test_with_structured_dict(self):
         structured = {
             "summary_title": "Simplified Judgment",
@@ -302,6 +310,82 @@ class TestBuildResultBodyHtml:
         }
         html = _build_result_body_html("", UI_TEXT, structured=structured)
         assert "Title" in html
+
+    def test_structured_html_escapes_malicious_content(self):
+        structured = {
+            "summary_title": "Simplified Judgment",
+            "summary": "<script>alert('x')</script>",
+            "remedies_title": "What Can You Do?",
+            "qa_pairs": [
+                {
+                    "question": "What happened?",
+                    "answer": "File <img src=x onerror=alert('x')> immediately.",
+                },
+                {
+                    "question": "First action",
+                    "answer": "<b>Contact counsel</b>",
+                },
+            ],
+            "partial_warning": "",
+            "free_legal_help_title": "Free Legal Help",
+            "legal_help_resources": "Contact NALSA",
+        }
+
+        html = _build_result_body_html("ignored", UI_TEXT, structured=structured)
+
+        assert "<script>" not in html
+        assert "<img src=x onerror=alert('x')>" not in html
+        assert "&lt;script&gt;" in html
+        assert "&lt;img src=x onerror=alert" in html
+        assert "&lt;b&gt;Contact counsel&lt;/b&gt;" in html
+
+    def test_render_shareable_result_box_escapes_malicious_structured_content(self, monkeypatch):
+        captured = {}
+
+        fake_components = types.ModuleType("streamlit.components.v1")
+
+        def fake_html(html, height=None, scrolling=False):
+            captured["html"] = html
+            captured["height"] = height
+            captured["scrolling"] = scrolling
+
+        fake_components.html = fake_html
+
+        fake_components_pkg = types.ModuleType("streamlit.components")
+        fake_streamlit = types.ModuleType("streamlit")
+        fake_streamlit.components = fake_components_pkg
+        fake_components_pkg.v1 = fake_components
+
+        monkeypatch.setitem(sys.modules, "streamlit", fake_streamlit)
+        monkeypatch.setitem(sys.modules, "streamlit.components", fake_components_pkg)
+        monkeypatch.setitem(sys.modules, "streamlit.components.v1", fake_components)
+
+        structured = {
+            "summary_title": "Simplified Judgment",
+            "summary": "<script>alert('x')</script>",
+            "remedies_title": "What Can You Do?",
+            "qa_pairs": [
+                {
+                    "question": "First action",
+                    "answer": "<img src=x onerror=alert('x')>",
+                },
+            ],
+            "partial_warning": "",
+            "free_legal_help_title": "Free Legal Help",
+            "legal_help_resources": "Contact NALSA",
+        }
+
+        render_shareable_result_box(("Plain text", structured), UI_TEXT)
+
+        html = captured["html"]
+        start = html.index('<main class="result-content">') + len('<main class="result-content">')
+        end = html.index('</main>', start)
+        content = html[start:end]
+
+        assert "<script>" not in content
+        assert "<img src=x onerror=alert('x')>" not in content
+        assert "&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;" in content
+        assert "&lt;img src=x onerror=alert(&#x27;x&#x27;)&gt;" in content
 
 
 # ==================== PLAIN TEXT & BULLET HELPERS ====================
