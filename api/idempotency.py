@@ -99,9 +99,17 @@ class IdempotencyManager:
         path: str,
         idempotency_key: str,
         principal: str,
-        body_fingerprint: str,
+        body_fingerprint: Optional[str] = None,
+        body: Optional[bytes | str] = None,
     ) -> str:
         principal_hash = hashlib.sha256(principal.encode("utf-8")).hexdigest()
+        if body_fingerprint is None:
+            if body is None:
+                body_fingerprint = hashlib.sha256(b"").hexdigest()
+            elif isinstance(body, bytes):
+                body_fingerprint = hashlib.sha256(body).hexdigest()
+            else:
+                body_fingerprint = hashlib.sha256(body.encode("utf-8")).hexdigest()
         return f"{method.upper()}:{path}:{principal_hash}:{idempotency_key}:{body_fingerprint}"
 
     def acquire(self, key: str, ttl: int = 60, stale_after: Optional[int] = None) -> bool:
@@ -275,6 +283,16 @@ class IdempotencyManager:
         except Exception as e:
             logger.error("http_idempotency_acquire_failed", key=key, error=str(e))
             return True
+
+    def wait_for_http_response(self, key: str, timeout: float = 10.0, poll_interval: float = 0.05) -> Optional[dict]:
+        """Wait briefly for a concurrent request to finish and cache a replayable response."""
+        deadline = time.time() + max(0.0, timeout)
+        while time.time() < deadline:
+            cached = self.get_http_response(key)
+            if cached is not None:
+                return cached
+            time.sleep(max(0.01, poll_interval))
+        return self.get_http_response(key)
 
     def store_http_response(
         self,

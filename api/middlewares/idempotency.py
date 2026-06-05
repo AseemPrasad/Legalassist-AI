@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 from hashlib import sha256
+import json
+import time
 from typing import Callable
 
 import structlog
@@ -127,6 +129,20 @@ def _response_headers_for_cache(response: Response) -> dict:
     return headers
 
 
+def _canonical_body_fingerprint(body: bytes, content_type: str) -> str:
+    if body is None:
+        body = b""
+    content_type = (content_type or "").lower()
+    if "application/json" in content_type:
+        try:
+            parsed = json.loads(body.decode("utf-8") or "null")
+            canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            return sha256(canonical).hexdigest()
+        except Exception:
+            pass
+    return sha256(body).hexdigest()
+
+
 async def idempotency_middleware(request: Request, call_next: Callable):
     if request.method.upper() not in IDEMPOTENT_METHODS or _idempotency_exempt_path(request.url.path):
         return await call_next(request)
@@ -142,14 +158,14 @@ async def idempotency_middleware(request: Request, call_next: Callable):
         )
 
     body = await request.body()
-    body_fingerprint = hashlib.sha256(body or b"").hexdigest()
+    body_fingerprint = _canonical_body_fingerprint(body or b"", request.headers.get("content-type", ""))
     principal = _request_principal(request)
     key = http_idempotency_manager.build_http_key(
         method=request.method,
         path=request.url.path,
         idempotency_key=idempotency_key,
         principal=principal,
-        body=body,
+        body_fingerprint=body_fingerprint,
     )
 
     cached = http_idempotency_manager.get_http_response(key)
@@ -186,6 +202,17 @@ async def idempotency_middleware(request: Request, call_next: Callable):
                 content=cached["body"],
                 status_code=cached["status_code"],
                 headers={**cached["headers"], "X-Idempotent-Replay": "true"},
+                media_type=cached.get("media_type") or cached["headers"].get("content-type"),
+            )
+        cached = http_idempotency_manager.wait_for_http_response(key, timeout=8.0, poll_interval=0.05)
+        if cached:
+            headers = {**cached["headers"], "X-Idempotent-Replay": "true"}
+            if cached.get("body_stripped"):
+                headers["X-Idempotent-Body-Stripped"] = "true"
+            return Response(
+                content=cached["body"],
+                status_code=cached["status_code"],
+                headers=headers,
                 media_type=cached.get("media_type") or cached["headers"].get("content-type"),
             )
         return JSONResponse(
