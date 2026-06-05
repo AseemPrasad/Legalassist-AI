@@ -7,7 +7,7 @@ GET /api/v1/auth/me - Get current user
 from fastapi import APIRouter, HTTPException, status, Depends
 from datetime import datetime, timedelta
 from api.auth import create_access_token, generate_api_key, hash_api_key, CurrentUser, get_current_user
-from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
+from api.models import TokenRequest, TokenResponse, APIKeyCreate, APIKeyResponse
 import structlog
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -20,12 +20,12 @@ logger = structlog.get_logger(__name__)
     summary="Get access token"
 )
 async def get_token(
-    username: str,
-    password: str
+    request: TokenRequest
 ) -> TokenResponse:
     """
     Authenticate user and get access token
     
+    Request body:
     - **username**: User email or username
     - **password**: User password
     
@@ -33,9 +33,9 @@ async def get_token(
     """
     
     # In production, validate against database
-    logger.info("Token request", username=username)
+    logger.info("Token request", username=request.username)
     
-    token = create_access_token({"sub": "user123", "email": username, "role": "user"})
+    token = create_access_token({"sub": "user123", "email": request.username, "role": "user"})
     
     return TokenResponse(
         access_token=token,
