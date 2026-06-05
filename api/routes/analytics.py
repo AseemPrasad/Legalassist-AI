@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from api.models import CostBreakdown, AnalyticsResponse
 from api.auth import get_current_user, CurrentUser
 import structlog
-from datetime import datetime
+from datetime import datetime, timezone
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
 logger = structlog.get_logger(__name__)
@@ -56,7 +56,7 @@ async def get_cost_breakdown(
         failed_analyses=2,
         average_analysis_time_seconds=12.5,
         top_case_types=[("civil", 34), ("contract", 28), ("labor", 15)],
-        generated_at=datetime.utcnow()
+        generated_at=datetime.now(timezone.utc)
     )
 
 
@@ -78,24 +78,18 @@ async def get_analytics_overview(
         "user_id": current_user.user_id,
         "active_cases": 5,
         "pending_deadlines": 3,
-        "this_month": {
-            "api_calls": 1234,
-            "documents_analyzed": 23,
-            "reports_generated": 3,
-            "cost": 45.67
-        },
         "last_30_days": {
             "api_calls": 4567,
             "documents_analyzed": 89,
             "reports_generated": 12,
-            "cost": 123.45
+            "cost": 123.45,
         },
         "top_features": [
             {"feature": "document_analysis", "usage": 45},
             {"feature": "case_search", "usage": 32},
-            {"feature": "report_generation", "usage": 12}
+            {"feature": "report_generation", "usage": 12},
         ],
-        "generated_at": datetime.utcnow().isoformat()
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -123,5 +117,5 @@ async def get_usage_metrics(
             "GET /analytics/costs": 234,
             "GET /deadlines/upcoming": 298
         },
-        "generated_at": datetime.utcnow().isoformat()
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
