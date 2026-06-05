@@ -31,9 +31,6 @@ from api.validation import (
 )
 from database import init_db
 
-# Import routes
-from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech, document_verification, argument_strength, deadline_engine, efiling, notifications as notifications_webhooks, anonymized_cases
-
 logger = structlog.get_logger(__name__)
 
 
@@ -41,8 +38,30 @@ logger = structlog.get_logger(__name__)
 # FastAPI Application
 # ============================================================================
 
+
 def create_app() -> FastAPI:
     """Create FastAPI application"""
+
+    # Import routers lazily so importing this module stays side-effect free.
+    from api.routes import (
+
+        documents,
+        cases,
+        reports,
+        analytics,
+        deadlines,
+        auth,
+        health,
+        case_search,
+        speech,
+        document_verification,
+        argument_strength,
+        deadline_engine,
+        efiling,
+        notifications as notifications_webhooks,
+        anonymized_cases,
+    )
+
 
     settings = get_settings()
 
