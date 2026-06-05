@@ -2,7 +2,7 @@
 replicaCount: 2
 
 image:
-  repository: ghcr.io/yourusername/legalassist-ai
+  repository: ghcr.io/AseemPrasad/legalassist-ai
   tag: staging
   pullPolicy: Always
 
@@ -23,25 +23,25 @@ autoscaling:
 ingress:
   enabled: true
   hosts:
-    - host: staging.legalassist.example.com
+    - host: REPLACE_ME_WITH_YOUR_STAGING_DOMAIN
       paths:
         - path: /
           pathType: Prefix
   tls:
     - secretName: staging-tls
       hosts:
-        - staging.legalassist.example.com
+        - REPLACE_ME_WITH_YOUR_STAGING_DOMAIN
 
 postgresql:
   auth:
-    password: staging_password
+    password: ${POSTGRES_PASSWORD:-CHANGE-ME-STAGING}
   primary:
     persistence:
       size: 10Gi
 
 redis:
   auth:
-    password: staging_redis_password
+    password: ${REDIS_PASSWORD:-CHANGE-ME-STAGING}
 
 env:
   - name: ENVIRONMENT
