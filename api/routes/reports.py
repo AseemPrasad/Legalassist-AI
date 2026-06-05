@@ -142,6 +142,11 @@ async def download_report(
         )
 
     file_path = matches[0]
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report file not found",
+        )
 
     return FileResponse(
         path=file_path,
