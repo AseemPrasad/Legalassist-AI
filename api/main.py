@@ -74,8 +74,8 @@ def create_app() -> FastAPI:
     app.middleware("http")(request_size_limit_middleware)
     # Idempotency middleware should run early for POST/PUT/PATCH/DELETE
     app.middleware("http")(idempotency_middleware)
-    app.middleware("http")(add_correlation_id_middleware)
     app.middleware("http")(logging_middleware)
+    app.middleware("http")(add_correlation_id_middleware)
     app.middleware("http")(error_handling_middleware)
     
     if settings.RATE_LIMIT_ENABLED:

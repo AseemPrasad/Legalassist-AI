@@ -23,6 +23,8 @@ except ModuleNotFoundError:  # pragma: no cover - optional in some environments
 
 try:
     from opentelemetry import trace, metrics
+    from opentelemetry.context import attach as otel_attach, detach as otel_detach
+    from opentelemetry.propagate import extract as otel_extract, inject as otel_inject
     from opentelemetry.exporter.prometheus import PrometheusMetricReader
     from opentelemetry.exporter.jaeger.thrift import JaegerExporter
     from opentelemetry.sdk.trace import TracerProvider
@@ -44,6 +46,10 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional in some environments
     trace = None
     metrics = None
+    otel_attach = None
+    otel_detach = None
+    otel_extract = None
+    otel_inject = None
     PrometheusMetricReader = None
     JaegerExporter = None
     TracerProvider = None
@@ -348,7 +354,8 @@ def bind_request_context(*, request_id: str | None = None, user_id: str | None =
     """Bind request-scoped context for logs and traces."""
     if request_id is not None:
         _REQUEST_ID.set(request_id)
-        structlog.contextvars.bind_contextvars(request_id=request_id)
+        correlation_context.correlation_id = request_id
+        structlog.contextvars.bind_contextvars(request_id=request_id, correlation_id=request_id)
     if user_id is not None:
         _USER_ID.set(user_id)
         structlog.contextvars.bind_contextvars(user_id=user_id)
@@ -369,7 +376,41 @@ def clear_request_context():
     _REQUEST_ID.set(None)
     _USER_ID.set(None)
     _SESSION_ID.set(None)
+    correlation_context.correlation_id = None
+    correlation_context.user_id = None
+    correlation_context.session_id = None
     structlog.contextvars.clear_contextvars()
+
+
+def get_current_trace_headers() -> dict[str, str]:
+    """Inject the active trace context into HTTP-style headers."""
+    if otel_inject is None:
+        return {}
+
+    carrier: dict[str, str] = {}
+    try:
+        otel_inject(carrier)
+    except Exception:
+        return {}
+
+    return {key.lower(): value for key, value in carrier.items() if key.lower() in {"traceparent", "tracestate", "baggage"}}
+
+
+@contextmanager
+def use_extracted_trace_context(carrier: dict[str, str] | None):
+    """Attach an incoming trace context for the lifetime of the request."""
+    if otel_extract is None or otel_attach is None or otel_detach is None:
+        yield None
+        return
+
+    token = None
+    try:
+        ctx = otel_extract(carrier or {})
+        token = otel_attach(ctx)
+        yield ctx
+    finally:
+        if token is not None:
+            otel_detach(token)
 
 
 def record_api_error(endpoint: str, error: Exception | str):

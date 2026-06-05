@@ -24,9 +24,11 @@ from observability.instrumentation import (
     capture_exception,
     clear_request_context,
     generate_correlation_id,
+    get_current_trace_headers,
     observe_request,
     record_api_error,
     traced_operation,
+    use_extracted_trace_context,
 )
 
 try:
@@ -48,12 +50,30 @@ logger = structlog.get_logger(__name__)
 async def add_correlation_id_middleware(request: Request, call_next: Callable):
     """Attach correlation and request IDs to the request context."""
 
-    correlation_id = request.headers.get("X-Correlation-Id") or generate_correlation_id()
+    correlation_id = (
+        request.headers.get("X-Correlation-Id")
+        or request.headers.get("X-Request-Id")
+        or request.headers.get("x-correlation-id")
+        or request.headers.get("x-request-id")
+        or generate_correlation_id()
+    )
     request.state.correlation_id = correlation_id
     request.state.request_id = correlation_id
     request.state.user_id = getattr(request.state, "rate_limit_identifier", request.headers.get("X-User-Id", "anonymous"))
 
-    response = await call_next(request)
+    incoming_trace_headers = {
+        key.lower(): value
+        for key, value in request.headers.items()
+        if key.lower() in {"traceparent", "tracestate", "baggage"}
+    }
+    request.state.trace_headers = incoming_trace_headers
+
+    with use_extracted_trace_context(incoming_trace_headers):
+        response = await call_next(request)
+
+    trace_headers = get_current_trace_headers()
+    for header_name, header_value in trace_headers.items():
+        response.headers[header_name] = header_value
     response.headers["X-Correlation-Id"] = correlation_id
     response.headers["X-Request-Id"] = correlation_id
     response.headers["X-Frame-Options"] = "DENY"
@@ -91,7 +111,13 @@ async def logging_middleware(request: Request, call_next: Callable):
 
     start_time = time.time()
     endpoint = request.url.path
-    request_id = getattr(request.state, "request_id", request.headers.get("X-Correlation-Id") or generate_correlation_id())
+    request_id = getattr(
+        request.state,
+        "request_id",
+        request.headers.get("X-Correlation-Id")
+        or request.headers.get("X-Request-Id")
+        or generate_correlation_id(),
+    )
     user_id_attr = getattr(request.state, "user_id", request.headers.get("X-User-Id", "anonymous"))
 
     bind_request_context(request_id=request_id, user_id=user_id_attr)

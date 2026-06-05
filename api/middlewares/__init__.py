@@ -12,8 +12,8 @@ def register_middlewares(app: FastAPI) -> None:
 
     app.middleware("http")(request_size_limit_middleware)
     app.middleware("http")(idempotency_middleware)
-    app.middleware("http")(add_correlation_id_middleware)
     app.middleware("http")(logging_middleware)
+    app.middleware("http")(add_correlation_id_middleware)
     app.middleware("http")(error_handling_middleware)
 
     if rate_limit_settings.RATE_LIMIT_ENABLED:

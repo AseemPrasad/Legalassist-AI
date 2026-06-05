@@ -149,6 +149,7 @@ except Exception:
 def build_task_context_headers(
     request_id: Optional[str] = None,
     context_user_id: Optional[str] = None,
+    trace_headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """Build Celery task headers used to propagate request context."""
     resolved_request_id = request_id or generate_correlation_id()
@@ -158,6 +159,10 @@ def build_task_context_headers(
     }
     if context_user_id:
         headers["x-user-id"] = str(context_user_id)
+    for key in (trace_headers or {}).keys():
+        lower_key = key.lower()
+        if lower_key in {"traceparent", "tracestate", "baggage"}:
+            headers[lower_key] = trace_headers[key]
     return headers
 
 
@@ -166,11 +171,13 @@ def enqueue_task_with_context(
     *,
     request_id: Optional[str] = None,
     context_user_id: Optional[str] = None,
+    trace_headers: Optional[Dict[str, str]] = None,
     **task_kwargs,
 ):
     """Enqueue a Celery task with request context propagated in headers."""
     headers = build_task_context_headers(
         request_id=request_id, context_user_id=context_user_id
+        , trace_headers=trace_headers
     )
     return task.apply_async(kwargs=task_kwargs, headers=headers)
 
@@ -205,10 +212,17 @@ def enqueue_task_from_http_request(
         or _sanitize_header_value(http_request.headers.get("X-User-Id"))
     )
 
+    trace_headers = getattr(http_request.state, "trace_headers", None) or {
+        key.lower(): _sanitize_header_value(http_request.headers.get(key))
+        for key in ("traceparent", "tracestate", "baggage", "Traceparent", "Tracestate", "Baggage")
+        if _sanitize_header_value(http_request.headers.get(key))
+    }
+
     return enqueue_task_with_context(
         task,
         request_id=request_id,
         context_user_id=user_id,
+        trace_headers=trace_headers,
         **task_kwargs,
     )
 
@@ -250,10 +264,16 @@ class ContextTask(Task):
             or getattr(task_request, "id", None)
         )
         user_id = headers.get("x-user-id") or headers.get("X-User-Id")
-        return {"request_id": request_id, "user_id": user_id}
+        trace_headers = {
+            key.lower(): value
+            for key, value in headers.items()
+            if key.lower() in {"traceparent", "tracestate", "baggage"} and value
+        }
+        return {"request_id": request_id, "user_id": user_id, "trace_headers": trace_headers}
 
     def apply_async(self, *args, headers=None, **kwargs):
-        if _propagator is not None and headers is not None:
+        headers = dict(headers or {})
+        if _propagator is not None:
             carrier: Dict[str, str] = {}
             _propagator.inject(carrier)
             headers.update(carrier)
@@ -265,24 +285,22 @@ class ContextTask(Task):
         if _propagator is not None and trace is not None:
             carrier: Dict[str, str] = dict(getattr(self.request, "headers", None) or {})
             ctx = _propagator.extract(carrier)
-            span = trace.get_tracer(__name__).start_span(
+            with trace.get_tracer(__name__).start_as_current_span(
                 f"celery.task.{self.name}",
                 context=ctx,
-            )
-            span.set_attribute("celery.task_id", self.request.id or "")
-            span.set_attribute("celery.task_name", self.name or "")
-            if context.get("request_id"):
-                span.set_attribute("correlation.id", context["request_id"])
-            request_scope = span
-
-            with trace.use_span(request_scope):
+            ) as span:
+                span.set_attribute("celery.task_id", self.request.id or "")
+                span.set_attribute("celery.task_name", self.name or "")
+                if context.get("request_id"):
+                    span.set_attribute("correlation.id", context["request_id"])
+                if context.get("trace_headers"):
+                    span.set_attribute("trace.headers.count", len(context["trace_headers"]))
                 bind_request_context(
                     request_id=context.get("request_id"), user_id=context.get("user_id")
                 )
                 try:
                     return self.run(*args, **kwargs)
                 finally:
-                    span.end()
                     clear_request_context()
         else:
             bind_request_context(
