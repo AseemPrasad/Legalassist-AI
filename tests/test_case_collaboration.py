@@ -6,6 +6,7 @@ from sqlalchemy.pool import StaticPool
 import database
 import case_manager
 from database import Base, User, Case, CaseStatus
+from db.crud.comments import get_case_comments
 
 
 @pytest.fixture()
@@ -65,3 +66,27 @@ def test_case_collaboration_comment_and_presence(collaboration_db):
     assert len(detail["presence"]) == 1
     assert detail["presence"][0]["user_id"] == user_id
     assert any(item["event_type"] in {"comment_added", "comment_replied"} for item in detail["timeline"])
+
+
+def test_get_case_comments_denies_unauthorized_user(collaboration_db):
+    """get_case_comments must raise PermissionError when called by a user
+    who does not own the requested case, regardless of whether the caller
+    performs an external ownership check.  This verifies that access-control
+    is enforced at the retrieval layer itself.
+    """
+    TestSession, owner_user_id, case_id = collaboration_db
+
+    # Create a second user who does NOT own the case.
+    session = TestSession()
+    other_user = User(email="intruder@example.com")
+    session.add(other_user)
+    session.commit()
+    session.refresh(other_user)
+    intruder_id = other_user.id
+    session.close()
+
+    # Directly calling get_case_comments with the wrong user_id must be denied
+    # even without any outer ownership guard.
+    with TestSession() as db:
+        with pytest.raises(PermissionError):
+            get_case_comments(db, case_id, intruder_id)

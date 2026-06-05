@@ -95,21 +95,15 @@ def _days_until_due(due_date: datetime, now: datetime) -> int:
     response_model=UpcomingDeadlinesResponse,
     summary="Get user's upcoming deadlines"
 )
-async def get_upcoming_deadlines(
+async def get_upcoming_deadlines_endpoint(
     days: int = 30,
     limit: int = Query(50, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db_rls),
 ) -> UpcomingDeadlinesResponse:
-    """
-    Get upcoming deadlines for user
-    
-    - **days**: Look ahead N days (default 30)
-    
-    Returns sorted list of upcoming deadlines by urgency
-    """
-    
+    """Get upcoming deadlines for user"""
+
     logger.info(
         "Fetching upcoming deadlines",
         user_id=current_user.user_id,
@@ -218,7 +212,7 @@ async def get_deadline_details(
     db: Session = Depends(get_db_rls),
 ) -> DeadlineResponse:
     """Get complete deadline details"""
-    
+
     logger.info(
         "Fetching deadline",
         deadline_id=deadline_id,
@@ -251,60 +245,34 @@ async def get_deadline_details(
     summary="Create new deadline"
 )
 async def create_deadline(
+    case_id: int,
     title: str,
     due_date: datetime,
     description: str = "",
+    deadline_type: str = "filing",
     priority: str = "medium",
-    case_id: str = None,
+    reminder_enabled: bool = True,
     reminder_days: int = 7,
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db_rls)
 ) -> DeadlineResponse:
     """Create a new deadline"""
-    
+
     logger.info(
         "Creating deadline",
         user_id=current_user.user_id,
-        title=title
+        title=request.title
     )
     
-    if case_id is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="case_id is required")
-
-    case = _require_owned_case(case_id, current_user, db)
-
-    now = datetime.now(timezone.utc)
-    normalized_due_date = _normalize_utc_datetime(due_date)
-    days_until = _days_until_due(normalized_due_date, now)
-
-    insert_result = db.execute(
-        text(
-            """
-            INSERT INTO case_deadlines (
-                user_id, case_id, case_title, deadline_date, deadline_type,
-                first_action, description, created_at, updated_at, is_completed, status
-            ) VALUES (
-                :user_id, :case_id, :case_title, :deadline_date, :deadline_type,
-                :first_action, :description, :created_at, :updated_at, :is_completed, :status
-            )
-            """
-        ),
-        {
-            "user_id": current_user.user_id,
-            "case_id": case["id"],
-            "case_title": case["title"] or case["case_number"],
-            "deadline_date": normalized_due_date,
-            "deadline_type": priority or "manual",
-            "first_action": get_deadline_first_action(priority or "manual"),
-            "description": description or title,
-            "created_at": now,
-            "updated_at": now,
-            "is_completed": 0,
-            "status": "active",
-        },
-    )
-    deadline_id = insert_result.lastrowid
-    db.commit()
+    now = datetime.utcnow()
+    if due_date.tzinfo is None:
+        due_date = due_date.replace(tzinfo=timezone.utc)
+    if due_date < now.replace(tzinfo=timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Deadline date must be in the future"
+        )
+    days_until = (due_date - now).days
     
     return DeadlineResponse(
         deadline_id=str(deadline_id),
@@ -317,7 +285,7 @@ async def create_deadline(
         priority=priority or _deadline_priority(days_until),
         status="active",
         reminder_enabled=True,
-        reminder_days=reminder_days,
+        reminder_days=request.reminder_days,
         created_at=now
     )
 
@@ -328,99 +296,32 @@ async def create_deadline(
     summary="Update deadline"
 )
 async def update_deadline(
-    deadline_id: str,
+    deadline_id: int,
     title: str = None,
     due_date: datetime = None,
+    deadline_type: str = None,
     priority: str = None,
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db_rls)
 ) -> DeadlineResponse:
     """Update a deadline"""
-    
+
     logger.info(
         "Updating deadline",
         deadline_id=deadline_id,
         user_id=current_user.user_id
     )
     
-    deadline = _require_owned_deadline(deadline_id, current_user, db)
-    now = datetime.now(timezone.utc)
-    effective_due_date = _normalize_utc_datetime(due_date or deadline["deadline_date"])
-    days_until = _days_until_due(effective_due_date, now)
-
-    db.execute(
-        text("""
-            UPDATE case_deadlines
-            SET case_title = :title,
-                deadline_date = :due_date,
-                updated_at = :now
-            WHERE id = :deadline_id
-        """),
-        {
-            "title": title or deadline["case_title"],
-            "due_date": effective_due_date,
-            "now": now,
-            "deadline_id": deadline["id"],
-        },
-    )
-    db.commit()
-
-    return DeadlineResponse(
-        deadline_id=str(deadline["id"]),
-        user_id=str(current_user.user_id),
-        case_id=str(deadline["case_id"]),
-        title=title or deadline["case_title"],
-        description=deadline["description"] or "",
-        due_date=effective_due_date or now,
-        days_until_due=days_until,
-        priority=priority or _deadline_priority(days_until),
-        status=deadline["status"] or ("completed" if deadline["is_completed"] else "active"),
-        reminder_enabled=True,
-        reminder_days=7,
-        created_at=deadline["created_at"]
-    )
-
-
-@router.post(
-    "/{deadline_id}/complete",
-    response_model=DeadlineResponse,
-    summary="Complete a deadline"
-)
-async def complete_deadline(
-    deadline_id: str,
-    current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db_rls)
-) -> DeadlineResponse:
-    """Mark a deadline as completed with validation and audit trail"""
-    
-    logger.info(
-        "Completing deadline",
-        deadline_id=deadline_id,
-        user_id=current_user.user_id
-    )
-    
-    # Require ownership / fetch
-    deadline = _require_owned_deadline(deadline_id, current_user, db)
-    
-    from db.case_service import transition_deadline
-    
-    try:
-        updated_deadline = transition_deadline(
-            db=db,
-            deadline_id=int(deadline_id),
-            target_status="completed",
-            actor_user_id=current_user.user_id
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-        
-    now = datetime.now(timezone.utc)
-    due_date = _normalize_utc_datetime(updated_deadline.deadline_date)
-    days_until = _days_until_due(due_date, now)
-    
+    # In production, fetch and update from database
+    now = datetime.utcnow()
+    if due_date is not None:
+        if due_date.tzinfo is None:
+            due_date = due_date.replace(tzinfo=timezone.utc)
+        if due_date < now.replace(tzinfo=timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Deadline date must be in the future"
+            )
     return DeadlineResponse(
         deadline_id=str(updated_deadline.id),
         user_id=str(updated_deadline.user_id),

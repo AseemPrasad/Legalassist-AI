@@ -7,8 +7,7 @@ import streamlit as st
 from datetime import datetime, timezone
 import time
 
-from config import Config
-import routes
+from config import Config, PAGE_MY_CASES, PAGE_HOME
 
 from auth import (
     init_auth_session,
@@ -150,11 +149,11 @@ def render_logged_in_state():
 
         with col1:
             if st.button("📊 Go to Dashboard", use_container_width=True):
-                st.switch_page(routes.PAGE_MY_CASES)
+                st.switch_page(PAGE_MY_CASES)
 
         with col2:
             if st.button("🚀 Upload Judgment", use_container_width=True):
-                st.switch_page(routes.PAGE_HOME)
+                st.switch_page(PAGE_HOME)
 
         st.markdown("---")
 

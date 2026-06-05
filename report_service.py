@@ -12,17 +12,13 @@ Storage:
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from pdf_exporter import generate_case_pdf, generate_anonymized_pdf
-from services.case_anonymization import generate_anonymized_case_data
-from services.privacy_redaction import normalize_privacy_profile
-from db.crud.audit import record_audit_event
-from database import SessionLocal
+from core.storage import safe_filename
+from pdf_exporter import generate_case_pdf
 
 
 @dataclass(frozen=True)
@@ -34,14 +30,6 @@ class GeneratedReport:
     mime_type: str
     file_size_bytes: int
     storage_type: str = "local"  # "local" or "s3"
-
-
-def _safe_filename(name: str) -> str:
-    name = name or "report"
-    # Replace path separators and other unsafe chars
-    name = re.sub(r"[\\/:*?\"<>|]", "_", name)
-    name = name.strip(" .")
-    return name[:180] if len(name) > 180 else name
 
 
 class S3Storage:
@@ -109,7 +97,9 @@ def _get_format_meta(format: str) -> tuple[str, str]:
     fmt = (format or "pdf").lower()
     if fmt == "pdf":
         return "application/pdf", ".pdf"
-    raise ValueError(f"Unsupported format for phase 1: {format}")
+    if fmt == "docx":
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"
+    raise ValueError(f"Unsupported format: {format}")
 
 
 def generate_report(
@@ -137,7 +127,7 @@ def generate_report(
     out_dir = base_dir / str(user_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    file_name = _safe_filename(f"{case_id}_{report_type}_{report_id}{ext}")
+    file_name = safe_filename(f"{case_id}_{report_type}_{report_id}{ext}")
     file_path = out_dir / file_name
 
     # Supported formats: pdf (Phase 1), csv/html/docx (planned)
@@ -184,7 +174,7 @@ def generate_report(
 
     return GeneratedReport(
         report_id=str(report_id),
-        format="pdf",
+        format=report_format,
         file_path=file_path,
         file_name=file_name,
         mime_type=mime_type,

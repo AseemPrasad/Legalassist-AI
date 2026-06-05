@@ -113,8 +113,8 @@ class Config:
     JWT_EXPIRY_HOURS = _get_int_env("JWT_EXPIRY_HOURS", 7 * 24)
     OTP_EXPIRY_MINUTES = _get_int_env("OTP_EXPIRY_MINUTES", 10)
     OTP_MAX_ATTEMPTS = _get_int_env("OTP_MAX_ATTEMPTS", 3)
-    JWT_ISSUER = _get_val("JWT_ISSUER", "legalassist.ai")
-    JWT_AUDIENCE = _get_val("JWT_AUDIENCE", "legalassist-users")
+    OTP_RATE_LIMIT_HOURS = _get_int_env("OTP_RATE_LIMIT_HOURS", 1)
+    OTP_RATE_LIMIT_MAX = _get_int_env("OTP_RATE_LIMIT_MAX", 3)
     
     @classmethod
     def get_jwt_secret(cls):
@@ -318,7 +318,26 @@ def get_config_dict(cls_obj) -> dict:
         cfg[key] = val
     return cfg
 
+
+# ==================== Page Routes ====================
+# Single authoritative definition of all Streamlit page paths.
+# Import these constants directly from config rather than going through
+# an intermediary module, so route updates propagate consistently from
+# one place throughout the entire application.
+
+PAGE_HOME = "pages/0_Home.py"
+PAGE_LOGIN = "pages/0_Login.py"
+PAGE_ANALYTICS_DASHBOARD = "pages/1_Analytics_Dashboard.py"
+PAGE_MY_CASES = "pages/1_My_Cases.py"
+PAGE_CASE_DETAILS = "pages/2_Case_Details.py"
+PAGE_APPEAL_ESTIMATOR = "pages/2_Appeal_Estimator.py"
+PAGE_REPORT_OUTCOME = "pages/3_Report_Outcome.py"
+PAGE_SETTINGS = "pages/3_Settings.py"
+PAGE_DEADLINE_TRACKER = "pages/3_Deadline_Tracker.py"
+PAGE_CHAT = "pages/4_Chat.py"
+
 # Print config to stdout/logger if debug mode is enabled, using the sanitizer
+
 if Config.DEBUG:
     try:
         raw_config = get_config_dict(Config)

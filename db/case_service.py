@@ -330,10 +330,23 @@ def get_case_record(db: Session, hashed_case_id: str) -> Optional[CaseRecord]:
     return db.query(CaseRecord).filter(CaseRecord.hashed_case_id == hashed_case_id).first()
 
 
+ALLOWED_CASE_FILTER_FIELDS = frozenset({
+    "case_type",
+    "jurisdiction",
+    "court_name",
+    "judge_name",
+    "plaintiff_type",
+    "defendant_type",
+    "outcome",
+})
+
+
 def get_cases_by_criteria(db: Session, **criteria) -> List[CaseRecord]:
-    """Search case records by criteria"""
+    """Search case records by approved criteria fields only."""
     query = db.query(CaseRecord)
     for key, value in criteria.items():
+        if key not in ALLOWED_CASE_FILTER_FIELDS:
+            continue
         if hasattr(CaseRecord, key) and value:
             query = query.filter(getattr(CaseRecord, key) == value)
     return query.all()

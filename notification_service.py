@@ -4,6 +4,7 @@ Handles delivery tracking and retry logic.
 """
 
 import logging
+import re
 import structlog
 import os
 import re
@@ -214,6 +215,30 @@ def _resolve_notification_template_values(
     return template.resolve_templates(channel=channel, language=language)
 
 
+def _sanitize_preview(text: str, max_length: int = 160) -> str:
+    """Truncate and strip HTML for safe preview storage."""
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_length:
+        text = text[:max_length].rsplit(" ", 1)[0] + "..."
+    return text
+
+
+_SUBJECT_MAX_LEN = 200
+
+
+def _sanitize_subject(text: str) -> str:
+    """Sanitize dynamic content for safe use in email subject lines."""
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]*>", "", text)
+    text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)
+    text = " ".join(text.split())
+    return text[:_SUBJECT_MAX_LEN]
+
+
 @dataclass
 class NotificationResult:
     """Result of a notification send attempt"""
@@ -250,6 +275,7 @@ class SMSClient:
             lambda e: any(x in str(e) for x in ("503", "429", "Service Unavailable", "Too Many Requests"))
             or getattr(e, "status_code", None) in (429, 503)
             or getattr(e, "status", None) in (429, 503)
+            or any(err in str(e).lower() for err in ("timeout", "connection", "connect", "unreachable"))
         ),
         reraise=True
     )
@@ -319,6 +345,7 @@ class EmailClient:
             lambda e: any(x in str(e) for x in ("503", "429", "Service Unavailable", "Too Many Requests"))
             or getattr(e, "status_code", None) in (429, 503)
             or getattr(e, "status", None) in (429, 503)
+            or any(err in str(e).lower() for err in ("timeout", "connection", "connect", "unreachable"))
         ),
         reraise=True
     )
@@ -555,7 +582,7 @@ def send_sms_task(
                     status=status,
                     message_id=message_id,
                     error_message=error,
-                    message_preview=_safe_preview(message),
+                    message_preview=_sanitize_preview(html_content, max_length=200),
                 )
                 logger.info("background_sms_notification_logged", deadline_id=deadline_id)
         except Exception as e:
@@ -593,7 +620,11 @@ class NotificationService:
     def __init__(self):
         self.sms_client = SMSClient()
         self.email_client = EmailClient()
-        self.base_url = Config.BASE_URL.rstrip('/')
+        raw_url = Config.BASE_URL
+        if not raw_url:
+            logger.warning("BASE_URL is not configured; using default for notification links")
+            raw_url = "https://legalassist.ai"
+        self.base_url = raw_url.rstrip('/')
 
     def build_sms_message(self, case_title: str, days_left: int, deadline_date: datetime, first_action: Optional[str] = None) -> str:
         """Build SMS reminder message"""
@@ -628,7 +659,7 @@ class NotificationService:
             accent_color = "#1a5490" # Info Blue
             urgency_label = "REMINDER"
 
-        subject = f"⚖️ {urgency_label}: {deadline.case_title} - {escaped_type} Deadline"
+        subject = f"⚖️ {urgency_label}: {_sanitize_subject(deadline.case_title)} - {_sanitize_subject(deadline.deadline_type.title())} Deadline"
         
         html_content = f"""
         <!DOCTYPE html>
@@ -953,7 +984,13 @@ class NotificationService:
             message=message,
             deadline_id=deadline.id,
             user_id=deadline.user_id,
-            days_left=days_left,
+            channel=NotificationChannel.SMS,
+            recipient=user_preference.phone_number,
+            days_before=days_left,
+            status=status,
+            message_id=message_id,
+            error_message=error,
+            message_preview=_sanitize_preview(message),
         )
 
         try:
@@ -992,13 +1029,22 @@ class NotificationService:
         subject = None
         html_content = None
         try:
-            tmpl = _resolve_notification_template_values(db, deadline, days_left, NotificationChannel.EMAIL, template_language)
-            if tmpl and (tmpl.get("email_html_template") or tmpl.get("email_subject_template")):
-                values = _build_notification_template_values(deadline, days_left, NotificationChannel.EMAIL, template_language)
-                if tmpl.get("email_subject_template"):
-                    subject = _render_notification_template(tmpl["email_subject_template"], values)
-                if tmpl.get("email_html_template"):
-                    html_content = _render_notification_template(tmpl["email_html_template"], values)
+            tmpl = get_notification_template_for_user(db, deadline.user_id)
+            if tmpl and (tmpl.email_html_template or tmpl.email_subject_template):
+                values = {
+                    "case_title": deadline.case_title,
+                    "case_number": getattr(deadline, "case_id", ""),
+                    "deadline_date": deadline.deadline_date.strftime("%d %B %Y") if deadline.deadline_date else "",
+                    "days_left": days_left,
+                    "court": "",
+                    "deadline_type": deadline.deadline_type,
+                    "deadline_description": deadline.description or "",
+                    "link": f"https://legalassist.ai/cases/{deadline.case_id}",
+                }
+                if tmpl.email_subject_template:
+                    subject = _sanitize_subject(render_template(tmpl.email_subject_template, values))
+                if tmpl.email_html_template:
+                    html_content = render_template(tmpl.email_html_template, values)
         except TemplateValidationError as e:
             logger.warning("User email template invalid, falling back to default: %s", str(e))
         except Exception:
@@ -1132,9 +1178,17 @@ class NotificationService:
                     result = self.send_email_reminder(db, deadline, user_preference, days_left, notification_language)
                     results.append(result)
             else:
-                logger.debug("Notification already sent", 
-                            channel=channel.value, 
-                            days_left=days_left, 
+                logger.info("Notification already sent, reporting as successful",
+                            channel=channel.value,
+                            days_left=days_left,
                             deadline_id=deadline.id)
+                recipient = getattr(user_preference, "phone_number", None) or getattr(user_preference, "email", "unknown")
+                results.append(NotificationResult(
+                    success=True,
+                    channel=channel,
+                    recipient=recipient,
+                    message_id=None,
+                    error=None,
+                ))
 
         return results

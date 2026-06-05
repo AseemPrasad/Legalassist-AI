@@ -4,12 +4,15 @@ Generate professional, multilingual PDF case summaries for export and sharing.
 """
 
 import os
+import re
 import logging
+import unicodedata
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
 from fpdf import FPDF
+from fpdf.errors import FPDFUnicodeEncodingException
 from database import SessionLocal, Case, CaseDocument, CaseDeadline, CaseTimeline
 from case_manager import get_case_detail
 from db.crud.audit import record_audit_event
@@ -17,17 +20,28 @@ from db.crud.audit import record_audit_event
 logger = logging.getLogger(__name__)
 
 
-def _parse_dt(value) -> Optional[datetime]:
-    """Normalize a datetime value (native datetime or ISO string) to datetime."""
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            return None
-    return None
+# Strict phone-number pattern: requires a separator between digit groups or a
+# country-code prefix, avoiding false matches against case numbers, citations, IDs.
+_PHONE_PATTERN = re.compile(
+    r"(?<!\d)"
+    r"(?:"
+    r"\+\d{1,3}[-.\s]\(?\d{1,5}\)?[-.\s]\d{1,5}(?:[-.\s]\d{1,9})?"      # international
+    r"|"
+    r"\(?\d{3,4}\)?[-.\s]\d{3}[-.\s]\d{4}(?:\s*(?:ext|x|xtn)[.\s]*\d+)?"  # domestic / toll-free
+    r")"
+    r"(?!\d)"
+)
 
+
+def redact_phone_numbers(text: str, replacement: str = "[REDACTED]") -> str:
+    """Replace phone numbers in text with a safe placeholder.
+
+    Uses a strict regex that requires area-code or country-code structure,
+    avoiding false matches against case numbers, citations, or IDs.
+    """
+    if not text:
+        return text
+    return _PHONE_PATTERN.sub(replacement, text)
 
 # Constants for PDF styling
 PRIMARY_COLOR = (44, 62, 80)    # Dark Blue
@@ -175,37 +189,68 @@ class LegalAssistPDF(FPDF):
             except Exception:
                 logger.error(f"Failed to set Helvetica font: {e}")
 
-    def _clean(self, txt):
+    @staticmethod
+    def _is_glyph_supported(char: str) -> bool:
         """
-        Clean text for PDF rendering. 
-        Removed latin-1 encoding to support Unicode characters.
+        Quick check whether a character is likely renderable by common fonts.
+
+        Rejects Unicode control characters and unassigned codepoints.
+        Allows all Unicode categories except Cc, Cf, Cn, Co, Cs, Zl, Zp.
+        """
+        try:
+            cat = unicodedata.category(char)
+            # Reject control/format/surrogate/private-use/unassigned
+            if cat in ("Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"):
+                return False
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    def _safe_text(self, txt: str) -> str:
+        """
+        Sanitize text for PDF rendering, removing unsupported characters.
+
+        Falls back gracefully when a character cannot be rendered by the
+        current font, preventing FPDFUnicodeEncodingException crashes.
         """
         if not isinstance(txt, str):
             return str(txt) if txt is not None else ""
-        
-        # Handle some common smart quotes/special chars that might still cause issues
-        # but DejaVu Sans handles most Unicode points natively.
+
+        # Replace problematic common Unicode punctuation with ASCII equivalents
         replacements = {
-            '\u201c': '"', '\u201d': '"', 
-            '\u2018': "'", '\u2019': "'", 
-            '…': '...'
+            "\u201c": '"', "\u201d": '"',
+            "\u2018": "'", "\u2019": "'",
+            "\u2013": "-", "\u2014": "--",
+            "\u2026": "...",
         }
         for k, v in replacements.items():
             txt = txt.replace(k, v)
-        
-        # CRITICAL FIX: Removed .encode('latin-1', 'replace').decode('latin-1')
-        # This allows Hindi, Bengali, Urdu and other Unicode characters to pass through.
-        return txt
+
+        # Strip characters that won't render in the current font
+        safe = []
+        for char in txt:
+            if self._is_glyph_supported(char):
+                safe.append(char)
+        return "".join(safe)
 
     def cell(self, w, h=0, txt="", *args, **kwargs):
-        """Override cell to ensure text cleaning"""
-        txt = self._clean(txt)
-        super().cell(w, h, txt, *args, **kwargs)
+        """Override cell, safely handling unsupported Unicode characters."""
+        txt = self._safe_text(txt)
+        try:
+            super().cell(w, h, txt, *args, **kwargs)
+        except FPDFUnicodeEncodingException:
+            # Retry with only ASCII-safe characters
+            safe = txt.encode("ascii", "replace").decode("ascii")
+            super().cell(w, h, safe, *args, **kwargs)
 
     def multi_cell(self, w, h, txt, *args, **kwargs):
-        """Override multi_cell to ensure text cleaning"""
-        txt = self._clean(txt)
-        super().multi_cell(w, h, txt, *args, **kwargs)
+        """Override multi_cell, safely handling unsupported Unicode characters."""
+        txt = self._safe_text(txt)
+        try:
+            super().multi_cell(w, h, txt, *args, **kwargs)
+        except FPDFUnicodeEncodingException:
+            safe = txt.encode("ascii", "replace").decode("ascii")
+            super().multi_cell(w, h, safe, *args, **kwargs)
 
     def header(self):
         """Add professional header to each page with branding and accent."""
@@ -349,6 +394,12 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
         remedies = case_data.get("remedies")
 
         pdf = LegalAssistPDF()
+        title_str = case.get('title') or case.get('case_number', 'Untitled Case')
+        pdf.set_title(title_str)
+        pdf.set_author("LegalAssist AI")
+        pdf.set_creator("LegalAssist AI Export Engine")
+        pdf.set_subject(f"Case summary for {case.get('case_number')}")
+        pdf.set_keywords(f"LegalAssist, Case Report, {case.get('case_type')}, {case.get('jurisdiction')}")
         pdf.add_page()
 
         # ==================== CASE HEADER ====================
@@ -636,6 +687,11 @@ def generate_anonymized_pdf(
                 anonymized_data = None
 
         pdf = LegalAssistPDF()
+        pdf.set_title(f"Anonymized Brief - {anon_id}")
+        pdf.set_author("LegalAssist AI")
+        pdf.set_creator("LegalAssist AI Anonymization Engine")
+        pdf.set_subject("Anonymized Brief for Third-Party Consultation")
+        pdf.set_keywords(f"Anonymized, Consultation, LegalAssist, {selected_profile}")
         pdf.add_page()
 
         # Header for Anonymized Report
@@ -688,7 +744,7 @@ def generate_anonymized_pdf(
                 pdf.cell(0, 7, f"Type: {doc.document_type.value}", 0, 1)
                 if doc.summary:
                     pdf.safe_set_font(pdf.main_font, '', 10)
-                    pdf.multi_cell(0, 5, doc.summary)
+                    pdf.multi_cell(0, 5, redact_phone_numbers(doc.summary))
                 pdf.ln(3)
         else:
             pdf.chapter_body("No associated documents for review.")
@@ -760,3 +816,8 @@ def calculate_optimal_font_size(text: str, container_width: float, max_font_size
         ratio = container_width / required_width
         return max(6.0, min(max_font_size, max_font_size * ratio))
     return max_font_size
+
+
+def get_supported_pdf_fonts():
+    """Returns a list of fonts supported by the PDF exporter."""
+    return ["Helvetica", "Arial", "Times"]

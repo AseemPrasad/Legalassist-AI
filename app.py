@@ -39,7 +39,7 @@ from core.app_utils import (
 # Do NOT start scheduler in Streamlit - it causes failures on reruns.
 from auth import init_auth_session, require_auth, get_current_user_id, get_current_user_email, logout_user
 from case_manager import get_user_cases_summary, upload_case_document, create_new_case, get_case_detail
-import routes
+from config import PAGE_LOGIN, PAGE_CASE_DETAILS, PAGE_APPEAL_ESTIMATOR, PAGE_REPORT_OUTCOME, PAGE_ANALYTICS_DASHBOARD
 from observability.integration import initialize_observability_for_environment
 from database import init_db, db_session, SessionLocal
 from analytics_engine import AnalyticsAggregator
@@ -358,7 +358,7 @@ def render_save_to_case_section(raw_text, summary, remedies):
     if not require_auth():
         st.info("Log in to save this document, track deadlines, and view timeline history.")
         if st.button("Go to Login", key="login_to_save"):
-            st.switch_page(routes.PAGE_LOGIN)
+            st.switch_page(PAGE_LOGIN)
         return
 
     user_id = get_current_user_id()
@@ -390,7 +390,7 @@ def render_save_to_case_section(raw_text, summary, remedies):
         
         if st.session_state.get("selected_case_id"):
             if st.button("🔍 View Case Details", key="view_existing_case", use_container_width=True):
-                st.switch_page(routes.PAGE_CASE_DETAILS)
+                st.switch_page(PAGE_CASE_DETAILS)
             
     with col2:
         st.markdown("### New Case")
@@ -449,10 +449,10 @@ def render_analytics_preview_section():
             st.session_state.show_analytics = True
     with act_col2:
         if st.button("🎯 Est. Chances", key="estimate_chances", use_container_width=True):
-            st.switch_page(routes.PAGE_APPEAL_ESTIMATOR)
+            st.switch_page(PAGE_APPEAL_ESTIMATOR)
     with act_col3:
         if st.button("📝 Report Outcome", key="report_outcome", use_container_width=True):
-            st.switch_page(routes.PAGE_REPORT_OUTCOME)
+            st.switch_page(PAGE_REPORT_OUTCOME)
     
     # Detailed analytics preview
     if st.session_state.get("show_analytics"):
@@ -704,7 +704,7 @@ def render_sidebar_navigation():
         st.sidebar.info("🔒 Secure Mode: Not logged in. Please sign in to access case history and tracking features.")
         
         if st.sidebar.button("🚀 Go to Login", use_container_width=True, type="primary"):
-            st.switch_page(routes.PAGE_LOGIN)
+            st.switch_page(PAGE_LOGIN)
             
     st.sidebar.markdown("---")
     st.sidebar.caption("v2.4.0 | LegalAssist AI Enterprise")
@@ -865,9 +865,7 @@ def main():
                         # -----------------------------------------------------------------
                         raw_text = extract_text_from_pdf(uploaded_file, enable_ocr=enable_ocr, ocr_languages=ocr_languages)
                         safe_text = compress_text(raw_text)
-
-                            prompt = build_summary_prompt(safe_text, language)
-
+                        prompt = build_summary_prompt(safe_text, language)
                         # ⚡ Best multilingual model for Hindi/Bengali/Urdu
                         model_id = get_default_model()
                     
@@ -1060,7 +1058,7 @@ def main():
                                     st.metric("Appeals Filed", summary["appeals_filed"])
                                 
                                 if st.button("📊 View Full Dashboard", use_container_width=True, key="full_dashboard"):
-                                    st.switch_page(routes.PAGE_ANALYTICS_DASHBOARD)
+                                    st.switch_page(PAGE_ANALYTICS_DASHBOARD)
                             else:
                                 st.info("Analytics will be available as more cases are tracked.")
                         except Exception as e:
@@ -1106,3 +1104,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def get_app_version():
+    """Returns the current application version."""
+    return "1.0.0"

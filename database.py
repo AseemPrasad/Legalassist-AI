@@ -9,7 +9,33 @@ working while the refactor continues.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import threading
+from typing import Optional, List
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    DateTime,
+    Boolean,
+    Text,
+    ForeignKey,
+    Enum as SQLEnum,
+    JSON,
+    UniqueConstraint,
+    Index,
+)
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
+import enum
+from contextlib import contextmanager
+from config import Config
+try:
+    import redis
+except ImportError:
+    redis = None
+
 from typing import Optional, List
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -40,6 +66,11 @@ from db.models import (
     CaseDocument,
     Attachment,
     CaseTimeline,
+    CaseNote,
+    CaseNoteVersion,
+    AnonymizedShareToken,
+    CaseComment,
+    CasePresence,
     CaseStatus,
     DocumentType,
     UserFeedback,
@@ -78,6 +109,13 @@ from db.otp_service import (
     cleanup_expired_revoked_tokens,
     is_token_revoked,
 )
+from db.crud.comments import (
+    create_case_comment,
+    get_case_comments,
+    upsert_case_presence,
+    get_case_presence,
+)
+from db.case_service import save_case_note_draft
 
 __all__ = [
     "Base",
@@ -98,6 +136,9 @@ __all__ = [
     "CaseDocument",
     "Attachment",
     "CaseTimeline",
+    "CaseNote",
+    "CaseComment",
+    "CasePresence",
     "CaseStatus",
     "DocumentType",
     "User",
@@ -245,22 +286,52 @@ def is_email_locked_out(db: Session, email: str) -> Optional[dt.datetime]:
     return lockout.locked_until if lockout else None
 
 
-def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
-    """Record failed OTP attempt with email-level lockout protection."""
+def record_otp_failed_attempt(
+    db: Session,
+    otp_id: int,
+    lockout_duration_minutes: int = 15,
+    max_failed_attempts: int = 5,
+) -> bool:
+    """Record a failed OTP verification attempt and implement lockout after max attempts.
+
+    Lockout is applied at the **email level**: once *max_failed_attempts* is
+    reached for any single OTP record, every other pending OTP issued to the
+    same email address is locked simultaneously.  This prevents an attacker
+    from cycling through multiple valid OTP tokens to bypass the attempt limit.
+
+    Args:
+        db: Active SQLAlchemy database session.
+        otp_id: Primary-key ID of the OTPVerification record to update.
+        lockout_duration_minutes: Duration to lock out the email after max
+            failed attempts are reached (default: 15 minutes).
+        max_failed_attempts: Number of consecutive failures that trigger a
+            lockout (default: 5).
+
+    Returns:
+        True if the record was updated successfully; False if the OTP was not
+        found.
+    """
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts += 1
         if otp.failed_attempts >= max_failed_attempts:
-            # Lock out at email level, not just OTP level
-            lockout_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
+            # Lock out at email level, not just OTP level.
+            lockout_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                minutes=lockout_duration_minutes
+            )
             otp.locked_until = lockout_until
-            
-            # Also lock all other pending OTPs for same email
+            logger.warning(
+                "OTP email-level lockout applied",
+                email=otp.email,
+                failed_attempts=otp.failed_attempts,
+                locked_until=str(lockout_until),
+            )
+            # Also lock all other pending OTPs for the same email.
             db.query(OTPVerification).filter(
                 OTPVerification.email == otp.email,
-                OTPVerification.id != otp_id
+                OTPVerification.id != otp_id,
             ).update({"locked_until": lockout_until})
-        
+
         db.commit()
         db.refresh(otp)
         return True
@@ -268,6 +339,15 @@ def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes
 
 
 def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
+    """Reset the failed-attempt counter and any lockout on successful verification.
+
+    Args:
+        db: Active SQLAlchemy database session.
+        otp_id: Primary-key ID of the OTPVerification record to reset.
+
+    Returns:
+        True if the record was updated; False if the OTP was not found.
+    """
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts = 0
@@ -284,6 +364,42 @@ def cleanup_expired_otps(db: Session) -> int:
     deleted = db.query(OTPVerification).filter(OTPVerification.expires_at < now).delete()
     db.commit()
     return deleted
+
+
+def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
+    token = RevokedToken(jti=jti, expires_at=expires_at)
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    return token
+
+
+def cleanup_expired_revoked_tokens(db: Session, batch_size: int = 1000) -> int:
+    """Delete expired revoked tokens in batches to avoid lock contention."""
+    now = dt.datetime.now(dt.timezone.utc)
+    total_deleted = 0
+
+    while True:
+        deleted = db.query(RevokedToken).filter(
+            RevokedToken.expires_at < now
+        ).limit(batch_size).delete(synchronize_session=False)
+        db.commit()
+        total_deleted += deleted
+        if deleted < batch_size:
+            break
+
+    return total_deleted
+
+
+def schedule_token_cleanup():
+    """Standalone cleanup runner for cron/celery scheduling."""
+    from database import SessionLocal, cleanup_expired_revoked_tokens
+    db = SessionLocal()
+    try:
+        deleted = cleanup_expired_revoked_tokens(db)
+        return deleted
+    finally:
+        db.close()
 
 
 def create_case(db: Session, user_id: int, case_number: str, case_type: str, jurisdiction: str, title: Optional[str] = None) -> Case:
@@ -305,6 +421,24 @@ def get_user_cases(db: Session, user_id: int) -> List[Case]:
     """Get all cases for a user"""
     return db.query(Case).filter(Case.user_id == user_id).order_by(Case.created_at.desc()).all()
 
+    # Validate deadline date is not in the past
+    if deadline_date.tzinfo is None:
+        deadline_date = deadline_date.replace(tzinfo=dt.timezone.utc)
+    if deadline_date < dt.datetime.now(dt.timezone.utc):
+        raise ValueError("Deadline date must be in the future")
+
+    deadline = CaseDeadline(
+        user_id=user_id,
+        case_id=normalized_case_id,
+        case_title=case_title,
+        deadline_date=deadline_date,
+        deadline_type=deadline_type,
+        description=description,
+    )
+    db.add(deadline)
+    db.commit()
+    db.refresh(deadline)
+    return deadline
 
 def get_case_by_id(db: Session, case_id: int) -> Optional[Case]:
     """Get a case by ID"""
@@ -330,13 +464,79 @@ def update_case_status(db: Session, case_id: int, status: CaseStatus) -> Optiona
 
 
 def delete_case(db: Session, case_id: int) -> bool:
-    """Delete a case and all related data"""
+    """Delete a case and all related data.
+
+    Explicitly removes dependent rows in FK-constraint-safe order before
+    deleting the parent Case record.  Relying solely on ORM-level
+    ``cascade="all, delete-orphan"`` can fail on PostgreSQL (and other
+    databases that enforce referential integrity at the engine level) when
+    related objects are not already loaded into the current session,
+    causing the DELETE to hit a foreign-key violation before SQLAlchemy's
+    lazy-loader can clean them up.
+
+    Deletion order (deepest child first):
+        CaseNoteVersion  -> CaseNote
+        CaseComment (self-referencing replies cascade via FK ondelete)
+        CaseTimeline, CasePresence, Attachment, CaseDocument
+        AnonymizedShareToken, CaseDeadline
+        Case (parent)
+    """
     case = db.query(Case).filter(Case.id == case_id).first()
-    if case:
+    if not case:
+        return False
+
+    try:
+        # --- leaf tables (no children of their own) ---
+        # CaseNoteVersion references both case_notes.id AND cases.id;
+        # remove it before CaseNote to satisfy both FK constraints.
+        db.query(CaseNoteVersion).filter(
+            CaseNoteVersion.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        # Self-referencing replies are handled by ondelete="CASCADE" on
+        # the parent_comment_id FK, so deleting top-level comments is
+        # sufficient — but we must delete all of them before the Case.
+        db.query(CaseComment).filter(
+            CaseComment.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(CaseNote).filter(
+            CaseNote.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(CaseTimeline).filter(
+            CaseTimeline.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(CasePresence).filter(
+            CasePresence.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        # Attachments may reference case_documents.id (SET NULL) — delete
+        # attachments before documents to avoid that nullable FK being
+        # needed after document rows are gone.
+        db.query(Attachment).filter(
+            Attachment.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(CaseDocument).filter(
+            CaseDocument.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(AnonymizedShareToken).filter(
+            AnonymizedShareToken.case_id == case_id
+        ).delete(synchronize_session=False)
+
+        db.query(CaseDeadline).filter(
+            CaseDeadline.case_id == case_id
+        ).delete(synchronize_session=False)
+
         db.delete(case)
         db.commit()
         return True
-    return False
+    except Exception:
+        db.rollback()
+        raise
 
 
 def create_case_document(
@@ -401,10 +601,23 @@ def get_case_record(db: Session, hashed_case_id: str) -> Optional[CaseRecord]:
     return db.query(CaseRecord).filter(CaseRecord.hashed_case_id == hashed_case_id).first()
 
 
+ALLOWED_CASE_FILTER_FIELDS = frozenset({
+    "case_type",
+    "jurisdiction",
+    "court_name",
+    "judge_name",
+    "plaintiff_type",
+    "defendant_type",
+    "outcome",
+})
+
+
 def get_cases_by_criteria(db: Session, **criteria) -> List[CaseRecord]:
-    """Search case records by criteria"""
+    """Search case records by approved criteria fields only."""
     query = db.query(CaseRecord)
     for key, value in criteria.items():
+        if key not in ALLOWED_CASE_FILTER_FIELDS:
+            continue
         if hasattr(CaseRecord, key) and value:
             query = query.filter(getattr(CaseRecord, key) == value)
     return query.all()
@@ -444,6 +657,54 @@ def update_case_outcome(
     return outcome
 
 
+def get_case_record(db: Session, hashed_case_id: str) -> Optional[CaseRecord]:
+    """Get a case record by ID"""
+    return db.query(CaseRecord).filter(CaseRecord.hashed_case_id == hashed_case_id).first()
+
+
+ALLOWED_CASE_FILTER_FIELDS = frozenset({
+    "case_type",
+    "jurisdiction",
+    "court_name",
+    "judge_name",
+    "plaintiff_type",
+    "defendant_type",
+    "outcome",
+})
+
+
+def get_cases_by_criteria(
+    db: Session,
+    case_type: Optional[str] = None,
+    jurisdiction: Optional[str] = None,
+    court_name: Optional[str] = None,
+    judge_name: Optional[str] = None,
+    plaintiff_type: Optional[str] = None,
+    defendant_type: Optional[str] = None,
+    outcome: Optional[str] = None,
+    limit: int = 100,
+) -> List[CaseRecord]:
+    """Get cases matching approved criteria fields only."""
+    query = db.query(CaseRecord)
+
+    filters = {
+        "case_type": case_type,
+        "jurisdiction": jurisdiction,
+        "court_name": court_name,
+        "judge_name": judge_name,
+        "plaintiff_type": plaintiff_type,
+        "defendant_type": defendant_type,
+        "outcome": outcome,
+    }
+    for key, value in filters.items():
+        if key not in ALLOWED_CASE_FILTER_FIELDS:
+            continue
+        if value:
+            query = query.filter(getattr(CaseRecord, key) == value)
+
+    return query.order_by(CaseRecord.created_at.desc()).limit(limit).all()
+
+
 def submit_user_feedback(
     db: Session,
     user_id: int,
@@ -473,14 +734,90 @@ def get_user_feedback(db: Session, user_id: int) -> List[UserFeedback]:
     return db.query(UserFeedback).filter(UserFeedback.user_id == user_id).order_by(UserFeedback.created_at.desc()).all()
 
 
-def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
-    """Get all active deadlines for a user"""
+# ==================== User & Authentication Helper Functions ====================
+
+
+def get_user_by_email(db: Session, email: str) -> Optional[User]:
+    """Get user by email address"""
+    return db.query(User).filter(User.email == email).first()
+
+
+def create_user(db: Session, email: str) -> User:
+    """Create a new user"""
+    user = User(email=email)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def update_user_last_login(db: Session, user_id: int) -> User:
+    """Update user's last login timestamp"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.last_login = dt.datetime.now(dt.timezone.utc)
+        db.commit()
+        db.refresh(user)
+    return user
+
+
+# Thread lock for OTP rate-limit enforcement (single source of truth).
+_otp_rate_limit_lock = threading.Lock()
+
+
+def create_otp_verification(
+    db: Session,
+    email: str,
+    otp_hash: str,
+    expires_at: dt.datetime,
+    max_requests_per_hour: int = 5,
+) -> OTPVerification:
+    """Create a new OTP verification record with rate limiting.
+
+    This is the single source of truth for OTP rate-limit enforcement.
+    All callers (auth.py, API routes, etc.) must go through this function to
+    ensure consistent throttling behavior across the entire application.
+    """
+    with _otp_rate_limit_lock:
+        one_hour_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
+        recent_otps = db.query(OTPVerification).filter(
+            OTPVerification.email == email,
+            OTPVerification.created_at >= one_hour_ago,
+        ).count()
+
+        if recent_otps >= max_requests_per_hour:
+            raise ValueError("Too many OTP requests. Please try again later.")
+
+        otp = OTPVerification(
+            email=email,
+            otp_hash=otp_hash,
+            expires_at=expires_at,
+        )
+        db.add(otp)
+        db.commit()
+        db.refresh(otp)
+        return otp
+
+
+def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
+    """Get unused, non-expired OTP for email"""
     now = dt.datetime.now(dt.timezone.utc)
-    return db.query(CaseDeadline).filter(
-        CaseDeadline.user_id == user_id,
-        CaseDeadline.is_completed == False,
-        CaseDeadline.deadline_date > now,
-    ).order_by(CaseDeadline.deadline_date).all()
+    return db.query(OTPVerification).filter(
+        OTPVerification.email == email,
+        OTPVerification.is_used == False,
+        OTPVerification.expires_at > now,
+    ).order_by(OTPVerification.created_at.desc()).first()
+
+
+def mark_otp_as_used(db: Session, otp_id: int) -> bool:
+    """Mark an OTP as used"""
+    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+    if otp:
+        otp.is_used = True
+        db.commit()
+        return True
+    return False
+
 
 
 def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
@@ -773,3 +1110,133 @@ def create_attachment(
 def get_attachments_for_case(db: Session, case_id: int) -> List[Attachment]:
     """Get all attachments for a case"""
     return db.query(Attachment).filter(Attachment.case_id == case_id).all()
+
+
+# ====================================================================
+# Revocation cache — Redis-backed coordinated cache to prevent
+# thundering herd on token revocation DB queries during bursts.
+# ====================================================================
+
+_revocation_cache = None
+_revocation_cache_lock = threading.Lock()
+
+
+def _get_revocation_cache():
+    global _revocation_cache
+    if _revocation_cache is not None:
+        return _revocation_cache
+    with _revocation_cache_lock:
+        if _revocation_cache is None:
+            if redis is None:
+                return None
+            redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+            _revocation_cache = redis.from_url(redis_url, decode_responses=True)
+    return _revocation_cache
+
+
+def _is_token_revoked_uncached(db: Session, jti: str) -> bool:
+    return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+
+
+def is_token_revoked(db: Session, jti: str) -> bool:
+    """Check if token JTI is revoked, using Redis coordinated cache."""
+    cache = _get_revocation_cache()
+    if cache is None:
+        return _is_token_revoked_uncached(db, jti)
+
+    cache_key = f"revoked:{jti}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached == "1"
+
+    lock_key = f"{cache_key}:lock"
+    lock_value = str(time.monotonic_ns())
+
+    if cache.set(lock_key, lock_value, nx=True, ex=10):
+        try:
+            revoked = _is_token_revoked_uncached(db, jti)
+            ttl = 3600 if revoked else 300
+            cache.setex(cache_key, ttl, "1" if revoked else "0")
+            return revoked
+        finally:
+            if cache.get(lock_key) == lock_value:
+                cache.delete(lock_key)
+
+    for _ in range(50):
+        time.sleep(0.02)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached == "1"
+
+    return _is_token_revoked_uncached(db, jti)
+
+
+def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
+    """Add a token JTI to the revocation blacklist"""
+    token = RevokedToken(jti=jti, expires_at=expires_at)
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    return token
+
+
+def aggregate_model_performance(db: Session, task: str = None) -> list:
+    return []
+
+
+
+def cleanup_expired_revoked_tokens(db: Session) -> int:
+    """Remove expired tokens from the blacklist"""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = db.query(RevokedToken).filter(RevokedToken.expires_at < now).delete(synchronize_session=False)
+    db.commit()
+    return deleted
+
+
+def submit_similarity_feedback(
+    db: Session,
+    case_id: int,
+    event_type: str,
+    description: str,
+    event_date: Optional[dt.datetime] = None,
+    metadata: Optional[dict] = None,
+) -> CaseTimeline:
+    """Create a new timeline event.
+    
+    Note: Ensures that the instantiated CaseTimeline is correctly added to the
+    session using the explicit local variable reference to prevent NameErrors.
+    """
+    event = CaseTimeline(
+        case_id=case_id,
+        event_type=event_type,
+        description=description,
+        event_date=event_date or dt.datetime.now(dt.timezone.utc),
+        event_metadata=metadata,
+    )
+    db.add(feedback)
+    db.commit()
+    db.refresh(feedback)
+    return feedback
+
+
+def get_similarity_feedback(
+    db: Session,
+    user_id: Optional[str] = None,
+    query_signature: Optional[str] = None,
+    candidate_case_id: Optional[int] = None,
+    limit: int = 100,
+) -> List[SimilarityFeedback]:
+    """Get similarity feedback rows filtered by user, query, or candidate case"""
+    query = db.query(SimilarityFeedback)
+
+    if user_id is not None:
+        query = query.filter(SimilarityFeedback.user_id == str(user_id))
+    if query_signature is not None:
+        query = query.filter(SimilarityFeedback.query_signature == query_signature)
+    if candidate_case_id is not None:
+        query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
+
+    return query.order_by(SimilarityFeedback.created_at.desc()).limit(limit).all()
+
+
+

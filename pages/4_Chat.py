@@ -4,7 +4,7 @@ import streamlit as st
 
 from core.app_utils import get_client, RETRO_STYLING
 from core.rag_engine import LegalRAG, get_judgment_hash
-import routes
+from config import PAGE_HOME
 
 # Apply the same styling as other pages
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
@@ -90,7 +90,7 @@ def render_page():
             "No judgment document found. Please go back to the Home page and upload a document first."
         )
         if st.button("⬅️ Back to Home"):
-            st.switch_page(routes.PAGE_HOME)
+            st.switch_page(PAGE_HOME)
         return
 
     # ------------------------------------------------------------------

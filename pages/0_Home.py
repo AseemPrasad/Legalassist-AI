@@ -13,8 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import streamlit as st
 import logging
-import routes
-from config import Config
+from config import Config, PAGE_CHAT
 from pages.ui_components import render_header, SESSION_KEYS
 
 from core.app_utils import (
@@ -410,7 +409,7 @@ def render_page():
                         st.markdown("## 💬 Chat with Judgment")
                         st.info("Have specific questions about this document? You can ask our AI assistant.")
                         if st.button("💬 Open Interactive Chat", use_container_width=True):
-                            st.switch_page(routes.PAGE_CHAT)
+                            st.switch_page(PAGE_CHAT)
 
                 except Exception as e:
                     err = str(e)

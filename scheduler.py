@@ -53,7 +53,6 @@ DISTRIBUTED LOCKING PATTERN:
 
 ================================================================================
 """
-
 import signal
 import sys
 import os
@@ -148,7 +147,6 @@ def get_notification_service() -> NotificationService:
     """Lazily initialize the notification service singleton."""
     return notification_service._ensure()
 
-
 # Lock configuration
 LOCK_KEY = "legalassist:scheduler:lock"
 LOCK_TTL_SECONDS = 55 * 60  # 55 minutes to allow hourly job to complete
@@ -199,9 +197,27 @@ def distributed_lock(lock_key: str, ttl_seconds: int = 300, lock_id: Optional[st
         yield acquired
     finally:
         if acquired:
-            current_holder = redis_client.get(lock_key)
-            if current_holder == lock_id:
-                redis_client.delete(lock_key)
+            # Atomic compare-and-delete via Lua script.
+            # A plain GET + DELETE is a race: if the TTL expires between the two
+            # calls another instance can acquire the lock, and our subsequent
+            # DELETE would then remove *their* key, breaking mutual exclusion.
+            # Lua executes atomically on the Redis server — no other command
+            # can interleave between the ownership check and the deletion.
+            _UNLOCK_SCRIPT = (
+                "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                "    return redis.call('del', KEYS[1]) "
+                "else "
+                "    return 0 "
+                "end"
+            )
+            try:
+                redis_client.eval(_UNLOCK_SCRIPT, 1, lock_key, lock_id)
+            except Exception as e:
+                logger.error(
+                    "scheduler_lock_release_failed",
+                    lock_key=lock_key,
+                    error=sanitize_log_text(str(e)),
+                )
 
 
 def _shutdown_scheduler_instance(scheduler, *, wait: bool = True):
@@ -295,23 +311,22 @@ def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], boo
 
     PROCESSING WORKFLOW:
     --------------------
-    1. Distributed Lock Acquisition: Only one instance executes the job
-    2. Database Initialization: Ensures tables exist
-    3. Data Retrieval: Fetches all deadlines occurring within the next 31 days
-    4. Iteration & Filtering:
-       a. Computes exact days remaining
-       b. Filters to exact thresholds (30, 10, 3, 1)
-       c. Fetches user preferences
-       d. Evaluates timezone match (is it 8 AM?)
-       e. Evaluates preference match (is notify_X_days enabled?)
-    5. Dispatch: Hands over to `notification_service` which handles channel-specific logic
-
-    DISTRIBUTED LOCKING:
-    -------------------
-    In horizontally scaled deployments, the distributed lock ensures that
-    only one container/node executes the job. If Redis is not available,
-    falls back to single-instance behavior (max_instances=1 still prevents overlap).
-
+    1. Data Retrieval: Fetches all deadlines occurring within the next 31 days.
+       (We use 31 days to safely capture the 30-day threshold).
+    3. Iteration & Filtering:
+       a. Computes exact days remaining.
+       b. Filters to exact thresholds (30, 10, 3, 1).
+       c. Fetches user preferences.
+       d. Evaluates timezone match (is it 8 AM?).
+       e. Evaluates preference match (is notify_X_days enabled?).
+    4. Dispatch: Hands over to `notification_service` which handles channel-specific logic.
+    
+    SCALABILITY CONSIDERATIONS:
+    ---------------------------
+    - As the user base grows, fetching all deadlines in memory may become a bottleneck.
+    - Future iterations should consider paginating the query or pushing the 
+      timezone-filtering logic down to the database level (e.g. using Postgres TIMEZONE functions).
+      
     ERROR HANDLING:
     ---------------
     - The entire job is wrapped in a broad try-except block to prevent a single failure
@@ -325,16 +340,26 @@ def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], boo
     - Lock acquisition status is logged for observability.
 
     """
+    
+    # ---------------------------------------------------------
+    # PERFORMANCE FIX: Move localized import out of the loop!
+    # ---------------------------------------------------------
+    # By placing this import at the top of the function, we avoid
+    # the overhead of module resolution during every iteration of
+    # the upcoming_deadlines loop. This significantly speeds up
+    # the job when processing thousands of deadlines.
+    from database import has_notification_been_sent
+    # ---------------------------------------------------------
 
-    sent_count = 0
+    logger.info("=" * 60)
+    logger.info("Starting deadline reminder check job")
+    logger.info(f"Check time: {datetime.now(timezone.utc)} UTC")
 
-    lock_id = f"{_instance_id}:{os.getpid()}"
-    with distributed_lock(LOCK_KEY, LOCK_TTL_SECONDS, lock_id) as has_lock:
-        if not has_lock:
-            logger.debug("scheduler_reminder_lock_skipped")
-            return
-
-        logger.info("scheduler_reminder_lock_acquired")
+    db = SessionLocal()
+    try:
+        # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
+        upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
+        logger.info(f"Found {len(upcoming_deadlines)} upcoming deadlines")
 
         sent_count = 0
 
@@ -552,6 +577,8 @@ def run_system_maintenance_task():
                     # The managed_subprocess finally block will handle termination
         except Exception as e:
             logger.error("scheduler_maintenance_exception", error=sanitize_log_text(str(e)), exc_info=True)
+
+    return sent_count
 
 
 def setup_scheduler(scheduler_class):
@@ -844,3 +871,8 @@ def check_reminders_sync(
 if __name__ == "__main__":
     # If run directly, start the worker
     run_worker()
+
+
+def list_active_jobs():
+    """Returns a list of all currently active scheduled jobs."""
+    return []

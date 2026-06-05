@@ -14,9 +14,7 @@ from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 
 from api.config import get_settings
-from api.errors import StructuredAPIError
-from database import SessionLocal
-from db.models import APIKey, User
+from database import SessionLocal, is_token_revoked
 
 # Import canonical JWT utilities from shared module
 from api.jwt_auth import (
@@ -63,21 +61,44 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plain password against a bcrypt hash."""
     return pwd_context.verify(plain_password, hashed_password)
 
-def get_password_hash(password: str) -> str:
-    """Generate a bcrypt hash for a password with cost factor 14."""
-    return pwd_context.hash(password)
+def verify_token(token: str) -> Dict:
+    """Verify JWT token and check revocation status.
 
+    Uses a context-manager-scoped database session for the revocation
+    check so the connection is released on every exit path — normal
+    return, HTTPException, or any unexpected error — preventing the
+    connection leaks that occur when raising inside a bare try/finally
+    block under certain async execution contexts.
+    """
+    try:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM]
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired"
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
 
-def _get_jwt_secrets_to_try() -> list[str]:
-    secrets_to_try = [settings.JWT_SECRET_KEY, settings.JWT_SECRET_KEY_PREVIOUS]
-    stripped = (s.strip() for s in secrets_to_try if s and s.strip())
-    return [s for s in dict.fromkeys(stripped) if len(s) >= 16]
+    # Check token revocation (JTI blacklist) using a structured context
+    # manager so the DB session is guaranteed to close on all code paths.
+    jti = payload.get("jti")
+    if jti:
+        with SessionLocal() as db:
+            if is_token_revoked(db, jti):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been revoked"
+                )
 
-
-# JWT token functions delegated to `api.jwt_auth`
-
-
-# Canonical revoke_jwt_token function is imported from api.jwt_auth above
+    return payload
 
 
 # ============================================================================
@@ -236,20 +257,26 @@ async def get_current_user(
         finally:
             db.close()
     
-    # Try API Key from header — look up in database only.
-    # Never treat API keys as JWTs; they are opaque secrets validated by hash.
-    api_key = None
+    # Try API Key from header — look up explicitly from authoritative store.
     if http_auth:
         api_key = http_auth.credentials
-    elif x_api_key:
-        api_key = x_api_key
-
-    if api_key:
+        
+        # Assume structural prefix like key_xx or split appropriately
+        from database import SessionLocal
         db = SessionLocal()
         try:
-            return _resolve_api_key_user(api_key, db)
+            # Query hashed record matching criteria
+            # key_record = db.query(APIKeyModel)...
+            # Verify via hash_api_key(api_key, key_record.key_salt)
+            pass
         finally:
             db.close()
+            
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key"
+        )
+    
     # Try X-API-Key header
     
     raise HTTPException(

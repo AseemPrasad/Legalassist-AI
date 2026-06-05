@@ -321,7 +321,7 @@ def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
             for event in timeline
         ]
 
-        comments = get_case_comments(db, case_id)
+        comments = get_case_comments(db, case_id, user_id)
         comments_list = [
             {
                 "id": comment.id,
@@ -864,6 +864,12 @@ def add_manual_deadline(
     
     db = SessionLocal()
     try:
+        # Validate deadline date is not in the past
+        if deadline_date.tzinfo is None:
+            deadline_date = deadline_date.replace(tzinfo=timezone.utc)
+        if deadline_date < datetime.now(timezone.utc):
+            return None
+
         # Verify case ownership
         case = get_case_by_id(db, case_id)
         if not case or case.user_id != user_id:

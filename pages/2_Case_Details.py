@@ -8,7 +8,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import streamlit as st
-import routes
+from config import PAGE_MY_CASES
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 import requests
@@ -714,7 +714,7 @@ def main():
     if not case_id:
         st.warning("No case selected")
         if st.button("← Back to My Cases"):
-            st.switch_page(routes.PAGE_MY_CASES)
+            st.switch_page(PAGE_MY_CASES)
         return
 
     # Get case details
@@ -723,7 +723,7 @@ def main():
     if not case_data:
         st.error("Case not found or access denied")
         if st.button("← Back to My Cases"):
-            st.switch_page(routes.PAGE_MY_CASES)
+            st.switch_page(PAGE_MY_CASES)
         return
 
     case = case_data["case"]
