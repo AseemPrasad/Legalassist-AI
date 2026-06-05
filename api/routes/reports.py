@@ -20,6 +20,39 @@ router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 logger = structlog.get_logger(__name__)
 
 
+def _record_download_audit(
+    *,
+    user_id: int,
+    report_id: str,
+    file_name: str,
+    file_size_bytes: int,
+) -> None:
+    """Persist a structured audit record for a report download.
+
+    Raises any underlying storage exceptions to the caller so it can
+    decide whether to propagate or swallow them.  Keeping the logic here
+    makes it easy to swap the structlog call for a DB-backed AuditLog
+    insert once the schema is available::
+
+        db.add(AuditLog(
+            user_id=user_id,
+            action="report_download",
+            resource_id=report_id,
+            ...
+        ))
+        db.commit()
+    """
+    logger.info(
+        "report_downloaded",
+        user_id=user_id,
+        report_id=report_id,
+        file_name=file_name,
+        file_size_bytes=file_size_bytes,
+        downloaded_at=datetime.utcnow().isoformat(),
+    )
+    # TODO: persist to AuditLog table when DB schema migration is ready.
+
+
 @router.post(
     "/generate",
     response_model=ReportGenerationResponse,
@@ -142,6 +175,27 @@ async def download_report(
         )
 
     file_path = matches[0]
+
+    # Audit logging is a non-critical observability concern.
+    # A transient failure (DB unavailable, pending migration, etc.) must
+    # never prevent the user from receiving a file that already exists on
+    # disk.  We catch all exceptions, record full diagnostic context so
+    # on-call engineers can investigate, then continue with delivery.
+    try:
+        _record_download_audit(
+            user_id=current_user.user_id,
+            report_id=report_id,
+            file_name=file_path.name,
+            file_size_bytes=file_path.stat().st_size,
+        )
+    except Exception as audit_exc:  # noqa: BLE001
+        logger.warning(
+            "audit_log_failed_for_report_download",
+            report_id=report_id,
+            user_id=current_user.user_id,
+            error=str(audit_exc),
+            exc_info=True,
+        )
 
     return FileResponse(
         path=file_path,
