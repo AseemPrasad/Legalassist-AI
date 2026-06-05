@@ -1,18 +1,29 @@
 """
 Report Generation Endpoints
-POST /api/v1/reports/generate - Generate report asynchronously
-GET /api/v1/reports/{report_id} - Get report status
-GET /api/v1/reports/{report_id}/download - Download report
+
+This module provides REST endpoints for generating, tracking, and downloading legal reports.
+
+Endpoints:
+- POST /api/v1/reports/generate - Generate report asynchronously
+- GET /api/v1/reports/{report_id} - Get report status  
+- GET /api/v1/reports/{report_id}/download - Download report
+- GET /api/v1/reports - List user's reports
+
+Key refactoring:
+- Uses Report DB model instead of glob patterns
+- Stores celery_task_id for reliable task tracking
+- Validates user ownership on downloads
+- No more report_id = job_id confusion
 """
 import uuid
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Request
 from fastapi.responses import FileResponse
 from pathlib import Path
-from report_service import _get_reports_base_dir
 
 from api.models import ReportGenerationRequest, ReportGenerationResponse
 from api.auth import get_current_user, CurrentUser
-from celery_app import generate_report_task, TaskStatus
+from celery_app import generate_report_task
+from report_service import get_report_by_id
 import structlog
 from datetime import datetime
 
@@ -60,6 +71,8 @@ def _record_download_audit(
 )
 async def generate_report(
     request: ReportGenerationRequest,
+    http_request: Request,
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> ReportGenerationResponse:
     """
@@ -73,7 +86,8 @@ async def generate_report(
     - **format**: pdf or docx
     - **style**: formal or casual
     
-    Returns immediately with job ID
+    Returns immediately with report_id for polling status.
+    Uses DB-backed Report model for reliability.
     """
     
     logger.info(
@@ -82,23 +96,62 @@ async def generate_report(
         case_id=request.case_id,
         report_type=request.report_type
     )
+
+    # Step 1: Create and persist Report record BEFORE enqueueing task
+    # This ensures we have report_id and can track the task reliably
+    report_id = str(uuid.uuid4())
     
-    # Queue async task
-    task = generate_report_task.delay(
+    try:
+        # Parse case_id as integer (assumes it's numeric in the DB)
+        case_id_int = int(request.case_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid case_id format"
+        )
+    
+    # Create Report record in DB
+    db_report = create_report(
+        db,
+        report_id=report_id,
         user_id=current_user.user_id,
-        case_id=request.case_id,
+        case_id=case_id_int,
+        celery_task_id="pending",  # Will be updated after task enqueue
         report_type=request.report_type,
-        format=request.format
+        format=request.format,
+        style=request.style
     )
     
+    logger.info("Report record created", report_id=report_id, db_id=db_report.id)
+    
+    # Step 2: Queue async task with report_id parameter
+    task = enqueue_task_from_http_request(
+        generate_report_task,
+        http_request,
+        context_user_id=current_user.user_id,
+        user_id=str(current_user.user_id),
+        case_id=str(case_id_int),
+        report_id=report_id,
+        report_type=request.report_type,
+        format=request.format,
+        privacy_profile=request.privacy_profile,
+    )
+
+    # Save job_id to the database record
+    db_report.job_id = task.id
+    db.commit()
+    db.refresh(db_report)
+    
+    logger.info("Task enqueued", report_id=report_id, task_id=task.id)
+    
     return ReportGenerationResponse(
-        report_id=str(uuid.uuid4()),
+        report_id=db_report.report_id,
         job_id=task.id,
         case_id=request.case_id,
         status="pending",
         report_type=request.report_type,
         format=request.format,
-        created_at=datetime.utcnow()
+        created_at=db_report.created_at
     )
 
 
@@ -109,24 +162,28 @@ async def generate_report(
 )
 async def get_report_status(
     report_id: str,
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> ReportGenerationResponse:
-    """Get status of report generation job"""
-    
-    # In production, lookup report_id in database to get job_id
-    # For now, use report_id as job_id
-    status_info = TaskStatus.get_task_status(report_id)
-    
+    """Get status of report generation job with ownership validation."""
+
+    report = get_report_by_id(report_id, current_user.user_id)
+    if not report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report not found",
+        )
+
     return ReportGenerationResponse(
-        report_id=report_id,
+        report_id=report["report_id"],
         job_id=report_id,
         case_id="unknown",
-        status=status_info["status"],
+        status=report["status"],
         report_type="comprehensive",
         format="pdf",
-        download_url=f"/api/v1/reports/{report_id}/download" if status_info["status"] == "completed" else None,
+        download_url=report["download_url"],
         created_at=datetime.utcnow(),
-        completed_at=datetime.utcnow() if status_info["status"] == "completed" else None
+        completed_at=datetime.utcnow() if report["status"] == "completed" else None,
     )
 
 
@@ -136,45 +193,36 @@ async def get_report_status(
 )
 async def download_report(
     report_id: str,
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ):
-    """Download the generated report file"""
-    
-    status_info = TaskStatus.get_task_status(report_id)
-    
-    if status_info["status"] != "completed":
+    """Download the generated report file."""
+
+    report = get_report_by_id(report_id, current_user.user_id)
+    if not report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report not found",
+        )
+
+    if report["status"] != "completed":
         raise HTTPException(
             status_code=status.HTTP_202_ACCEPTED,
-            detail=f"Report is still {status_info['status']}"
+            detail=f"Report is still {report['status']}",
+        )
+
+    if not report["file_path"]:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report file not found on disk"
         )
     
-    # In Phase 1, download the file generated by Celery task.
-    # We cannot rely on `report_id` being the Celery task id (the API currently
-    # uses it that way), so we reconstruct paths using the same directory
-    # conventions as report_service.
-    base_dir = _get_reports_base_dir()
-    user_dir = base_dir / str(current_user.user_id)
-
-    # Find by any report file that starts with the report_id.
-    # Filenames are: <case_id>_<report_type>_<report_id>.pdf
-    if not user_dir.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Report output not found",
-        )
-
-    matches = list(user_dir.glob(f"*_{report_id}.pdf"))
-    if not matches:
-        # Also try any pdf matching the report_id suffix without strict pattern.
-        matches = list(user_dir.glob(f"*{report_id}.pdf"))
-
-    if not matches:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Report file not found",
-        )
-
-    file_path = matches[0]
+    logger.info(
+        "Downloading report",
+        report_id=report_id,
+        user_id=current_user.user_id,
+        file_path=str(file_path)
+    )
 
     # Audit logging is a non-critical observability concern.
     # A transient failure (DB unavailable, pending migration, etc.) must
@@ -198,11 +246,10 @@ async def download_report(
         )
 
     return FileResponse(
-        path=file_path,
+        path=report["file_path"],
         media_type="application/pdf",
-        filename=file_path.name,
+        filename=Path(report["file_path"]).name,
     )
-
 
 
 @router.get(
@@ -212,13 +259,60 @@ async def download_report(
 async def list_reports(
     limit: int = 10,
     offset: int = 0,
+    status_filter: str | None = None,
+    db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> dict:
-    """Get list of generated reports for current user"""
+    """
+    Get list of generated reports for current user with pagination.
     
+    Optional filters:
+    - status_filter: Filter by status (pending, processing, completed, failed)
+    """
+    
+    reports, total = list_reports_by_user(
+        db,
+        user_id=current_user.user_id,
+        limit=limit,
+        offset=offset,
+        status=status_filter
+    )
+
+    reports_data = []
+    for r in reports:
+        status_str = r.status
+        if r.status in ["pending", "processing"] and r.job_id:
+            try:
+                status_info = TaskStatus.get_task_status(r.job_id)
+                celery_status = status_info["status"]
+                if celery_status != r.status:
+                    r.status = celery_status
+                    if celery_status == "completed":
+                        r.completed_at = datetime.utcnow()
+                    db.commit()
+                    status_str = r.status
+            except Exception:
+                pass
+
+        reports_data.append({
+            "report_id": r.report_id,
+            "job_id": r.job_id or "unknown",
+            "case_id": r.case_id,
+            "status": status_str,
+            "report_type": r.report_type or "comprehensive",
+            "format": r.format,
+            "download_url": f"/api/v1/reports/{r.report_id}/download" if status_str == "completed" else None,
+            "created_at": r.created_at,
+            "completed_at": r.completed_at
+        })
+
     return {
-        "total": 0,
+        "total": total,
         "limit": limit,
         "offset": offset,
-        "reports": []
+        "reports": reports_data
     }
+
+
+
+
