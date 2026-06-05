@@ -56,6 +56,8 @@ from db.models import (
     CaseArgument,
     KnowledgeGraphEdge,
     PrecedentMatch,
+    CaseNote,
+    CaseNoteVersion,
 )
 from db.crud.notifications import (
     create_case_deadline,
@@ -65,6 +67,16 @@ from db.crud.notifications import (
     get_notification_history,
     reserve_notification,
     update_notification_result,
+)
+from db.case_service import (
+    save_case_note_draft,
+    publish_case_note,
+    get_case_note_history,
+)
+from db.otp_service import (
+    revoke_token,
+    cleanup_expired_revoked_tokens,
+    is_token_revoked,
 )
 
 __all__ = [
@@ -143,6 +155,14 @@ __all__ = [
     "create_timeline_event",
     "create_attachment",
     "get_attachments_for_case",
+    "revoke_token",
+    "cleanup_expired_revoked_tokens",
+    "is_token_revoked",
+    "CaseNote",
+    "CaseNoteVersion",
+    "save_case_note_draft",
+    "publish_case_note",
+    "get_case_note_history",
 ]
 
 

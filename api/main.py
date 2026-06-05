@@ -19,8 +19,8 @@ from api.middleware import (
     logging_middleware,
     request_size_limit_middleware,
     security_headers_middleware,
+    idempotency_middleware,
 )
-from api.idempotency_middleware import idempotency_middleware
 from observability.integration import initialize_observability_for_environment
 from observability.instrumentation import get_metrics
 from api.errors import register_structured_error_handlers
