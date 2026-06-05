@@ -109,10 +109,13 @@ class RateLimitRule:
 
 RATE_LIMIT_RULES: list[tuple[str, str, str, RateLimitRule]] = [
     ("POST", "/api/v1/auth/token", "exact", RateLimitRule(5, 60)),
+    ("POST", "/api/v1/deadlines", "exact", RateLimitRule(20, 60)),
     ("POST", "/api/v1/reports/generate", "exact", RateLimitRule(5, 60)),
     ("GET", "/api/v1/reports/", "prefix", RateLimitRule(30, 60)),
     ("POST", "/api/v1/analyze/upload", "exact", RateLimitRule(5, 300)),
     ("POST", "/api/v1/analyze/document", "exact", RateLimitRule(10, 300)),
+    ("POST", "/api/v1/webhooks/twilio", "exact", RateLimitRule(60, 60)),
+    ("POST", "/api/v1/webhooks/sendgrid", "exact", RateLimitRule(60, 60)),
     ("GET", "/api/cases/search/text", "exact", RateLimitRule(30, 60)),
     ("GET", "/api/cases/", "prefix", RateLimitRule(20, 60)),
     ("GET", "/api/v1/analytics/", "prefix", RateLimitRule(20, 60)),
@@ -121,10 +124,46 @@ RATE_LIMIT_RULES: list[tuple[str, str, str, RateLimitRule]] = [
 WHITELIST = {
     "127.0.0.1",
     "::1",
-    "localhost",
-    "internal-admin-service",
-    "internal-ingest-service",
 }
+
+# Trusted reverse-proxy IPs whose X-Forwarded-For header is honoured.
+# Only real IP addresses belong here — service name strings cannot match
+# the ``ip:<addr>`` identifiers produced by resolve_rate_limit_identifier
+# and must never be used as a proxy-trust signal.
+# Add your load-balancer / reverse-proxy IPs via the
+# RATE_LIMIT_TRUSTED_PROXIES environment variable (comma-separated).
+def _load_trusted_proxies() -> frozenset[str]:
+    """Load trusted proxy IPs from settings or environment.
+
+    Only entries that look like IP addresses are accepted.  Service name
+    strings (e.g. ``internal-admin-service``) are rejected because they
+    cannot be verified at the network layer and create a spoofable trust
+    boundary.
+    """
+    import os
+    import ipaddress
+
+    raw = os.getenv("RATE_LIMIT_TRUSTED_PROXIES", "")
+    trusted: set[str] = set()
+    for entry in raw.split(","):
+        candidate = entry.strip()
+        if not candidate:
+            continue
+        try:
+            ipaddress.ip_address(candidate)
+            trusted.add(candidate)
+        except ValueError:
+            logger.warning(
+                "rate_limit_trusted_proxy_ignored_non_ip",
+                entry=candidate,
+                reason="Only IP addresses are accepted as trusted proxies",
+            )
+    # Always trust loopback addresses
+    trusted.update({"127.0.0.1", "::1"})
+    return frozenset(trusted)
+
+
+TRUSTED_PROXIES: frozenset[str] = _load_trusted_proxies()
 
 
 class RateLimitExceeded(HTTPException):
@@ -140,6 +179,24 @@ class RateLimitExceeded(HTTPException):
         )
 
 
+import collections
+
+
+class InMemorySlidingWindowLimiter:
+    def __init__(self):
+        self.buckets = collections.defaultdict(list)
+
+    def check(self, key: str, limit: int, window_ms: int) -> tuple[bool, int]:
+        now_ms = int(time.time() * 1000)
+        clear_before = now_ms - window_ms
+        self.buckets[key] = [ts for ts in self.buckets[key] if ts > clear_before]
+        current_count = len(self.buckets[key])
+        if current_count < limit:
+            self.buckets[key].append(now_ms)
+            return True, current_count + 1
+        return False, current_count
+
+
 class DistributedRateLimiter:
     def __init__(self):
         self._redis: Optional[redis.Redis] = None
@@ -150,6 +207,7 @@ class DistributedRateLimiter:
         self.abuse_threshold = max(2, int(getattr(settings, "RATE_LIMIT_ABUSE_THRESHOLD", 3)))
         self.abuse_window = max(10, int(getattr(settings, "RATE_LIMIT_ABUSE_WINDOW", max(settings.RATE_LIMIT_WINDOW, 60))))
         self.abuse_block_seconds = max(30, int(getattr(settings, "RATE_LIMIT_ABUSE_BLOCK_SECONDS", 300)))
+        self._in_memory_fallback = InMemorySlidingWindowLimiter()
 
     async def get_redis(self) -> redis.Redis:
         if self._redis is None:
@@ -268,14 +326,18 @@ class DistributedRateLimiter:
 
             return allowed
         except Exception as exc:
-            logger.error(
-                "rate_limiter_error",
+            key = self._generate_key(identifier, endpoint)
+            window_ms = window_seconds * 1000
+            allowed, current_count = self._in_memory_fallback.check(key, limit, window_ms)
+            logger.warning(
+                "rate_limiter_redis_fallback_triggered",
                 error=str(exc),
                 identifier=identifier,
                 endpoint=endpoint,
-                fail_open=False,
+                allowed=allowed,
+                current_count=current_count,
             )
-            return False
+            return allowed
 
     async def get_remaining_ttl(
         self,
@@ -299,7 +361,18 @@ class DistributedRateLimiter:
             refill_rate = self._refill_rate(effective_limit, window_seconds)
             return max(1, int(math.ceil((1 - tokens) / refill_rate)))
         except Exception:
-            return window_seconds
+            try:
+                key = self._generate_key(identifier, endpoint)
+                timestamps = self._in_memory_fallback.buckets.get(key)
+                if not timestamps:
+                    return window_seconds
+                oldest_ts = timestamps[0]
+                now_ms = int(time.time() * 1000)
+                window_ms = window_seconds * 1000
+                expires_in = int((oldest_ts + window_ms - now_ms) / 1000)
+                return max(1, expires_in)
+            except Exception:
+                return window_seconds
 
     async def record_abuse_event(self, identifier: str, endpoint: str) -> int:
         try:
@@ -332,10 +405,46 @@ limiter = DistributedRateLimiter()
 
 
 def is_whitelisted(identifier: str) -> bool:
-    return identifier in WHITELIST
+    """Return True when the identifier belongs to a loopback or trusted address.
+
+    ``resolve_rate_limit_identifier`` always returns prefixed identifiers
+    (``ip:<addr>``, ``user:<id>``, ``anon:<token>``).  The previous WHITELIST
+    contained bare strings like ``"127.0.0.1"`` and ``"internal-admin-service"``
+    which could never match a prefixed identifier, making whitelist exemptions
+    silently ineffective.
+
+    Only ``ip:`` prefixed loopback addresses are whitelisted.  Service name
+    strings are not accepted — they cannot be verified at the network layer.
+    """
+    if not identifier.startswith("ip:"):
+        return False
+    raw_ip = identifier[3:]
+    return raw_ip in WHITELIST
 
 
 def resolve_rate_limit_identifier(request: Request) -> str:
+    """Return a per-identity rate-limit key.
+
+    Resolution order:
+    1. Valid JWT ``sub`` / ``user_id`` claim  → ``user:<id>``
+    2. Direct client IP from ASGI transport   → ``ip:<addr>``
+    3. ``X-Forwarded-For`` first hop          → ``ip:<addr>``
+       (only when the direct client IP is in TRUSTED_PROXIES)
+    4. Unique per-request token               → ``anon:<uuid>``
+
+    The function NEVER returns a shared literal such as ``"anonymous"``.
+    ``X-Forwarded-For`` is only trusted when the direct transport-layer
+    peer is a known trusted proxy IP — accepting it unconditionally allows
+    any client to spoof their IP and bypass per-IP rate limits.
+    """
+       (only used when the direct client is a known trusted proxy)
+    4. Unique per-request token               → ``anon:<uuid>``
+
+    The function NEVER returns a shared literal such as ``"anonymous"``.
+    Returning a shared key would allow a single attacker to exhaust the
+    entire unauthenticated quota and lock out all other unauthenticated
+    users (login, OTP, password-reset) — a targeted DoS vector.
+    """
     """Prefer API key identity, then verified JWT user_id; otherwise use source IP."""
 
     api_key_identifier = limiter._api_key_identifier(request)
@@ -358,18 +467,31 @@ def resolve_rate_limit_identifier(request: Request) -> str:
             except HTTPException:
                 pass
 
+    # Prefer the direct transport-layer IP — it cannot be spoofed by the client.
+    direct_ip: str | None = None
+    if request.client and request.client.host:
+        direct_ip = request.client.host
+        return f"ip:{direct_ip}"
+
+    # Only trust X-Forwarded-For when the direct peer is a known trusted proxy.
+    # Accepting XFF unconditionally allows any client to forge their IP address
+    # by injecting or prepending values to the header.
+    if direct_ip is not None and direct_ip in TRUSTED_PROXIES:
     if request.client and request.client.host:
         return f"ip:{request.client.host}"
 
-    # Use X-Forwarded-For as fallback if present (trusted proxy)
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        client_ip = forwarded.split(",")[0].strip()
-        if client_ip:
-            return f"ip:{client_ip}"
+    # Only trust X-Forwarded-For when the direct peer is a known proxy/load-balancer.
+    # Accepting it unconditionally would let any client forge their IP.
+    direct_host = request.client.host if request.client else None
+    if direct_host in WHITELIST:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            client_ip = forwarded.split(",")[0].strip()
+            if client_ip:
+                return f"ip:{client_ip}"
 
     # Last resort: unique per-request identifier so unknown clients
-    # do not share a single bucket that can be exhausted by one attacker.
+    # never share a single bucket that can be exhausted by one attacker.
     return f"anon:{uuid.uuid4().hex}"
 
 

@@ -9,26 +9,23 @@ PHONE_PATTERN = re.compile(r"(?:(?:\+?\d[\d\s().-]{6,}\d))")
 JWT_PATTERN = re.compile(r"\b[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")
 BEARER_PATTERN = re.compile(r"(?i)\b(?:bearer|jwt|token|access[_ -]?token|refresh[_ -]?token)[:=\s]+([A-Za-z0-9._-]{16,})")
 OTP_PATTERN = re.compile(r"(?i)\b(?:otp|one[-\s]?time password)\b[^0-9]{0,24}([0-9]{4,8})")
+AADHAAR_PATTERN = re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b")
+PAN_PATTERN = re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b", re.IGNORECASE)
 
 SENSITIVE_KEYS = {
     "authorization",
-    "body",
-    "content",
     "email",
-    "html",
-    "html_content",
-    "message",
-    "message_body",
     "otp",
     "password",
-    "payload",
     "phone",
     "phone_number",
     "recipient",
     "secret",
-    "summary",
-    "text",
     "token",
+    "aadhaar",
+    "pan",
+    "pan_card",
+    "aadhaar_card",
 }
 
 
@@ -78,12 +75,19 @@ def mask_recipient(recipient: Optional[str]) -> str:
     return "[redacted-recipient]"
 
 
+def storage_safe_recipient(recipient: Optional[str]) -> str:
+    """Return a storage-safe recipient value for persisted records."""
+    return mask_recipient(recipient)
+
+
 def _replace_sensitive_text(value: str) -> str:
     value = EMAIL_PATTERN.sub("[redacted-email]", value)
     value = PHONE_PATTERN.sub("[redacted-phone]", value)
     value = JWT_PATTERN.sub("[redacted-token]", value)
     value = BEARER_PATTERN.sub(lambda match: f"{match.group(0).split()[0]} [redacted-token]", value)
     value = OTP_PATTERN.sub(lambda match: match.group(0).replace(match.group(1), "[redacted-otp]"), value)
+    value = AADHAAR_PATTERN.sub("[redacted-aadhaar]", value)
+    value = PAN_PATTERN.sub("[redacted-pan]", value)
     return value
 
 
@@ -108,7 +112,7 @@ def sanitize_log_value(value: Any, key: Optional[str] = None) -> Any:
     if isinstance(value, (list, tuple, set)):
         return [sanitize_log_value(item, key_name) for item in value]
     if isinstance(value, str):
-        if "@" in value:
+        if EMAIL_PATTERN.search(value):
             value = mask_email(value)
         return sanitize_log_text(value)[:240]
     if hasattr(value, "isoformat"):

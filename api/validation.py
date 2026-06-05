@@ -8,14 +8,56 @@ This module provides comprehensive validation for:
 - Form data validation
 """
 
+import ipaddress
 import os
-from typing import Optional, Set, Tuple
+import socket
+from typing import Optional, Set, Tuple, NamedTuple
 from pathlib import Path
+from urllib.parse import urlparse
 from fastapi import HTTPException, status, UploadFile
 
+import requests
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+
+class PinnedUrl(NamedTuple):
+    scheme: str
+    hostname: str
+    port: int
+    path: str
+    ip: str
+
+
+# SSRF protection: private / reserved / metadata IP ranges
+_FORBIDDEN_IP_NETWORKS = [
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("224.0.0.0/4"),
+    ipaddress.ip_network("240.0.0.0/4"),
+    ipaddress.ip_network("255.255.255.255/32"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+# Cloud metadata endpoints
+_CLOUD_METADATA_HOSTS = {
+    "169.254.169.254",
+    "metadata.google.internal",
+    "metadata.heptio.com",
+    "100.100.100.200",
+    "fd00:ec2::254",
+}
+
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+_ALLOWED_URL_PORTS = frozenset({80, 443, 8080, 8443})
 
 
 # Magic bytes for trusted file type identification
@@ -62,6 +104,7 @@ class ValidationConfig:
     MAX_BATCH_SIZE: int = 100
     MAX_ANALYTICS_PAYLOAD: int = 100 * 1024 * 1024
     MAX_JSON_BODY: int = 10 * 1024 * 1024
+    MAX_BASE64_DECODED_BYTES: int = 25 * 1024 * 1024  # 25 MB
 
     @classmethod
     def from_settings(cls, settings):
@@ -78,6 +121,20 @@ class ValidationError(HTTPException):
 class PayloadTooLargeError(HTTPException):
     def __init__(self, detail: str):
         super().__init__(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=detail)
+
+
+def decode_base64_safe(data: str, max_decoded_bytes: int = ValidationConfig.MAX_BASE64_DECODED_BYTES) -> bytes:
+    """Decode base64 string with decoded-size validation to prevent memory exhaustion."""
+    # Base64 encodes 3 bytes into 4 characters; estimate max_input_len safely
+    max_input_len = ((max_decoded_bytes + 2) // 3) * 4
+    if len(data) > max_input_len:
+        raise PayloadTooLargeError(
+            f"Base64 payload exceeds maximum decoded size of {max_decoded_bytes // (1024 * 1024)} MB"
+        )
+    try:
+        return base64.b64decode(data)
+    except Exception as exc:
+        raise ValidationError(f"Invalid base64 encoding: {exc}")
 
 
 def validate_magic_bytes(file_content: bytes, expected_extension: str) -> Tuple[bool, str]:
@@ -124,7 +181,17 @@ def validate_file_upload(
         raise ValidationError(
             detail=f"File type '{file.content_type}' not allowed. Allowed: {', '.join(allowed_mime_types)}"
         )
+    # Reject files that declare no MIME type — client-provided content_type
+    # cannot be trusted as the sole gate; absent type is also unacceptable.
+    if not file.content_type:
+        logger.warning("missing_upload_mime_type", filename=file.filename)
+        raise ValidationError(
+            detail="File MIME type is missing. Ensure the file is a supported type."
+        )
 
+    # Content-based validation: inspect magic bytes independently of the
+    # client-supplied content_type.  A malicious actor can set any MIME type
+    # they like; only the actual file header is authoritative.
     if check_magic_bytes and file_ext in MAGIC_BYTES:
         try:
             if hasattr(file.file, 'read'):
@@ -142,7 +209,10 @@ def validate_file_upload(
         except ValidationError:
             raise
         except Exception as exc:
+            # Log and re-raise so the caller is never silently passed a file
+            # whose content could not be verified — fail closed.
             logger.error("magic_bytes_check_failed", filename=file.filename, error=str(exc))
+            raise ValidationError(detail="File content could not be verified. Upload rejected.") from exc
 
     if file.size and file.size > max_size:
         logger.warning("upload_exceeds_max_size", filename=file.filename, size_bytes=file.size, max_size_bytes=max_size)
@@ -184,6 +254,121 @@ def validate_json_payload(payload_size: int, max_size: Optional[int] = None) -> 
         raise PayloadTooLargeError(
             detail=f"Request body size ({round(payload_size / 1024 / 1024, 2)} MB) exceeds maximum ({round(max_size / 1024 / 1024, 2)} MB)"
         )
+
+
+def validate_file_url(url: str) -> PinnedUrl:
+    """
+    Validate a user-supplied URL against SSRF attacks.
+    - Only http/https schemes allowed
+    - No private, loopback, link-local, or metadata IPs
+    - Only standard HTTP(S) ports
+    Returns a PinnedUrl with the single validated IP to use for the connection,
+    preventing DNS rebinding between validation and fetch.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        logger.warning("url_parse_failed", url=url, error=str(exc))
+        raise ValidationError(detail="Invalid URL format")
+
+    if parsed.scheme not in _ALLOWED_URL_SCHEMES:
+        logger.warning("url_scheme_denied", scheme=parsed.scheme, url=url)
+        raise ValidationError(detail=f"URL scheme '{parsed.scheme}' is not allowed. Only http/https are permitted.")
+
+    if parsed.port is not None and parsed.port not in _ALLOWED_URL_PORTS:
+        logger.warning("url_port_denied", port=parsed.port, url=url)
+        raise ValidationError(detail=f"URL port {parsed.port} is not allowed.")
+
+    hostname = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    if hostname.lower() in _CLOUD_METADATA_HOSTS:
+        logger.warning("url_metadata_host_denied", host=hostname, url=url)
+        raise ValidationError(detail="URL points to a cloud metadata endpoint and is not allowed.")
+
+    try:
+        ips = socket.getaddrinfo(hostname, port)
+    except socket.gaierror as exc:
+        logger.warning("url_dns_resolution_failed", host=hostname, error=str(exc))
+        raise ValidationError(detail="Could not resolve the URL hostname.")
+    except OSError:
+        logger.warning("url_dns_resolution_os_error", host=hostname)
+        raise ValidationError(detail="Could not resolve the URL hostname.")
+
+    resolved_ip = None
+    for addr_info in ips:
+        ip_str = addr_info[4][0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            logger.warning("url_ip_blocked", ip=ip_str, host=hostname, url=url)
+            raise ValidationError(detail=f"URL resolves to a blocked IP range ({ip_str}).")
+
+        for net in _FORBIDDEN_IP_NETWORKS:
+            if ip in net:
+                logger.warning("url_ip_in_forbidden_network", ip=ip_str, network=str(net), host=hostname, url=url)
+                raise ValidationError(detail=f"URL resolves to a blocked IP range ({ip_str}).")
+
+        if resolved_ip is None:
+            resolved_ip = ip_str
+
+    if resolved_ip is None:
+        raise ValidationError(detail="Could not resolve the URL to a valid IP address.")
+
+    return PinnedUrl(
+        scheme=parsed.scheme,
+        hostname=hostname,
+        port=port,
+        path=path,
+        ip=resolved_ip,
+    )
+
+
+class _PinnedResponse:
+    """Minimal response wrapper returned by fetch_url_safe."""
+    def __init__(self, status_code: int, headers: dict, content: bytes):
+        self.status_code = status_code
+        self.headers = headers
+        self.content = content
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests as _req
+            exc = _req.HTTPError(f"HTTP {self.status_code}")
+            exc.response = self
+            raise exc
+
+
+def fetch_url_safe(pinned: PinnedUrl, timeout: int = 30) -> _PinnedResponse:
+    """Fetch a URL using the pinned IP from validate_file_url, preventing DNS rebinding."""
+    import urllib3
+    headers = {"Host": pinned.hostname, "User-Agent": "LegalAssist-AI/1.0"}
+    if pinned.scheme == "https":
+        conn = urllib3.HTTPSConnection(
+            host=pinned.ip,
+            port=pinned.port,
+            server_hostname=pinned.hostname,
+            assert_hostname=pinned.hostname,
+            timeout=timeout,
+        )
+    else:
+        conn = urllib3.HTTPConnection(
+            host=pinned.ip,
+            port=pinned.port,
+            timeout=timeout,
+        )
+    conn.request("GET", pinned.path, headers=headers)
+    http_response = conn.getresponse()
+    content = http_response.data
+    resp_headers = dict(http_response.getheaders())
+    status = http_response.status
+    conn.close()
+    return _PinnedResponse(status_code=status, headers=resp_headers, content=content)
 
 
 def validate_text_input(text: str, max_length: Optional[int] = None) -> None:

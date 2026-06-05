@@ -2,15 +2,35 @@
 Case Detail Page - LegalAssist AI.
 View case timeline, documents, deadlines, and remedies.
 """
+import sys
+import os
+# Add parent directory to sys.path to resolve 'core' and other top-level modules
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import streamlit as st
+from config import PAGE_MY_CASES
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
+import requests
 
 from auth import require_auth, redirect_to_login, get_current_user_id
-from case_manager import get_case_detail, upload_case_document, mark_deadline_completed, mark_deadline_incomplete, add_manual_deadline, mark_case_appealed, mark_case_closed, mark_case_active, generate_case_summary_text, add_case_comment, update_case_presence
-from case_manager import upload_case_attachment
+from case_manager import (
+    get_case_detail,
+    upload_case_document,
+    mark_deadline_completed,
+    mark_deadline_incomplete,
+    add_manual_deadline,
+    mark_case_appealed,
+    mark_case_closed,
+    mark_case_active,
+    generate_case_summary_text,
+    add_case_comment,
+    update_case_presence,
+    upload_case_attachment,
+    get_user_cases_summary,
+)
 from core import extract_text_from_pdf
+from api.feature_flags import is_feature_enabled_for_user, get_feature_flag_manager
 from db.crud.knowledge import get_knowledge_freshness_summary, list_knowledge_invalidations
 from db.crud.audit import list_audit_events
 from database import DocumentType, CaseStatus, SessionLocal, UserPreference
@@ -138,6 +158,32 @@ def render_collaboration_section(case_id: int, user_id: int, comments: list, pre
         st.info("No comments yet. Start the discussion below.")
 
     st.markdown("---")
+
+
+def _get_api_base_url() -> str:
+    return str(st.session_state.get("api_base_url") or Config.API_BASE_URL or "http://localhost:8000").rstrip("/")
+
+
+def _create_anonymized_share_link(case_id: int, scope: str) -> Optional[str]:
+    api_base = _get_api_base_url()
+    token = st.session_state.get("user_token")
+    if not token:
+        st.error("Please sign in again to generate a share link.")
+        return None
+
+    try:
+        response = requests.post(
+            f"{api_base}/api/v1/cases/{case_id}/share-anonymized",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"scope": scope},
+            timeout=float(getattr(Config, "API_REQUEST_TIMEOUT_SECONDS", 5.0)),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload.get("share_url")
+    except requests.RequestException as exc:
+        st.error(f"Failed to create share link: {exc}")
+        return None
 
     with st.form("case_comment_form", clear_on_submit=True):
         reply_options = ["Top-level comment"] + [
@@ -668,7 +714,7 @@ def main():
     if not case_id:
         st.warning("No case selected")
         if st.button("← Back to My Cases"):
-            st.switch_page(routes.PAGE_MY_CASES)
+            st.switch_page(PAGE_MY_CASES)
         return
 
     # Get case details
@@ -677,7 +723,7 @@ def main():
     if not case_data:
         st.error("Case not found or access denied")
         if st.button("← Back to My Cases"):
-            st.switch_page(routes.PAGE_MY_CASES)
+            st.switch_page(PAGE_MY_CASES)
         return
 
     case = case_data["case"]
@@ -686,6 +732,7 @@ def main():
     remedies = case_data.get("remedies")
     comments = case_data.get("comments", [])
     presence = case_data.get("presence", [])
+    timeline = case_data.get("timeline", [])
 
     update_case_presence(user_id, case_id, active_view="case_details")
 
@@ -868,7 +915,11 @@ def main():
 
                 if st.button("Show Share ID", use_container_width=True):
                     st.success(f"✅ Anonymized ID: `{anon_id}`")
-                    st.info("Share this ID with lawyers to show anonymized case details (feature coming soon)")
+                    st.info(
+                        "Share this ID with your lawyer. They can view the "
+                        "anonymized case at the **View Shared Case** page, "
+                        "or by entering the ID at `/6_Shared_Case`."
+                    )
 
 
 if __name__ == "__main__":

@@ -72,21 +72,11 @@ def test_scheduler_logs_mask_notification_recipients(capfd):
         days_until_deadline=lambda: 30,
     )
     fake_pref = SimpleNamespace(user_id=1, timezone="UTC")
-    fake_pref.notify_30_days = True
-    fake_pref.notify_10_days = True
-    fake_pref.notify_3_days = True
-    fake_pref.notify_1_day = True
 
-    fake_query = Mock()
-    fake_query.filter.return_value.all.return_value = [fake_pref]
-    fake_db = Mock()
-    fake_db.query.return_value = fake_query
-
-    with patch("scheduler.SessionLocal", return_value=fake_db), \
+    with patch("scheduler.SessionLocal", return_value=Mock()), \
             patch("scheduler.init_db", return_value=None), \
-         patch("scheduler.get_upcoming_deadlines", return_value=[fake_deadline]), \
-         patch("scheduler.notification_service.send_reminders") as mock_send_reminders, \
-         patch("scheduler.is_reminder_time_for_user", return_value=True):
+         patch("scheduler.get_reminder_dispatch_candidates", return_value=[(fake_deadline, 30, fake_pref)]), \
+         patch("scheduler.notification_service.send_reminders") as mock_send_reminders:
         mock_send_reminders.return_value = [
             NotificationResult(success=True, channel=NotificationChannel.SMS, recipient="+91-9876543210", message_id="sms_123", error=None),
             NotificationResult(success=True, channel=NotificationChannel.EMAIL, recipient="user@example.com", message_id="email_123", error=None),

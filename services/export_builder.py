@@ -247,10 +247,11 @@ def build_case_export_payload(
     case_id: int,
     field_ids: Optional[Sequence[str]] = None,
     privacy_profile: Optional[str] = None,
+    db: Optional[Session] = None,
 ) -> Optional[Dict[str, Any]]:
     selected_fields = _normalize_fields(field_ids)
 
-    with SessionLocal() as db:
+    def _run(db: Session) -> Optional[Dict[str, Any]]:
         source = _load_case_payload(db, user_id, case_id)
         if not source:
             return None
@@ -305,6 +306,11 @@ def build_case_export_payload(
             metadata={"privacy_profile": selected_profile, "fields": list(selected_fields)},
         )
         return redacted_payload
+
+    if db is not None:
+        return _run(db)
+    with SessionLocal() as _db:
+        return _run(_db)
 
 
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
@@ -441,6 +447,7 @@ def build_case_export_artifact(
     format: str,
     field_ids: Optional[Sequence[str]] = None,
     privacy_profile: Optional[str] = None,
+    db: Optional[Session] = None,
 ) -> Optional[ExportArtifact]:
     selected_fields = _normalize_fields(field_ids)
     payload = build_case_export_payload(
@@ -448,6 +455,7 @@ def build_case_export_artifact(
         case_id=case_id,
         field_ids=selected_fields,
         privacy_profile=privacy_profile,
+        db=db,
     )
     if not payload:
         return None
@@ -462,17 +470,17 @@ def build_case_export_artifact(
     if format_name == "json":
         data = _json_bytes(payload)
         mime_type = "application/json"
-        file_name = f"{base_name}.json"
+        file_name = f"case_{case_id}_export.json"
     elif format_name == "pdf":
         data = _pdf_bytes(payload)
         mime_type = "application/pdf"
-        file_name = f"{base_name}.pdf"
+        file_name = f"case_{case_id}_export.pdf"
     else:
         data = _docx_bytes(payload)
         mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        file_name = f"{base_name}.docx"
+        file_name = f"case_{case_id}_export.docx"
 
-    with SessionLocal() as db:
+    def _audit(db: Session) -> None:
         record_audit_event(
             db,
             actor=f"user:{user_id}",
@@ -486,6 +494,12 @@ def build_case_export_artifact(
                 "fields": list(selected_fields),
             },
         )
+
+    if db is not None:
+        _audit(db)
+    else:
+        with SessionLocal() as _db:
+            _audit(_db)
 
     return ExportArtifact(
         file_name=file_name,
@@ -536,30 +550,33 @@ def build_case_export_bundle(
         "files": [],
     }
 
+    case_label = "_".join(str(case_id) for case_id in unique_case_ids)
+
     with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
-        for case_id in unique_case_ids:
-            for format_name in normalized_formats:
-                artifact = build_case_export_artifact(
-                    user_id=user_id,
-                    case_id=case_id,
-                    format=format_name,
-                    field_ids=selected_fields,
-                    privacy_profile=privacy_profile,
-                )
-                if not artifact:
-                    continue
-                case_folder = f"case_{case_id}"
-                entry_name = f"{case_folder}/{artifact.file_name}"
-                archive.writestr(entry_name, artifact.data)
-                manifest["files"].append(
-                    {
-                        "case_id": case_id,
-                        "format": format_name,
-                        "entry": entry_name,
-                        "size_bytes": len(artifact.data),
-                    }
-                )
-                with SessionLocal() as db:
+        with SessionLocal() as db:
+            for case_id in unique_case_ids:
+                for format_name in normalized_formats:
+                    artifact = build_case_export_artifact(
+                        user_id=user_id,
+                        case_id=case_id,
+                        format=format_name,
+                        field_ids=selected_fields,
+                        privacy_profile=privacy_profile,
+                        db=db,
+                    )
+                    if not artifact:
+                        continue
+                    case_folder = f"case_{case_id}"
+                    entry_name = f"{case_folder}/{artifact.file_name}"
+                    archive.writestr(entry_name, artifact.data)
+                    manifest["files"].append(
+                        {
+                            "case_id": case_id,
+                            "format": format_name,
+                            "entry": entry_name,
+                            "size_bytes": len(artifact.data),
+                        }
+                    )
                     record_audit_event(
                         db,
                         actor=f"user:{user_id}",
@@ -573,24 +590,22 @@ def build_case_export_bundle(
                             "bundle_entry": entry_name,
                         },
                     )
-        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
 
-    with SessionLocal() as db:
-        record_audit_event(
-            db,
-            actor=f"user:{user_id}",
-            actor_user_id=user_id,
-            action="export_bundle",
-            resource=f"case_bundle:{case_label}",
-            metadata={
-                "case_ids": list(unique_case_ids),
-                "formats": list(normalized_formats),
-                "privacy_profile": normalize_privacy_profile(privacy_profile),
-                "fields": list(selected_fields),
-            },
-        )
+            record_audit_event(
+                db,
+                actor=f"user:{user_id}",
+                actor_user_id=user_id,
+                action="export_bundle",
+                resource=f"case_bundle:{case_label}",
+                metadata={
+                    "case_ids": list(unique_case_ids),
+                    "formats": list(normalized_formats),
+                    "privacy_profile": normalize_privacy_profile(privacy_profile),
+                    "fields": list(selected_fields),
+                },
+            )
 
-    case_label = "_".join(str(case_id) for case_id in unique_case_ids)
     file_name = _safe_filename(f"case_export_bundle_{case_label}.zip")
     return ExportArtifact(
         file_name=file_name,

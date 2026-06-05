@@ -3,24 +3,32 @@
 Pure helper functions and an orchestration planner that converts upcoming
 deadlines plus prefetched user preferences into actionable reminder candidates.
 """
-from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List
 import datetime as dt
+from typing import Callable, Dict, Iterable, List, Tuple
+
 import pytz
 
+from db.crud.notifications import get_prefs_by_user_ids
 from db.models.cases import CaseDeadline
 from db.models.notifications import UserPreference
 
 
 def should_process_threshold(days_left: int) -> bool:
-    """Return True when the days_left value matches configured thresholds."""
-    return days_left in (30, 10, 3, 1)
+    """Return True when the days_left value matches configured thresholds.
+    Note: For dynamic user-configurable thresholds, this now acts as a broad
+    check but is overridden by the user's specific thresholds during dispatch.
+    """
+    return True
 
 
 def is_notify_enabled(days_left: int, user_preference: UserPreference) -> bool:
     """Return True if the user has enabled reminders for this threshold."""
     if user_preference is None:
         return False
+    if hasattr(user_preference, "get_reminder_thresholds"):
+        thresholds = user_preference.get_reminder_thresholds()
+        return days_left in thresholds
+
     if days_left == 30:
         return bool(user_preference.notify_30_days)
     if days_left == 10:
@@ -49,29 +57,37 @@ def is_reminder_time_for_user(user_timezone: str, reminder_hour: int = 8) -> boo
         return user_now.hour == reminder_hour
 
 
-@dataclass(frozen=True)
-class ReminderCandidate:
-    deadline: CaseDeadline
-    days_left: int
-    timezone: str
-    notify_30_days: bool
-    notify_10_days: bool
-    notify_3_days: bool
-    notify_1_day: bool
-    notification_channel: object
-    user_preference: UserPreference
+ReminderDispatchCandidate = Tuple[CaseDeadline, int, UserPreference]
 
 
-def plan_eligible_reminders(
+def _ensure_utc_datetime(value: dt.datetime) -> dt.datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone(dt.timezone.utc)
+
+
+def _calculate_days_left(deadline: CaseDeadline, now_utc: dt.datetime) -> int:
+    deadline_date = deadline.deadline_date
+    if deadline_date is None:
+        return 0
+    if deadline_date.tzinfo is None:
+        deadline_date = deadline_date.replace(tzinfo=dt.timezone.utc)
+    else:
+        deadline_date = deadline_date.astimezone(dt.timezone.utc)
+    return max(0, (deadline_date.date() - now_utc.date()).days)
+
+
+def _build_reminder_dispatch_candidates(
     deadlines: Iterable[CaseDeadline],
     prefs_by_user_id: Dict[int, UserPreference],
-    reminder_time_checker: Callable[[str], bool] = is_reminder_time_for_user,
-) -> List[ReminderCandidate]:
-    """Plan reminder candidates from in-memory deadlines and preferences."""
-    candidates: List[ReminderCandidate] = []
+    now_utc: dt.datetime,
+    reminder_time_checker: Callable[[str], bool],
+) -> List[ReminderDispatchCandidate]:
+    candidates: List[ReminderDispatchCandidate] = []
+    normalized_now_utc = _ensure_utc_datetime(now_utc)
 
     for deadline in deadlines:
-        days_left = deadline.days_until_deadline()
+        days_left = _calculate_days_left(deadline, normalized_now_utc)
         if not should_process_threshold(days_left):
             continue
 
@@ -85,18 +101,63 @@ def plan_eligible_reminders(
         if not reminder_time_checker(user_pref.timezone):
             continue
 
-        candidates.append(
-            ReminderCandidate(
-                deadline=deadline,
-                days_left=days_left,
-                timezone=user_pref.timezone or "UTC",
-                notify_30_days=bool(user_pref.notify_30_days),
-                notify_10_days=bool(user_pref.notify_10_days),
-                notify_3_days=bool(user_pref.notify_3_days),
-                notify_1_day=bool(user_pref.notify_1_day),
-                notification_channel=user_pref.notification_channel,
-                user_preference=user_pref,
-            )
-        )
+        candidates.append((deadline, days_left, user_pref))
 
     return candidates
+
+
+def get_reminder_dispatch_candidates(
+    db,
+    days_before: int,
+    now_utc: dt.datetime,
+    reminder_time_checker: Callable[[str], bool] | None = None,
+) -> List[ReminderDispatchCandidate]:
+    """Build reminder candidates from the database and current UTC time."""
+    if reminder_time_checker is None:
+        reminder_time_checker = is_reminder_time_for_user
+
+    now_utc = _ensure_utc_datetime(now_utc)
+    target_utc = (now_utc + dt.timedelta(days=days_before)).replace(
+        hour=23,
+        minute=59,
+        second=59,
+        microsecond=999999,
+    )
+    deadlines = db.query(CaseDeadline).filter(
+        CaseDeadline.status == "active",
+        CaseDeadline.deadline_date <= target_utc,
+        CaseDeadline.deadline_date > now_utc,
+    ).all()
+
+    prefs_by_user_id: Dict[int, UserPreference] = {}
+    if deadlines:
+        prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in deadlines})
+        prefs_by_user_id = {pref.user_id: pref for pref in prefs}
+
+    return _build_reminder_dispatch_candidates(
+        deadlines,
+        prefs_by_user_id,
+        now_utc,
+        reminder_time_checker,
+    )
+
+
+def plan_eligible_reminders(
+    deadlines: Iterable[CaseDeadline],
+    prefs_by_user_id: Dict[int, UserPreference],
+    now_utc: dt.datetime | None = None,
+    reminder_time_checker: Callable[[str], bool] | None = None,
+) -> List[ReminderDispatchCandidate]:
+    """Plan reminder candidates from in-memory deadlines and preferences."""
+    if reminder_time_checker is None:
+        reminder_time_checker = is_reminder_time_for_user
+
+    if now_utc is None:
+        now_utc = dt.datetime.now(dt.timezone.utc)
+
+    return _build_reminder_dispatch_candidates(
+        deadlines,
+        prefs_by_user_id,
+        now_utc,
+        reminder_time_checker,
+    )

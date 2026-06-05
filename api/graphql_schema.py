@@ -9,8 +9,11 @@ from typing import List, Optional
 import strawberry
 from strawberry import relay
 from strawberry.relay import ID
+from strawberry.types import Info
 
+from api.auth import CurrentUser
 from db.case_service import (
+    create_case,
     create_case_document,
     delete_case,
     get_case_by_id,
@@ -209,22 +212,28 @@ class Query:
     @strawberry.field
     def case(
         self,
+        info: Info,
         case_id: int,
         include_documents: bool = False,
         include_deadlines: bool = False,
         include_timeline: bool = False,
     ) -> Optional[CaseType]:
+        current_user: CurrentUser = info.context.get("current_user")
+        if not current_user:
+            return None
         from db.session import get_db_context
         with get_db_context() as db:
             case = get_case_by_id(db, case_id)
             if case is None:
+                return None
+            if current_user.role != "admin" and case.user_id != current_user.user_id:
                 return None
             return CaseType.from_db(case, include_documents, include_deadlines, include_timeline)
 
     @strawberry.field
     def cases(
         self,
-        user_id: int,
+        info: Info,
         filters: Optional[CaseFiltersInput] = None,
         limit: int = 50,
         offset: int = 0,
@@ -232,9 +241,12 @@ class Query:
         include_deadlines: bool = False,
         include_timeline: bool = False,
     ) -> List[CaseType]:
+        current_user: CurrentUser = info.context.get("current_user")
+        if not current_user:
+            return []
         from db.session import get_db_context
         with get_db_context() as db:
-            cases = get_user_cases(db, user_id)
+            cases = get_user_cases(db, current_user.user_id)
             if filters:
                 if filters.status:
                     cases = [c for c in cases if c.status == CaseStatus(filters.status.value)]
@@ -250,13 +262,16 @@ class Query:
     @strawberry.field
     def upcoming_deadlines(
         self,
-        user_id: int,
+        info: Info,
         days_ahead: int = 30,
         priority: Optional[str] = None,
     ) -> List[CaseDeadlineType]:
+        current_user: CurrentUser = info.context.get("current_user")
+        if not current_user:
+            return []
         from db.session import get_db_context
         with get_db_context() as db:
-            deadlines = get_upcoming_deadlines(db, user_id, days_ahead)
+            deadlines = get_upcoming_deadlines(db, current_user.user_id, days_ahead)
             result = []
             for d in deadlines:
                 item = CaseDeadlineType(
@@ -277,27 +292,46 @@ class Query:
 @strawberry.type
 class Mutation:
     @strawberry.mutation
-    def create_case(self, user_id: int, input: CreateCaseInput) -> CaseType:
+    def create_case(self, info: Info, input: CreateCaseInput) -> CaseType:
+        current_user: CurrentUser = info.context.get("current_user")
+        if not current_user:
+            raise Exception("Not authenticated")
         from db.session import get_db_context
         with get_db_context() as db:
             case = create_case(
-                db, user_id, input.case_number, input.case_type, input.jurisdiction, input.title
+                db, current_user.user_id, input.case_number, input.case_type, input.jurisdiction, input.title
             )
             return CaseType.from_db(case)
 
     @strawberry.mutation
-    def update_case_status(self, input: UpdateCaseStatusInput) -> Optional[CaseType]:
+    def update_case_status(self, info: Info, input: UpdateCaseStatusInput) -> Optional[CaseType]:
+        current_user: CurrentUser = info.context.get("current_user")
+        if not current_user:
+            return None
         from db.session import get_db_context
         with get_db_context() as db:
-            case = update_case_status(db, input.case_id, CaseStatus(input.status.value))
+            case = get_case_by_id(db, input.case_id)
             if case is None:
                 return None
-            return CaseType.from_db(case)
+            if current_user.role != "admin" and case.user_id != current_user.user_id:
+                return None
+            updated = update_case_status(db, input.case_id, CaseStatus(input.status.value))
+            if updated is None:
+                return None
+            return CaseType.from_db(updated)
 
     @strawberry.mutation
-    def delete_case(self, case_id: int) -> bool:
+    def delete_case(self, info: Info, case_id: int) -> bool:
+        current_user: CurrentUser = info.context.get("current_user")
+        if not current_user:
+            return False
         from db.session import get_db_context
         with get_db_context() as db:
+            case = get_case_by_id(db, case_id)
+            if case is None:
+                return False
+            if current_user.role != "admin" and case.user_id != current_user.user_id:
+                return False
             return delete_case(db, case_id)
 
 

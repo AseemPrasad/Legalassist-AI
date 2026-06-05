@@ -1,8 +1,8 @@
 from typing import List, Dict, Optional, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import func, case as sql_case
 from sqlalchemy.orm import Session, joinedload
-from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback
+from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback, CaseDeadline, CaseTimeline, NotificationLog, NotificationStatus, NotificationChannel, Case
 import hashlib
 import hmac
 import os
@@ -64,6 +64,19 @@ def _summary_overlap(s1: Optional[str], s2: Optional[str]) -> float:
     if not s1_clean or not s2_clean:
         return 0.0
     return difflib.SequenceMatcher(None, s1_clean, s2_clean).ratio()
+
+
+def _utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _normalize_group_value(value: Optional[str]) -> str:
+    text = str(value or "").strip()
+    return text or "Not specified"
 
 
 class MemoryOptimizationMixin:
@@ -174,42 +187,43 @@ class BatchReportGenerator(MemoryOptimizationMixin):
         }
 
         # ---------------------------------------------------------------------
-        # FIX: Use yield_per() to stream results from the database.
-        # This prevents SQLAlchemy from loading the entire result set into 
-        # the session's identity map at once. Note that yield_per() requires
-        # the DB driver to support server-side cursors.
+        # Use LIMIT/OFFSET pagination for SQLite compatibility.
         # ---------------------------------------------------------------------
         try:
-            # We process one record at a time but fetch them in batch_size chunks
-            stream = base_query.yield_per(self.batch_size)
-            
-            for i, case in enumerate(stream):
-                # Update metrics using primitives to avoid keeping references
-                metrics["total_count"] += 1
-                metrics["outcomes"][str(case.outcome).lower()] += 1
-                metrics["jurisdictions"][str(case.jurisdiction)] += 1
-                metrics["case_types"][str(case.case_type).lower()] += 1
+            offset = 0
+            while True:
+                batch = base_query.limit(self.batch_size).offset(offset).all()
+                if not batch:
+                    break
                 
-                # Safely process nested outcome data
-                outcome_data = getattr(case, "outcome_data", None)
-                if outcome_data and getattr(outcome_data, "appeal_filed", False):
-                    metrics["appeal_count"] += 1
-                    cost = _parse_cost_value(getattr(outcome_data, "appeal_cost", None))
-                    if cost:
-                        metrics["total_appeal_cost"] += cost
+                for case in batch:
+                    # Update metrics using primitives to avoid keeping references
+                    metrics["total_count"] += 1
+                    metrics["outcomes"][str(case.outcome).lower()] += 1
+                    metrics["jurisdictions"][str(case.jurisdiction)] += 1
+                    metrics["case_types"][str(case.case_type).lower()] += 1
 
-                total_processed += 1
+                    # Safely process nested outcome data
+                    outcome_data = getattr(case, "outcome_data", None)
+                    if outcome_data and getattr(outcome_data, "appeal_filed", False):
+                        metrics["appeal_count"] += 1
+                        cost = _parse_cost_value(getattr(outcome_data, "appeal_cost", None))
+                        if cost:
+                            metrics["total_appeal_cost"] += cost
 
-                # -------------------------------------------------------------
-                # PERIODIC CLEANUP: Every batch_size records, we clear the 
-                # session and trigger GC to free up memory from processed objects.
-                # -------------------------------------------------------------
-                if total_processed % self.batch_size == 0:
-                    logger.info(f"Checkpoint: Processed {total_processed} cases. Optimizing memory...")
-                    # Expunge all objects from session to allow GC to claim them
-                    self.db.expunge_all() 
-                    self.trigger_garbage_collection()
-                    self.log_memory_stats()
+                    total_processed += 1
+
+                    # -------------------------------------------------------------
+                    # PERIODIC CLEANUP: Every batch_size records, we clear the 
+                    # session and trigger GC to free up memory from processed objects.
+                    # -------------------------------------------------------------
+                    if total_processed % self.batch_size == 0:
+                        logger.info(f"Checkpoint: Processed {total_processed} cases. Optimizing memory...")
+                        self.db.expunge_all()
+                        self.trigger_garbage_collection()
+                        self.log_memory_stats()
+
+                offset += self.batch_size
 
         except Exception as e:
             logger.error(f"Critical error during batch report generation: {str(e)}")
@@ -321,9 +335,9 @@ class PandasAnalyticsProcessor:
     ) -> pd.DataFrame:
         """
         Memory-efficient conversion of a large query into a DataFrame.
-        
-        Uses yield_per() and periodic session clearing to handle 10,000+ 
-        records without leaking memory or causing OOM crashes.
+
+        Uses LIMIT/OFFSET pagination and periodic session clearing to handle 
+        10,000+ records without leaking memory or causing OOM crashes.
         
         Args:
             db: The active database session.
@@ -339,26 +353,27 @@ class PandasAnalyticsProcessor:
 
         logger.info(f"Converting large query to DataFrame using batch size {batch_size}")
         
-        # Stream results using server-side cursors where possible
-        stream = query.yield_per(batch_size)
-        
-        for case in stream:
-            # Flatten DB object into a simple dict immediately
-            current_chunk_data.append(PandasAnalyticsProcessor._extract_case_row(case))
-            total_processed += 1
-            
-            if total_processed % batch_size == 0:
-                # Convert the current list to a DataFrame chunk and store
+        # Use LIMIT/OFFSET pagination for SQLite compatibility.
+        offset = 0
+        while True:
+            batch = query.limit(batch_size).offset(offset).all()
+            if not batch:
+                break
+
+            for case in batch:
+                # Flatten DB object into a simple dict immediately
+                current_chunk_data.append(PandasAnalyticsProcessor._extract_case_row(case))
+                total_processed += 1
+
+            if total_processed % batch_size == 0 and current_chunk_data:
                 chunk_df = pd.DataFrame(current_chunk_data)
                 all_chunks.append(chunk_df)
-                
-                # Clear the temporary list to free list-specific memory
                 current_chunk_data = []
-                
-                # CRITICAL: Clear the session identity map and trigger GC
                 db.expunge_all()
                 gc.collect()
                 logger.debug(f"Memory optimization checkpoint: {total_processed} records batched.")
+
+            offset += batch_size
 
         # Handle the final partial batch
         if current_chunk_data:
@@ -662,6 +677,7 @@ class CaseSimilarityCalculator:
         candidate_case: CaseRecord,
         user_id: Optional[str] = None,
         query_signature: Optional[str] = None,
+        prefetched_feedback: Optional[List[SimilarityFeedback]] = None,
     ) -> float:
         """Return a small ranking adjustment from similarity feedback.
 
@@ -674,20 +690,30 @@ class CaseSimilarityCalculator:
             candidate_case: Case being ranked.
             user_id: Optional user scope for feedback rows.
             query_signature: Optional query signature scope for feedback rows.
+            prefetched_feedback: Optional pre-fetched feedback list for this candidate.
 
         Returns:
             A bounded adjustment in the range ``[-0.03, 0.03]``.
         """
-        query = db.query(SimilarityFeedback).filter(
-            SimilarityFeedback.candidate_case_id == candidate_case.id,
-        )
+        if prefetched_feedback is not None:
+            feedback_rows = prefetched_feedback
+            if user_id is not None:
+                feedback_rows = [row for row in feedback_rows if row.user_id == str(user_id)]
+            if query_signature is not None:
+                feedback_rows = [row for row in feedback_rows if row.query_signature == query_signature]
+            feedback_rows = feedback_rows[:50]
+        else:
+            query = db.query(SimilarityFeedback).filter(
+                SimilarityFeedback.candidate_case_id == candidate_case.id,
+            )
 
-        if user_id is not None:
-            query = query.filter(SimilarityFeedback.user_id == str(user_id))
-        if query_signature is not None:
-            query = query.filter(SimilarityFeedback.query_signature == query_signature)
+            if user_id is not None:
+                query = query.filter(SimilarityFeedback.user_id == str(user_id))
+            if query_signature is not None:
+                query = query.filter(SimilarityFeedback.query_signature == query_signature)
 
-        feedback_rows = query.limit(50).all()
+            feedback_rows = query.limit(50).all()
+
         if not feedback_rows:
             return 0.0
 
@@ -1714,6 +1740,232 @@ class AnalyticsAggregator:
         return results
 
 
+class ReminderInsightsEngine:
+    """Compute reminder effectiveness and drop-off metrics from deadlines and notification logs."""
+
+    ELIGIBLE_STATUSES = {
+        NotificationStatus.SENT,
+        NotificationStatus.DELIVERED,
+        NotificationStatus.OPENED,
+    }
+
+    @staticmethod
+    def _completion_map(db: Session) -> Dict[int, datetime]:
+        completion_map: Dict[int, datetime] = {}
+        events = db.query(CaseTimeline).filter(CaseTimeline.event_type == "deadline_completed").all()
+        for event in events:
+            metadata = event.event_metadata if isinstance(event.event_metadata, dict) else {}
+            deadline_id = metadata.get("deadline_id")
+            try:
+                deadline_id_int = int(deadline_id)
+            except (TypeError, ValueError):
+                continue
+
+            completed_at = _utc_datetime(event.event_date)
+            if completed_at is None:
+                continue
+
+            current = completion_map.get(deadline_id_int)
+            if current is None or completed_at < current:
+                completion_map[deadline_id_int] = completed_at
+
+        return completion_map
+
+    @staticmethod
+    def build_attribution_frame(
+        db: Session,
+        attribution_window_days: int = 14,
+        user_id: Optional[int] = None,
+        jurisdiction: Optional[str] = None,
+        court_name: Optional[str] = None,
+        deadline_type: Optional[str] = None,
+        channel: Optional[NotificationChannel | str] = None,
+    ) -> pd.DataFrame:
+        now = datetime.now(timezone.utc)
+        completion_map = ReminderInsightsEngine._completion_map(db)
+
+        query = db.query(NotificationLog, CaseDeadline, Case).join(
+            CaseDeadline,
+            NotificationLog.deadline_id == CaseDeadline.id,
+        ).join(
+            Case,
+            CaseDeadline.case_id == Case.id,
+        )
+
+        if user_id is not None:
+            query = query.filter(Case.user_id == user_id)
+
+        if jurisdiction:
+            query = query.filter(func.lower(Case.jurisdiction) == _normalize_text(jurisdiction))
+        if court_name:
+            query = query.filter(func.lower(func.coalesce(CaseDeadline.court_name, "")) == _normalize_text(court_name))
+        if deadline_type:
+            query = query.filter(func.lower(CaseDeadline.deadline_type) == _normalize_text(deadline_type))
+        if channel:
+            channel_enum = channel if isinstance(channel, NotificationChannel) else NotificationChannel(str(channel).strip().lower())
+            query = query.filter(NotificationLog.channel == channel_enum)
+
+        deadline_buckets: Dict[int, Dict[str, object]] = {}
+        window = timedelta(days=max(1, int(attribution_window_days)))
+
+        for log, deadline, case in query.all():
+            if log.status not in ReminderInsightsEngine.ELIGIBLE_STATUSES:
+                continue
+
+            sent_at = _utc_datetime(log.sent_at or log.created_at)
+            deadline_date = _utc_datetime(deadline.deadline_date)
+            completion_at = completion_map.get(deadline.id)
+            if sent_at is None or deadline_date is None:
+                continue
+
+            bucket = deadline_buckets.setdefault(
+                deadline.id,
+                {
+                    "deadline": deadline,
+                    "case": case,
+                    "completion_at": completion_at,
+                    "candidates": [],
+                },
+            )
+            candidates = bucket["candidates"]
+            if isinstance(candidates, list):
+                candidates.append(
+                    {
+                        "notification_log_id": log.id,
+                        "channel": log.channel.value if hasattr(log.channel, "value") else str(log.channel),
+                        "sent_at": sent_at,
+                    }
+                )
+
+        rows = []
+        for deadline_id, bucket in deadline_buckets.items():
+            deadline = bucket["deadline"]
+            case = bucket["case"]
+            completion_at = bucket["completion_at"]
+            candidates = bucket["candidates"] if isinstance(bucket["candidates"], list) else []
+            deadline_date = _utc_datetime(deadline.deadline_date)
+            if deadline_date is None:
+                continue
+
+            cutoff = completion_at or min(deadline_date, now)
+            eligible_candidates = [candidate for candidate in candidates if candidate["sent_at"] <= cutoff]
+            if not eligible_candidates:
+                continue
+
+            chosen = max(eligible_candidates, key=lambda candidate: candidate["sent_at"])
+            sent_at = chosen["sent_at"]
+
+            matured = completion_at is not None or deadline_date <= now
+            effective = bool(completion_at and sent_at <= completion_at <= sent_at + window)
+            drop_off = bool(matured and not effective)
+            if not (effective or drop_off):
+                continue
+
+            days_to_completion = None
+            if effective and completion_at is not None:
+                days_to_completion = round((completion_at - sent_at).total_seconds() / 86400.0, 2)
+
+            rows.append(
+                {
+                    "deadline_id": deadline_id,
+                    "notification_log_id": chosen["notification_log_id"],
+                    "jurisdiction": _normalize_group_value(case.jurisdiction),
+                    "court_name": _normalize_group_value(getattr(deadline, "court_name", None)),
+                    "deadline_type": _normalize_group_value(deadline.deadline_type),
+                    "channel": chosen["channel"],
+                    "sent_at": sent_at,
+                    "completion_at": completion_at,
+                    "deadline_date": deadline_date,
+                    "effective": effective,
+                    "drop_off": drop_off,
+                    "days_to_completion": days_to_completion,
+                }
+            )
+
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def summarize(frame: pd.DataFrame, attribution_window_days: int = 14) -> Dict[str, object]:
+        if frame.empty:
+            return {
+                "attribution_window_days": attribution_window_days,
+                "reminder_count": 0,
+                "effective_reminders": 0,
+                "drop_off_reminders": 0,
+                "effectiveness_rate": 0.0,
+                "drop_off_rate": 0.0,
+                "avg_days_to_completion": None,
+            }
+
+        reminder_count = int(len(frame))
+        effective_reminders = int(frame["effective"].sum())
+        drop_off_reminders = int(frame["drop_off"].sum())
+        completed_days = frame.loc[frame["effective"], "days_to_completion"].dropna()
+
+        return {
+            "attribution_window_days": attribution_window_days,
+            "reminder_count": reminder_count,
+            "effective_reminders": effective_reminders,
+            "drop_off_reminders": drop_off_reminders,
+            "effectiveness_rate": round((effective_reminders / reminder_count) * 100, 1) if reminder_count else 0.0,
+            "drop_off_rate": round((drop_off_reminders / reminder_count) * 100, 1) if reminder_count else 0.0,
+            "avg_days_to_completion": round(float(completed_days.mean()), 2) if not completed_days.empty else None,
+        }
+
+    @staticmethod
+    def breakdown(frame: pd.DataFrame, group_by: str) -> pd.DataFrame:
+        if frame.empty or group_by not in frame.columns:
+            return pd.DataFrame(columns=[group_by, "reminders", "effective_reminders", "drop_off_reminders", "effectiveness_rate", "drop_off_rate", "avg_days_to_completion"])
+
+        grouped = frame.groupby(group_by, dropna=False).agg(
+            reminders=("notification_log_id", "count"),
+            effective_reminders=("effective", "sum"),
+            drop_off_reminders=("drop_off", "sum"),
+            avg_days_to_completion=("days_to_completion", "mean"),
+        ).reset_index()
+
+        grouped["effectiveness_rate"] = grouped.apply(
+            lambda row: round((row["effective_reminders"] / row["reminders"]) * 100, 1) if row["reminders"] else 0.0,
+            axis=1,
+        )
+        grouped["drop_off_rate"] = grouped.apply(
+            lambda row: round((row["drop_off_reminders"] / row["reminders"]) * 100, 1) if row["reminders"] else 0.0,
+            axis=1,
+        )
+        grouped["avg_days_to_completion"] = grouped["avg_days_to_completion"].round(2)
+        grouped = grouped.sort_values(["effectiveness_rate", "reminders"], ascending=[False, False]).reset_index(drop=True)
+        return grouped
+
+    @staticmethod
+    def build_insights(
+        db: Session,
+        attribution_window_days: int = 14,
+        user_id: Optional[int] = None,
+        jurisdiction: Optional[str] = None,
+        court_name: Optional[str] = None,
+        deadline_type: Optional[str] = None,
+        channel: Optional[NotificationChannel | str] = None,
+    ) -> Dict[str, object]:
+        frame = ReminderInsightsEngine.build_attribution_frame(
+            db=db,
+            attribution_window_days=attribution_window_days,
+            user_id=user_id,
+            jurisdiction=jurisdiction,
+            court_name=court_name,
+            deadline_type=deadline_type,
+            channel=channel,
+        )
+
+        return {
+            "summary": ReminderInsightsEngine.summarize(frame, attribution_window_days=attribution_window_days),
+            "frame": frame,
+            "by_jurisdiction": ReminderInsightsEngine.breakdown(frame, "jurisdiction"),
+            "by_court": ReminderInsightsEngine.breakdown(frame, "court_name"),
+            "by_deadline_type": ReminderInsightsEngine.breakdown(frame, "deadline_type"),
+            "by_channel": ReminderInsightsEngine.breakdown(frame, "channel"),
+        }
+
+
 # Utility function to anonymize case ID
 def generate_anonymous_case_id(case_data: str) -> str:
     """Generate an anonymous case ID from case data using HMAC-SHA256.
@@ -1741,3 +1993,18 @@ def generate_anonymous_case_id(case_data: str) -> str:
         case_data.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()[:16]
+
+
+def calculate_statistical_metrics(values: list[float]) -> dict[str, float]:
+    """
+    Calculates essential descriptive statistics for analytical telemetry 
+    purposes including mean, median, and variance.
+    """
+    if not values:
+        return {"mean": 0.0, "median": 0.0, "variance": 0.0}
+    sorted_vals = sorted(values)
+    n = len(values)
+    mean = sum(values) / n
+    median = sorted_vals[n // 2] if n % 2 != 0 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+    variance = sum((x - mean) ** 2 for x in values) / n
+    return {"mean": mean, "median": median, "variance": variance}

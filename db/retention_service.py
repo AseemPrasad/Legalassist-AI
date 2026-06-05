@@ -61,7 +61,7 @@ def archive_expired_cases(db: Session, cutoff_days: int, dry_run: bool = False) 
 
     q = (
         db.query(Case)
-        .filter(Case.status.notin_(active_statuses))
+        .filter(Case.status.in_(active_statuses))
         .filter(Case.updated_at < cutoff)
     )
     if dry_run:
@@ -69,11 +69,11 @@ def archive_expired_cases(db: Session, cutoff_days: int, dry_run: bool = False) 
         ids = [r.id for r in records]
         return ids, len(ids)
 
-    ids = [r.id for r in q.all()]
+    cases = q.all()
+    ids = [r.id for r in cases]
+    for case in cases:
+        case.status = CaseStatus.CLOSED
     if ids:
-        db.query(Case).filter(Case.id.in_(ids)).update(
-            {Case.status: CaseStatus.CLOSED}, synchronize_session="fetch"
-        )
         db.commit()
     logger.info(f"Archived {len(ids)} cases (cutoff={cutoff_days} days)")
     return ids, len(ids)
@@ -175,11 +175,13 @@ def purge_expired_notifications(db: Session, cutoff_days: int, dry_run: bool = F
 
 def purge_expired_otl_tokens(db: Session, cutoff_days: int, dry_run: bool = False) -> tuple[list, int]:
     """Delete OTP tokens past their expiry time."""
-    from db.models.auth import OTPToken
+    from db.models.auth import OTPVerification
+    from db.session import _datetime_for_db
 
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=cutoff_days)
-    q = db.query(OTPToken).filter(
-        OTPToken.expires_at < dt.datetime.now(dt.timezone.utc)
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=cutoff_days)
+    db_cutoff = _datetime_for_db(cutoff)
+    q = db.query(OTPVerification).filter(
+        OTPVerification.expires_at < db_cutoff
     )
     records = q.all()
     ids = [r.id for r in records]
@@ -188,7 +190,7 @@ def purge_expired_otl_tokens(db: Session, cutoff_days: int, dry_run: bool = Fals
         return ids, len(ids)
 
     if ids:
-        db.query(OTPToken).filter(OTPToken.id.in_(ids)).delete(synchronize_session="fetch")
+        db.query(OTPVerification).filter(OTPVerification.id.in_(ids)).delete(synchronize_session="fetch")
         db.commit()
-    logger.info(f"Deleted {len(ids)} expired OTP tokens")
+    logger.info(f"Deleted {len(ids)} expired OTP tokens (cutoff={cutoff_days} days)")
     return ids, len(ids)

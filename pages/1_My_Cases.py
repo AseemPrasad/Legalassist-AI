@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from auth import require_auth, redirect_to_login, get_current_user_id, get_current_user_email
-import routes
+from config import PAGE_CASE_DETAILS, PAGE_HOME
 from case_manager import get_user_cases_summary, get_or_create_case_for_document
 from database import CaseStatus, DocumentType
 from pages.ui_components import render_header, section
@@ -143,7 +143,7 @@ def render_case_card(case: dict):
             # Action buttons
             if st.button("📄 View", key=f"view_{case_id}", use_container_width=True):
                 st.session_state.selected_case_id = case_id
-                st.switch_page(routes.PAGE_CASE_DETAILS)
+                st.switch_page(PAGE_CASE_DETAILS)
 
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -168,7 +168,7 @@ def render_empty_state():
         pass
     with col2:
         if st.button("📤 Upload Judgment", use_container_width=True):
-            st.switch_page(routes.PAGE_HOME)
+            st.switch_page(PAGE_HOME)
     with col3:
         pass
 

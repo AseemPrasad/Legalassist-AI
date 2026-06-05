@@ -8,6 +8,9 @@ from fastapi import APIRouter, Response
 import structlog
 from api.health_checks import get_health_manager
 
+from db.models import SchedulerRun
+from db.session import SessionLocal
+from sqlalchemy import desc
 router = APIRouter(prefix="/api/v1", tags=["health"])
 logger = structlog.get_logger(__name__)
 
@@ -71,3 +74,35 @@ async def liveness_check() -> dict:
     result = await manager.liveness_check()
     logger.info("liveness_check_passed")
     return result
+
+@router.get(
+    "/health/scheduler",
+    summary="Scheduler health metrics",
+    response_description="Latest scheduler run metrics per job",
+)
+async def scheduler_health() -> dict:
+    """Return recent scheduler run metrics for each job."""
+    db = SessionLocal()
+    try:
+        job_names = [name[0] for name in db.query(SchedulerRun.job_name).distinct().all()]
+        result: dict = {}
+        for job in job_names:
+            runs = (
+                db.query(SchedulerRun)
+                .filter(SchedulerRun.job_name == job)
+                .order_by(desc(SchedulerRun.started_at))
+                .limit(100)
+                .all()
+            )
+            result[job] = [
+                {
+                    "started_at": r.started_at.isoformat() if r.started_at else None,
+                    "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+                    "sent_count": r.sent_count,
+                    "status": r.status.value,
+                }
+                for r in runs
+            ]
+        return result
+    finally:
+        db.close()

@@ -5,11 +5,8 @@ Handles text extraction from images and scanned documents using Tesseract
 
 import logging
 import pytesseract
-import cv2
 import numpy as np
-from typing import Dict, Any, Optional, Tuple
-from pathlib import Path
-import re
+from typing import Dict, Any, Optional
 from config import Config
 
 from core.image_processor import ImageProcessor
