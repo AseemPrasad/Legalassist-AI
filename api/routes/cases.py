@@ -75,8 +75,21 @@ async def search_cases(
 
         query_signature = request.query_signature or _build_query_signature(request)
 
-        # Build candidate query from filters (cheap DB-side filtering)
+        # Restrict candidates to case types and jurisdictions the user owns
+        user_scope = (
+            db.query(Case.case_type, Case.jurisdiction)
+            .filter(Case.user_id == int(current_user.user_id))
+            .distinct()
+            .all()
+        )
         query = db.query(CaseRecord)
+        if user_scope:
+            query = query.filter(
+                CaseRecord.case_type.in_([row.case_type for row in user_scope]),
+                CaseRecord.jurisdiction.in_([row.jurisdiction for row in user_scope]),
+            )
+
+        # Apply explicit request filters on top of ownership scope
         if request.case_type and request.case_type != "general":
             query = query.filter(CaseRecord.case_type == request.case_type)
         if request.jurisdiction:

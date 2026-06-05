@@ -2,7 +2,7 @@ from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timezone
 from sqlalchemy import func, case as sql_case
 from sqlalchemy.orm import Session, joinedload
-from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback
+from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback, Case
 import hashlib
 import hmac
 import os
@@ -267,21 +267,31 @@ class CaseSimilarityCalculator:
         reference_case: CaseRecord,
         min_similarity: float = 50.0,
         limit: int = 50,
+        user_id: Optional[str] = None,
     ) -> List[Tuple[CaseRecord, float]]:
         """Find cases similar to reference case using initial DB-side filtering.
 
-        Fix: Exclusion filter now correctly references CaseRecord.id (the actual
-        primary key column) instead of the non-existent CaseRecord.case_id field.
-        Previously, the wrong field reference caused the reference case to remain
-        in similarity results, producing self-matching records.
+        Ownership scope: when user_id is provided, candidates are restricted to
+        case types and jurisdictions the user owns (from the Case table).
         """
-        # Reduce memory load by pre-filtering on common attributes.
-        # FIX: Use CaseRecord.id (primary key) — not case_id — to reliably
-        # exclude the reference case from results.
         query = db.query(CaseRecord).filter(
-            CaseRecord.id != reference_case.id,  # corrected from case_id
+            CaseRecord.id != reference_case.id,
             (CaseRecord.case_type == reference_case.case_type) | (CaseRecord.jurisdiction == reference_case.jurisdiction)
         )
+
+        # Scope candidates to user's case types / jurisdictions
+        if user_id is not None:
+            user_scope = (
+                db.query(Case.case_type, Case.jurisdiction)
+                .filter(Case.user_id == int(user_id))
+                .distinct()
+                .all()
+            )
+            if user_scope:
+                query = query.filter(
+                    CaseRecord.case_type.in_([row.case_type for row in user_scope]),
+                    CaseRecord.jurisdiction.in_([row.jurisdiction for row in user_scope]),
+                )
         
         # Limit the search space to the most recent/relevant 1000 cases to prevent OOM
         all_cases = query.limit(1000).all()
