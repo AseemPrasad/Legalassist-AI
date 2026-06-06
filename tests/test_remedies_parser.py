@@ -54,6 +54,39 @@ None
     assert "acquitted" in remedies["what_happened"].lower()
     # Now normalized to lowercase
     assert "no" in remedies["can_appeal"].lower()
+    assert remedies["appeal_details"] == "Not applicable"
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["_is_partial"] is True
+
+
+def test_parse_legacy_5section_extracts_appeal_fields_from_free_text():
+    """Test that legacy 5-section appeal details still backfill normalized fields"""
+    response = """
+1. What happened?
+Defendant lost.
+2. Can the loser appeal?
+Yes, appeal is available.
+3. Appeal details
+File in High Court within 45 days. Estimated cost: 5000-15000.
+4. First action
+Apply for certified copies.
+5. Timeline
+Within 45 days from judgment.
+"""
+
+    remedies = parse_remedies_response(response)
+
+    assert remedies is not None
+    assert remedies["can_appeal"] == "yes"
+    assert remedies["appeal_details"].startswith("File in High Court")
+    assert remedies["appeal_days"] == "45"
+    assert "High Court" in remedies["appeal_court"]
+    assert remedies["cost_estimate"] == "5000-15000"
+    assert remedies["cost"] == "5000-15000"
+    assert remedies["first_action"] == "Apply for certified copies."
+    assert remedies["deadline"] == "Within 45 days from judgment."
     assert remedies["_is_partial"] is True
 
 
@@ -104,6 +137,35 @@ Appeal
     assert "Supreme" in remedies["appeal_court"]
 
 
+@pytest.mark.parametrize("marker", ["]", "\u2010", "\u2011", "\u2012", "\u2013", "\u2014"])
+def test_parse_numbering_formats_with_variant_separators(marker):
+    """Test alternative numbering separators, including bracket and dash variants."""
+    response = f"""
+0{marker} What happened?
+Background text.
+1{marker} Can the loser appeal?
+Yes.
+2{marker} Appeal timeline
+30 days
+3{marker} Appeal court
+High Court
+4{marker} Cost estimate
+5000-10000
+5{marker} First action
+Appeal
+6{marker} Deadline
+30 days
+"""
+    remedies = parse_remedies_response(response)
+
+    assert remedies is not None
+    assert remedies["what_happened"] == "Background text."
+    assert remedies["can_appeal"] == "yes"
+    assert remedies["appeal_days"] == "30"
+    assert "High Court" in remedies["appeal_court"]
+    assert remedies["_is_partial"] is False
+
+
 def test_parse_3section_format():
     """Test 3-section format is treated as old format"""
     remedies = parse_remedies_response("This answer has no numbering and cannot be parsed")
@@ -111,8 +173,93 @@ def test_parse_3section_format():
 
 
 def test_parse_empty_response():
+    """Test response containing only whitespace characters"""
     remedies = parse_remedies_response("   ")
     assert isinstance(remedies, dict)
+    assert remedies["_is_partial"] is True
+    assert remedies.get("_warning") == "Empty response"
+    assert remedies["what_happened"] == ""
+    assert remedies["can_appeal"] == ""
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["cost"] == ""
+    assert remedies["first_action"] == ""
+    assert remedies["important_deadline"] == ""
+    assert remedies["deadline"] == ""
+    assert "confidence_score" in remedies
+
+
+def test_parse_null_response():
+    """Test response when None is explicitly passed"""
+    remedies = parse_remedies_response(None)
+    assert isinstance(remedies, dict)
+    assert remedies["_is_partial"] is True
+    assert remedies.get("_warning") == "Empty response"
+    assert remedies["what_happened"] == ""
+    assert remedies["can_appeal"] == ""
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["cost"] == ""
+    assert remedies["first_action"] == ""
+    assert remedies["important_deadline"] == ""
+    assert remedies["deadline"] == ""
+    assert "confidence_score" in remedies
+
+
+def test_parse_empty_string_response():
+    """Test response with a completely empty string"""
+    remedies = parse_remedies_response("")
+    assert isinstance(remedies, dict)
+    assert remedies["_is_partial"] is True
+    assert remedies.get("_warning") == "Empty response"
+    assert remedies["what_happened"] == ""
+    assert remedies["can_appeal"] == ""
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["cost"] == ""
+    assert remedies["first_action"] == ""
+    assert remedies["important_deadline"] == ""
+    assert remedies["deadline"] == ""
+    assert "confidence_score" in remedies
+
+
+def test_parse_newline_only_response():
+    """Test response containing only newline characters"""
+    remedies = parse_remedies_response("\n\n\n\r\n")
+    assert isinstance(remedies, dict)
+    assert remedies["_is_partial"] is True
+    assert remedies.get("_warning") == "Empty response"
+    assert remedies["what_happened"] == ""
+    assert remedies["can_appeal"] == ""
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["cost"] == ""
+    assert remedies["first_action"] == ""
+    assert remedies["important_deadline"] == ""
+    assert remedies["deadline"] == ""
+    assert "confidence_score" in remedies
+
+
+def test_parse_tab_only_response():
+    """Test response containing only tab characters"""
+    remedies = parse_remedies_response("\t\t\t")
+    assert isinstance(remedies, dict)
+    assert remedies["_is_partial"] is True
+    assert remedies.get("_warning") == "Empty response"
+    assert remedies["what_happened"] == ""
+    assert remedies["can_appeal"] == ""
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["cost"] == ""
+    assert remedies["first_action"] == ""
+    assert remedies["important_deadline"] == ""
+    assert remedies["deadline"] == ""
+    assert "confidence_score" in remedies
 
 
 def test_parse_only_unmapped_sections_returns_none():

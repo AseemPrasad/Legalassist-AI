@@ -39,7 +39,10 @@ COPY --from=builder /root/.local /root/.local
 ENV PATH=/root/.local/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    APP_ENV=production
+    APP_ENV=production \
+    DEBUG=0 \
+    TESTING=0 \
+    REQUIRE_HTTPS=1
 
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser
