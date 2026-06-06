@@ -394,3 +394,65 @@ def validate_query_string(query_string: str, max_length: int = 2048) -> None:
     if len(query_string) > max_length:
         logger.warning("query_string_exceeds_limit", length=len(query_string), max_length=max_length)
         raise ValidationError(detail=f"Query string too long ({len(query_string)} chars, max {max_length})")
+
+
+def validate_upload_file_path(file_path: str, allowed_root: Optional[str] = None) -> str:
+    """Validate and canonicalize a file path so it stays within the upload jail.
+
+    This prevents path traversal attacks where a crafted ``file_path`` value
+    (e.g. ``../../etc/passwd``) passed through the Celery task queue could
+    cause the worker to read arbitrary files outside the upload directory.
+
+    Parameters
+    ----------
+    file_path:
+        The raw path string received from the task arguments.
+    allowed_root:
+        The directory that the resolved path must be a descendant of.
+        Defaults to the configured ``UPLOAD_TEMP_DIR``.
+
+    Returns
+    -------
+    str
+        The canonicalized absolute path, guaranteed to be inside *allowed_root*.
+
+    Raises
+    ------
+    ValidationError
+        If the resolved path escapes *allowed_root* or the path is empty.
+    """
+    if not file_path or not file_path.strip():
+        raise ValidationError(detail="file_path must not be empty.")
+
+    if allowed_root is None:
+        # Import lazily to avoid circular imports at module load time.
+        try:
+            from api.config import get_settings as _get_settings
+            _settings = _get_settings()
+            allowed_root = _settings.UPLOAD_TEMP_DIR
+        except Exception:
+            import tempfile
+            allowed_root = tempfile.gettempdir()
+
+    try:
+        resolved = Path(file_path).resolve()
+        jail = Path(allowed_root).resolve()
+    except Exception as exc:
+        raise ValidationError(detail=f"Invalid file_path: {exc}") from exc
+
+    # Path.is_relative_to() is Python 3.9+; use str prefix check for 3.8 compat.
+    try:
+        resolved.relative_to(jail)
+    except ValueError:
+        logger.warning(
+            "path_traversal_attempt_blocked",
+            file_path=file_path,
+            resolved=str(resolved),
+            jail=str(jail),
+        )
+        raise ValidationError(
+            detail="file_path must be within the upload directory.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return str(resolved)

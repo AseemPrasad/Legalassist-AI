@@ -15,8 +15,9 @@ import base64
 import hashlib
 import os
 import secrets
+import datetime as dt
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Any
 import json
 from base64 import b64encode, b64decode
 
@@ -55,6 +56,46 @@ class EncryptedPayload:
     def to_json(self) -> str:
         import json
         return json.dumps(self.to_dict())
+
+
+@dataclass
+class WrappedMasterKeyEnvelope:
+    wrapped_master_key: str
+    kms_key_id: str
+    version: int = 2
+    rotated_at: Optional[str] = None
+    previous_kms_key_id: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        data = {
+            "version": self.version,
+            "wrapped_master_key": self.wrapped_master_key,
+            "kms_key_id": self.kms_key_id,
+        }
+        if self.rotated_at is not None:
+            data["rotated_at"] = self.rotated_at
+        if self.previous_kms_key_id is not None:
+            data["previous_kms_key_id"] = self.previous_kms_key_id
+        return data
+
+    @classmethod
+    def from_value(cls, value: Any, default_kms_key_id: Optional[str] = None) -> "WrappedMasterKeyEnvelope":
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            return cls(wrapped_master_key=value, kms_key_id=default_kms_key_id or "legacy", version=1)
+        if isinstance(value, dict):
+            wrapped_master_key = value.get("wrapped_master_key") or value.get("wrapped") or value.get("ct") or value.get("ciphertext")
+            if not wrapped_master_key:
+                raise ValueError("Wrapped master key entry is missing ciphertext")
+            return cls(
+                wrapped_master_key=wrapped_master_key,
+                kms_key_id=value.get("kms_key_id") or default_kms_key_id or "legacy",
+                version=int(value.get("version", value.get("v", 2))),
+                rotated_at=value.get("rotated_at"),
+                previous_kms_key_id=value.get("previous_kms_key_id"),
+            )
+        raise TypeError(f"Unsupported wrapped master key entry type: {type(value)!r}")
 
 
 def derive_key(passphrase: str, salt: bytes) -> bytes:
@@ -151,8 +192,69 @@ def wrap_master_key_with_kms(master_key_b64: str, kms: KMSProvider) -> str:
 
 def unwrap_master_key_with_kms(wrapped_b64: str, kms: KMSProvider) -> str:
     """Unwrap a master key via KMS and return base64-encoded master key."""
-    raw = kms.unwrap(wrapped_b64)
+    envelope = WrappedMasterKeyEnvelope.from_value(wrapped_b64, getattr(kms, "key_id", None))
+    raw = kms.unwrap(envelope.wrapped_master_key)
     return b64encode(raw).decode("ascii")
+
+
+def _kms_key_id(kms: KMSProvider) -> str:
+    return getattr(kms, "key_id", None) or kms.__class__.__name__
+
+
+def _append_rotation_audit(
+    *,
+    action: str,
+    outcome: str,
+    resource_id: str,
+    changes: dict,
+    metadata: Optional[dict] = None,
+) -> None:
+    try:
+        from db.immutable_audit_log import append_audit_entry
+    except Exception:
+        return
+
+    try:
+        append_audit_entry(
+            event_type="e2ee.key_rotation",
+            action=action,
+            resource_type="e2ee_master_key_manifest",
+            resource_id=resource_id,
+            outcome=outcome,
+            changes=changes,
+            metadata=metadata or {},
+        )
+    except Exception:
+        return
+
+
+def verify_wrapped_master_keys(manifest_path: str, kms: KMSProvider) -> dict:
+    """Verify that a manifest can be decrypted with the supplied KMS."""
+    if not os.path.exists(manifest_path):
+        raise FileNotFoundError(manifest_path)
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    report = {
+        "manifest_path": manifest_path,
+        "kms_key_id": _kms_key_id(kms),
+        "total": 0,
+        "decryptable": 0,
+        "failed": [],
+    }
+
+    for entry_id, value in manifest.items():
+        report["total"] += 1
+        try:
+            envelope = WrappedMasterKeyEnvelope.from_value(value, getattr(kms, "key_id", None))
+            kms.unwrap(envelope.wrapped_master_key)
+            report["decryptable"] += 1
+        except Exception as exc:
+            report["failed"].append({"entry_id": entry_id, "error": str(exc)})
+
+    report["valid"] = report["total"] == report["decryptable"]
+    return report
 
 
 def rotate_wrapped_master_keys(manifest_path: str, old_kms: KMSProvider, new_kms: KMSProvider) -> None:
@@ -172,15 +274,76 @@ def rotate_wrapped_master_keys(manifest_path: str, old_kms: KMSProvider, new_kms
         json.dump(manifest, f, indent=2)
 
     rotated = {}
+    rotation_time = dt.datetime.now(dt.timezone.utc).isoformat()
+    old_key_id = _kms_key_id(old_kms)
+    new_key_id = _kms_key_id(new_kms)
+    rotated_count = 0
+    failed_entries = []
     for key_id, wrapped in manifest.items():
-        # unwrap with old KMS then re-wrap with new KMS
         try:
-            master_b64 = unwrap_master_key_with_kms(wrapped, old_kms)
+            envelope = WrappedMasterKeyEnvelope.from_value(wrapped, old_key_id)
+            master_b64 = unwrap_master_key_with_kms(envelope, old_kms)
             new_wrapped = wrap_master_key_with_kms(master_b64, new_kms)
-            rotated[key_id] = new_wrapped
-        except Exception:
-            # leave original entry if unwrap fails and continue
+            rotated[key_id] = WrappedMasterKeyEnvelope(
+                wrapped_master_key=new_wrapped,
+                kms_key_id=new_key_id,
+                previous_kms_key_id=envelope.kms_key_id,
+                rotated_at=rotation_time,
+                version=max(2, envelope.version),
+            ).to_dict()
+            rotated_count += 1
+            _append_rotation_audit(
+                action="rotate_master_key",
+                outcome="success",
+                resource_id=str(key_id),
+                changes={
+                    "old_kms_key_id": envelope.kms_key_id,
+                    "new_kms_key_id": new_key_id,
+                    "manifest_entry_version": rotated[key_id]["version"],
+                },
+                metadata={"manifest_path": manifest_path},
+            )
+        except Exception as exc:
             rotated[key_id] = wrapped
+            failed_entries.append({"entry_id": key_id, "error": str(exc)})
+            _append_rotation_audit(
+                action="rotate_master_key",
+                outcome="failed",
+                resource_id=str(key_id),
+                changes={"error": str(exc), "old_kms_key_id": old_key_id, "new_kms_key_id": new_key_id},
+                metadata={"manifest_path": manifest_path},
+            )
 
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(rotated, f, indent=2)
+
+    verification = verify_wrapped_master_keys(manifest_path, new_kms)
+    if not verification["valid"]:
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        _append_rotation_audit(
+            action="rotate_master_key",
+            outcome="verification_failed",
+            resource_id=os.path.basename(manifest_path),
+            changes={
+                "rotated_count": rotated_count,
+                "failed_entries": failed_entries,
+                "verification": verification,
+            },
+            metadata={"manifest_path": manifest_path},
+        )
+        raise ValueError(f"E2EE rotation verification failed: {verification}")
+
+    _append_rotation_audit(
+        action="rotate_master_key",
+        outcome="verified",
+        resource_id=os.path.basename(manifest_path),
+        changes={
+            "rotated_count": rotated_count,
+            "failed_entries": failed_entries,
+            "verification": verification,
+            "old_kms_key_id": old_key_id,
+            "new_kms_key_id": new_key_id,
+        },
+        metadata={"manifest_path": manifest_path},
+    )

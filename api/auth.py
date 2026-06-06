@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 
 from api.config import get_settings
-from database import SessionLocal, is_token_revoked
+from database import SessionLocal, get_user_by_email
 
 # Import canonical JWT utilities from shared module
 from api.jwt_auth import (
@@ -237,25 +237,31 @@ async def get_current_user(
     if token and not token.startswith("key_"):
         try:
             payload = verify_token(token)
-        except TokenExpiredError:
-            raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="TOKEN_EXPIRED", message="Token has expired")
-        except InvalidTokenError:
-            raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_TOKEN", message="Invalid token")
+            user_id = payload.get("sub")
+            email = payload.get("email")
+            role = payload.get("role", "user")
 
-        user_id = payload.get("sub")
-        token_email = payload.get("email")
+            if not user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid token payload"
+                )
 
-        if not user_id:
-            raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_TOKEN_PAYLOAD", message="Invalid token payload")
+            # Validate the user exists in the database.
+            db = SessionLocal()
+            try:
+                user = get_user_by_email(db, email) if email else None
+                if not user or str(user.id) != user_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="User account not found"
+                    )
+            finally:
+                db.close()
 
-        db = SessionLocal()
-        try:
-            user = db.query(User).filter(User.id == int(user_id)).first()
-            if not user:
-                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="USER_NOT_FOUND", message="User not found")
-            return CurrentUser(user.id, user.email, "admin" if getattr(user, "is_admin", False) else "user")
-        finally:
-            db.close()
+            return CurrentUser(user_id, email, role)
+        except HTTPException:
+            raise
     
     # Try API Key from header — look up explicitly from authoritative store.
     if http_auth:
@@ -265,17 +271,34 @@ async def get_current_user(
         from database import SessionLocal
         db = SessionLocal()
         try:
-            # Query hashed record matching criteria
-            # key_record = db.query(APIKeyModel)...
-            # Verify via hash_api_key(api_key, key_record.key_salt)
-            pass
-        finally:
-            db.close()
-            
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key"
-        )
+            payload = verify_token(api_key)
+            user_id = payload.get("sub")
+            email = payload.get("email", "api@example.com")
+            role = payload.get("role", "user")
+
+            if not user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid API key payload"
+                )
+
+            # Validate the user exists in the database — prevents access via
+            # orphaned tokens (e.g. dev-mode placeholders or tokens whose
+            # backing user account was deleted while the token remained valid).
+            db = SessionLocal()
+            try:
+                user = get_user_by_email(db, email) if email else None
+                if not user or str(user.id) != user_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="User account not found"
+                    )
+            finally:
+                db.close()
+
+            return CurrentUser(user_id, email, role)
+        except HTTPException:
+            raise
     
     # Try X-API-Key header
     

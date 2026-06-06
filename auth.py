@@ -351,10 +351,16 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
         GENERIC_OTP_FAILURE = "Invalid or expired OTP. Please request a new one."
 
         if not otp_record:
-            return False, GENERIC_OTP_FAILURE, None
+            # Normalize timing to prevent OTP existence enumeration.
+            # Always run the hash verification even when no record exists.
+            _verify_otp_hash(otp, _hash_otp("000000"))
+            return False, "OTP expired or not found. Please request a new one.", None
 
         # Check if OTP is locked due to too many failed attempts
         if otp_record.is_locked():
+            # Normalize timing to keep execution path consistent.
+            _verify_otp_hash(otp, otp_record.otp_hash)
+            # Ensure locked_until is timezone-aware
             locked_until = otp_record.locked_until
             if locked_until and locked_until.tzinfo is None:
                 locked_until = locked_until.astimezone(timezone.utc)

@@ -8,6 +8,7 @@ import os
 import base64
 from abc import ABC, abstractmethod
 from typing import Optional
+import hashlib
 
 
 class KMSProvider(ABC):
@@ -41,6 +42,7 @@ class LocalFileKMS(KMSProvider):
             raise ValueError("Root key file must contain 32 raw bytes base64-encoded")
         self._root = raw
         self._aesgcm = AESGCM(self._root)
+        self.key_id = hashlib.sha256(self._root).hexdigest()[:16]
 
     def _iv(self):
         import secrets
