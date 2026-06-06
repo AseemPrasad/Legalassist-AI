@@ -337,6 +337,31 @@ def record_otp_failed_attempt(
         return True
     return False
 
+    password_hash = Column(
+        String(255), 
+        nullable=True
+    )
+
+    # -------------------------------------------------------------------------
+    # ORM Relationships
+    # -------------------------------------------------------------------------
+    # We define bidirectional relationships with other core entities here.
+    # The `cascade="all, delete-orphan"` parameter is crucial for maintaining
+    # referential integrity and preventing orphaned records in the database
+    # if a user account is deleted (e.g., for GDPR compliance).
+    # -------------------------------------------------------------------------
+    
+    cases = relationship(
+        "Case", 
+        back_populates="user", 
+        cascade="all, delete-orphan"
+    )
+    
+    preferences = relationship(
+        "UserPreference", 
+        back_populates="user", 
+        cascade="all, delete-orphan"
+    )
 
 def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
     """Reset the failed-attempt counter and any lockout on successful verification.

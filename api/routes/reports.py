@@ -25,7 +25,7 @@ from api.auth import get_current_user, CurrentUser
 from celery_app import generate_report_task
 from report_service import get_report_by_id
 import structlog
-from datetime import datetime
+from datetime import datetime, timezone
 
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 logger = structlog.get_logger(__name__)
@@ -151,7 +151,7 @@ async def generate_report(
         status="pending",
         report_type=request.report_type,
         format=request.format,
-        created_at=db_report.created_at
+        created_at=datetime.now(timezone.utc)
     )
 
 
@@ -181,9 +181,9 @@ async def get_report_status(
         status=report["status"],
         report_type="comprehensive",
         format="pdf",
-        download_url=report["download_url"],
-        created_at=datetime.utcnow(),
-        completed_at=datetime.utcnow() if report["status"] == "completed" else None,
+        download_url=f"/api/v1/reports/{report_id}/download" if status_info["status"] == "completed" else None,
+        created_at=datetime.now(timezone.utc),
+        completed_at=datetime.now(timezone.utc) if status_info["status"] == "completed" else None
     )
 
 
@@ -224,25 +224,11 @@ async def download_report(
         file_path=str(file_path)
     )
 
-    # Audit logging is a non-critical observability concern.
-    # A transient failure (DB unavailable, pending migration, etc.) must
-    # never prevent the user from receiving a file that already exists on
-    # disk.  We catch all exceptions, record full diagnostic context so
-    # on-call engineers can investigate, then continue with delivery.
-    try:
-        _record_download_audit(
-            user_id=current_user.user_id,
-            report_id=report_id,
-            file_name=file_path.name,
-            file_size_bytes=file_path.stat().st_size,
-        )
-    except Exception as audit_exc:  # noqa: BLE001
-        logger.warning(
-            "audit_log_failed_for_report_download",
-            report_id=report_id,
-            user_id=current_user.user_id,
-            error=str(audit_exc),
-            exc_info=True,
+    file_path = matches[0]
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report file not found",
         )
 
     return FileResponse(

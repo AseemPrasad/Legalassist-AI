@@ -7,6 +7,7 @@ import json
 import logging
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
+from sqlalchemy import func
 
 from sqlalchemy.orm import Session
 
@@ -380,13 +381,14 @@ class KnowledgeGraphBuilder:
             
             # Count issues with most arguments
             issue_arg_counts = {}
-            issues = db.query(CaseIssue).all()
-            for issue in issues:
-                arg_count = db.query(CaseArgument).filter(
-                    CaseArgument.issue_id == issue.id
-                ).count()
-                if arg_count > 0:
-                    issue_arg_counts[issue.issue_name] = arg_count
+            arg_counts = db.query(
+                CaseIssue.issue_name,
+                func.count(CaseArgument.id).label("arg_count")
+            ).join(
+                CaseArgument, CaseArgument.issue_id == CaseIssue.id
+            ).group_by(CaseIssue.id, CaseIssue.issue_name).all()
+            for row in arg_counts:
+                issue_arg_counts[row.issue_name] = row.arg_count
             
             return {
                 "total_issues": total_issues,

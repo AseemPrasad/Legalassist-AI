@@ -3,6 +3,7 @@ Deadline Endpoints
 GET /api/v1/deadlines/upcoming - Get user's upcoming deadlines
 GET /api/v1/deadlines/{deadline_id} - Get deadline details
 POST /api/v1/deadlines - Create new deadline
+PUT /api/v1/deadlines/{deadline_id} - Update deadline
 """
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from api.models import DeadlineResponse, UpcomingDeadlinesResponse
@@ -224,10 +225,11 @@ async def update_deadline(
     due_date: datetime = None,
     deadline_type: str = None,
     priority: str = None,
+    description: str = None,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db_rls)
+    db: Session = Depends(get_db),
 ) -> DeadlineResponse:
-    """Update a deadline"""
+    """Update a deadline and persist changes to the database."""
 
     logger.info(
         "Updating deadline",
@@ -252,19 +254,12 @@ async def update_deadline(
         created_at=updated_deadline.created_at
     )
 
+    db.commit()
+    db.refresh(deadline)
 
-@router.post(
-    "/{deadline_id}/reopen",
-    response_model=DeadlineResponse,
-    summary="Reopen a deadline"
-)
-async def reopen_deadline(
-    deadline_id: str,
-    current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db_rls)
-) -> DeadlineResponse:
-    """Reopen a completed deadline to active status with validation and audit trail"""
-    
+    now = datetime.now(timezone.utc)
+    days_until = (deadline.deadline_date - now).days
+
     logger.info(
         "Reopening deadline",
         deadline_id=deadline_id,
@@ -278,7 +273,7 @@ async def reopen_deadline(
         status=_derive_deadline_status(due),
         reminder_enabled=True,
         reminder_days=7,
-        created_at=updated_deadline.created_at
+        created_at=deadline.created_at,
     )
 
 

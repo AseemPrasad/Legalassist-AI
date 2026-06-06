@@ -1,44 +1,50 @@
 import hashlib
 import logging
-import re
-from typing import Dict, List, Optional
+from typing import List, Optional, Dict
 import chromadb
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
 
 LOGGER = logging.getLogger(__name__)
 
 
-def get_judgment_hash(text: str) -> str:
-    """Generate an MD5 hash of judgment text to uniquely identify it."""
-    if not text:
-        return ""
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
+class _LazyImports:
+    """Deferred imports for optional embedding dependencies."""
+    HuggingFaceEmbeddings = None
+    RecursiveCharacterTextSplitter = None
+    Chroma = None
+
+    @classmethod
+    def load(cls) -> None:
+        if cls.HuggingFaceEmbeddings is not None:
+            return
+        try:
+            from langchain_community.embeddings import HuggingFaceEmbeddings as HFE
+            from langchain.text_splitter import RecursiveCharacterTextSplitter as RCTS
+            from langchain_community.vectorstores import Chroma as Ch
+        except ImportError as exc:
+            raise ImportError(
+                "The 'langchain-community' and 'langchain' packages are required for RAG. "
+                "Install them with: pip install langchain langchain-community"
+            ) from exc
+        cls.HuggingFaceEmbeddings = HFE
+        cls.RecursiveCharacterTextSplitter = RCTS
+        cls.Chroma = Ch
 
 
 class LegalRAG:
     def __init__(self, embedding_model_name: str = "all-MiniLM-L6-v2"):
         """Initialize the RAG engine with a specific embedding model."""
         LOGGER.info(f"Initializing LegalRAG with embedding model: {embedding_model_name}")
+        _LazyImports.load()
         try:
-            self.embeddings = HuggingFaceEmbeddings(model_name=embedding_model_name)
+            self.embeddings = _LazyImports.HuggingFaceEmbeddings(model_name=embedding_model_name)
         except Exception as e:
             LOGGER.error(f"Failed to load embedding model: {e}")
             raise
-            
+
         self.vector_store = None
-        # Section header pattern covers the most common legal document structures.
-        self.section_header_pattern = re.compile(
-            r"^(section\s+\d+[\w().:-]*|article\s+\d+[\w().:-]*"
-            r"|chapter\s+\d+[\w().:-]*|clause\s+\d+[\w().:-]*)",
-            re.IGNORECASE,
-        )
-        # chunk_size=1400 keeps every primary split below the 1800-char safety
-        # ceiling enforced in _split_into_section_chunks.
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1400,
-            chunk_overlap=180,
+        self.text_splitter = _LazyImports.RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
             separators=["\n\n", "\n", ".", " ", ""]
         )
         # Hard-cap slice width used as the final fallback when text_splitter
@@ -187,55 +193,15 @@ class LegalRAG:
             LOGGER.info("Chunking document text...")
             chunks = self._split_into_section_chunks(text)
             LOGGER.info(f"Split document into {len(chunks)} chunks.")
-
-            self._stored_text = text
-
-            # Build per-chunk metadata for provenance (source hash, chunk index, char offsets)
-            source_hash = get_judgment_hash(text)
-            metadatas = []
-            offset = 0
-            for idx, chunk in enumerate(chunks):
-                start = text.find(chunk, offset)
-                if start == -1:
-                    start = offset
-                end = start + len(chunk)
-                offset = end
-                metadatas.append({
-                    "source_hash": source_hash,
-                    "chunk_index": idx,
-                    "start_char": start,
-                    "end_char": end,
-                    "excerpt": chunk[:240].strip(),
-                })
-
-            # Prefer Chroma if available, otherwise fallback to local sharded vector store
-            if Chroma is not None and chromadb is not None:
-                chroma_client = chromadb.EphemeralClient()
-                self.vector_store = Chroma.from_texts(
-                    texts=chunks,
-                    embedding=self.embeddings,
-                    metadatas=metadatas,
-                    client=chroma_client,
-                    collection_name="judgment_chat",
-                )
-            else:
-                # Local fallback: use ShardedVectorStore and attach the embedder for query
-                num_shards = int(getattr(Config, "VECTOR_SHARDS", 4))
-                # determine embedding dimension from produced vectors
-                vectors = self.embeddings.embed_documents(chunks)
-                emb_dim = len(vectors[0]) if vectors and len(vectors[0]) > 0 else int(getattr(Config, "EMBEDDING_DIMENSION", 1536))
-                vs = ShardedVectorStore(num_shards=num_shards, dimension=emb_dim)
-                items = []
-                for idx, vec in enumerate(vectors):
-                    # use chunk index as id for provenance; metadata carries source_hash
-                    cid = idx + 1
-                    items.append((cid, vec))
-                    vs.set_metadata(cid, metadatas[idx])
-
-                vs.add_batch(items)
-                # attach embedder for similarity queries
-                vs.embedder = self.embeddings
-                self.vector_store = vs
+            
+            # Create vector store in memory using EphemeralClient
+            chroma_client = chromadb.EphemeralClient()
+            self.vector_store = _LazyImports.Chroma.from_texts(
+                texts=chunks,
+                embedding=self.embeddings,
+                client=chroma_client,
+                collection_name="judgment_chat"
+            )
             LOGGER.info("Successfully initialized vector store.")
             return True
         except Exception as e:

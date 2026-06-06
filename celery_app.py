@@ -21,10 +21,6 @@ import hashlib
 import os
 import uuid
 import structlog
-import json
-import re
-import time
-import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import io
@@ -923,11 +919,13 @@ def extract_document_text_task(
         )
 
         result = {
-            "user_id": user_id,
-            "document_id": document_id,
-            "extracted_text": extracted_text,
-            "text_length": len(extracted_text),
-            "stage": "text_extraction_complete",
+            "report_id": report_id,
+            "format": generated.format,
+            "file_path": str(generated.file_path),
+            "file_name": generated.file_name,
+            "mime_type": generated.mime_type,
+            "file_size_bytes": generated.file_size_bytes,
+            "generated_at": datetime.now(timezone.utc).isoformat()
         }
         _persist_pipeline_state(document_id, user_id, "text_extraction_complete", result)
         return result
