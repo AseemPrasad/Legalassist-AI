@@ -15,6 +15,64 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# ── Helper functions for fuzzy / search-based text comparison ──────────────
+
+def _normalize_text(text: Optional[str]) -> str:
+    """Normalize text by lowercasing and stripping whitespace."""
+    if not text:
+        return ""
+    return text.strip().lower()
+
+
+def _summary_overlap(text1: Optional[str], text2: Optional[str]) -> float:
+    """Token-level Jaccard similarity between two free-form text fields.
+
+    Treats each whitespace-separated token as a feature and returns
+    the fraction of shared tokens.  This replaces exact string equality
+    with search-based retrieval for free-form legal arguments.
+    """
+    if not text1 or not text2:
+        return 0.0
+    tokens1 = set(_normalize_text(text1).split())
+    tokens2 = set(_normalize_text(text2).split())
+    if not tokens1 or not tokens2:
+        return 0.0
+    intersection = tokens1 & tokens2
+    union = tokens1 | tokens2
+    return len(intersection) / len(union)
+
+
+_cost_range_re = re.compile(r"(\d[\d,.]*)")
+
+
+def _parse_cost_value(cost_str: Optional[str]) -> Optional[float]:
+    """Extract a numeric cost value from a free-form cost string."""
+    if not cost_str:
+        return None
+    match = _cost_range_re.search(cost_str)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", ""))
+    except (ValueError, TypeError):
+        return None
+
+
+def _confidence_from_samples(sample_count: int, min_samples: int = 5) -> float:
+    """Return a confidence score (0..1) based on sample size.
+
+    Fewer than *min_samples* yields low confidence; 50+ samples
+    approaches 1.0.  Mirrors the function referenced (but never
+    defined) across the analytics engine.
+    """
+    if sample_count >= 50:
+        return 1.0
+    if sample_count < min_samples:
+        return 0.0
+    # Smooth ramp from 0 → 1 between min_samples and 50
+    return (sample_count - min_samples) / (50 - min_samples)
+
+
 class PandasAnalyticsProcessor:
     """
     Advanced analytics engine utilizing Pandas for complex data transformations.
