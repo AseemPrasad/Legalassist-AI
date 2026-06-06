@@ -100,6 +100,14 @@ def render_page():
     st.markdown("---")
 
     language = st.selectbox(ui["language_label"], LANGUAGES, key="judgment_language")
+
+    # Trigger a full rerender when the language changes so all UI text,
+    # labels, and prompts are immediately displayed in the selected language.
+    # Without this rerun, current_language (read above) still holds the
+    # previous value for the rest of the render pass.
+    if language != current_language:
+        st.rerun()
+
     ui = get_localized_ui_text(language, client)
     
     input_method = st.radio(
