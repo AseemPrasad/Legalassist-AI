@@ -19,73 +19,62 @@ from sqlalchemy.orm import Query
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# MODULE-LEVEL HELPERS
-# =============================================================================
+# ── Helper functions for fuzzy / search-based text comparison ──────────────
 
-def _normalize_text(text: Optional[str]) -> Optional[str]:
-    """Helper to normalize text to lowercase and strip whitespace for query comparisons"""
-    if text is None:
-        return None
-    if not isinstance(text, str):
-        text = str(text)
+def _normalize_text(text: Optional[str]) -> str:
+    """Normalize text by lowercasing and stripping whitespace."""
+    if not text:
+        return ""
     return text.strip().lower()
 
 
-def _summary_overlap(summary1: Optional[str], summary2: Optional[str]) -> float:
-    """Calculate overlap score between two summaries (0.0 to 1.0) using word Jaccard similarity"""
-    if not summary1 or not summary2:
+def _summary_overlap(text1: Optional[str], text2: Optional[str]) -> float:
+    """Token-level Jaccard similarity between two free-form text fields.
+
+    Treats each whitespace-separated token as a feature and returns
+    the fraction of shared tokens.  This replaces exact string equality
+    with search-based retrieval for free-form legal arguments.
+    """
+    if not text1 or not text2:
         return 0.0
-    
-    words1 = set(re.findall(r'\w+', summary1.lower()))
-    words2 = set(re.findall(r'\w+', summary2.lower()))
-    
-    if not words1 or not words2:
+    tokens1 = set(_normalize_text(text1).split())
+    tokens2 = set(_normalize_text(text2).split())
+    if not tokens1 or not tokens2:
         return 0.0
-        
-    stop_words = {
-        'the', 'a', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
-        'an', 'is', 'are', 'was', 'were', 'be', 'been', 'this', 'that', 'these', 'those',
-        'it', 'its', 'he', 'she', 'they', 'we', 'i', 'you'
-    }
-    
-    words1 = words1 - stop_words
-    words2 = words2 - stop_words
-    
-    if not words1 or not words2:
-        return 0.0
-        
-    intersection = words1.intersection(words2)
-    union = words1.union(words2)
-    
+    intersection = tokens1 & tokens2
+    union = tokens1 | tokens2
     return len(intersection) / len(union)
 
 
+_cost_range_re = re.compile(r"(\d[\d,.]*)")
+
+
 def _parse_cost_value(cost_str: Optional[str]) -> Optional[float]:
-    """Parse numeric cost value from a string (e.g., '₹12,000 - ₹18,000' or '15000')"""
+    """Extract a numeric cost value from a free-form cost string."""
     if not cost_str:
         return None
-    
-    cleaned = cost_str.replace("₹", "").replace(",", "").strip()
-    numbers = re.findall(r'\d+(?:\.\d+)?', cleaned)
-    if not numbers:
+    match = _cost_range_re.search(cost_str)
+    if not match:
         return None
-        
-    if len(numbers) >= 2:
-        return (float(numbers[0]) + float(numbers[1])) / 2.0
-    return float(numbers[0])
+    try:
+        return float(match.group(1).replace(",", ""))
+    except (ValueError, TypeError):
+        return None
 
 
-def _confidence_from_samples(sample_count: int) -> str:
-    """Determine confidence level ('high', 'medium', 'low', 'very_low') based on sample size"""
+def _confidence_from_samples(sample_count: int, min_samples: int = 5) -> float:
+    """Return a confidence score (0..1) based on sample size.
+
+    Fewer than *min_samples* yields low confidence; 50+ samples
+    approaches 1.0.  Mirrors the function referenced (but never
+    defined) across the analytics engine.
+    """
     if sample_count >= 50:
-        return "high"
-    elif sample_count >= 20:
-        return "medium"
-    elif sample_count >= 10:
-        return "low"
-    else:
-        return "very_low"
+        return 1.0
+    if sample_count < min_samples:
+        return 0.0
+    # Smooth ramp from 0 → 1 between min_samples and 50
+    return (sample_count - min_samples) / (50 - min_samples)
 
 
 class PandasAnalyticsProcessor:
