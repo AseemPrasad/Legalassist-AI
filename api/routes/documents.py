@@ -123,12 +123,12 @@ async def analyze_document(
     if request.text:
         validate_text_input(request.text, max_length=ValidationConfig.MAX_TEXT_LENGTH)
 
-    # SSRF validation: block private/internal IPs for file_url
-    if request.file_url:
-        validate_file_url(request.file_url)
-
-    # Path traversal prevention: canonicalize and restrict file_path
-    safe_path = validate_file_path(request.file_path) if request.file_path else None
+    # Validate file_path is within the upload jail before passing to the worker.
+    # This is defence-in-depth: the worker also validates, but catching it here
+    # returns a clean 400 to the caller rather than a task failure.
+    if request.file_path:
+        from api.validation import validate_upload_file_path
+        request.file_path = validate_upload_file_path(request.file_path)
     
     # Ownership verification: the user must own an Attachment record for this path
     if safe_path:
