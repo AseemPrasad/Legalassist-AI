@@ -60,27 +60,7 @@ def verify_token(token: str) -> Dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token"
         )
-
-
-# ============================================================================
-# API Key Management
-# ============================================================================
-
-class APIKey:
-    """API Key model"""
-    def __init__(self, key_id: str, name: str, key_hash: str, created_at: datetime, 
-                 expires_at: Optional[datetime] = None):
-        self.key_id = key_id
-        self.name = name
-        self.key_hash = key_hash
-        self.created_at = created_at
-        self.expires_at = expires_at
-    
-    def is_valid(self) -> bool:
-        """Check if API key is valid"""
-        if self.expires_at and datetime.utcnow() > self.expires_at:
-            return False
-        return True
+from api.models import APIKey
 
 
 def generate_api_key() -> str:

@@ -38,6 +38,22 @@ class APIKeyResponse(BaseModel):
     expires_at: Optional[datetime]
 
 
+class APIKey:
+    """API Key data model (non-Pydantic, used internally by auth logic)."""
+    def __init__(self, key_id: str, name: str, key_hash: str, created_at: datetime,
+                 expires_at: Optional[datetime] = None):
+        self.key_id = key_id
+        self.name = name
+        self.key_hash = key_hash
+        self.created_at = created_at
+        self.expires_at = expires_at
+
+    def is_valid(self) -> bool:
+        if self.expires_at and datetime.utcnow() > self.expires_at:
+            return False
+        return True
+
+
 # ============================================================================
 # Document Analysis Models
 # ============================================================================
