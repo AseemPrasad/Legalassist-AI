@@ -87,6 +87,8 @@ from db.models import (
     CaseArgument,
     KnowledgeGraphEdge,
     PrecedentMatch,
+    CaseNote,
+    CaseNoteVersion,
 )
 from db.crud.notifications import (
     create_case_deadline,
@@ -96,6 +98,16 @@ from db.crud.notifications import (
     get_notification_history,
     reserve_notification,
     update_notification_result,
+)
+from db.case_service import (
+    save_case_note_draft,
+    publish_case_note,
+    get_case_note_history,
+)
+from db.otp_service import (
+    revoke_token,
+    cleanup_expired_revoked_tokens,
+    is_token_revoked,
 )
 from db.crud.comments import (
     create_case_comment,
@@ -184,11 +196,14 @@ __all__ = [
     "create_timeline_event",
     "create_attachment",
     "get_attachments_for_case",
-    "create_case_comment",
-    "get_case_comments",
-    "upsert_case_presence",
-    "get_case_presence",
+    "revoke_token",
+    "cleanup_expired_revoked_tokens",
+    "is_token_revoked",
+    "CaseNote",
+    "CaseNoteVersion",
     "save_case_note_draft",
+    "publish_case_note",
+    "get_case_note_history",
 ]
 
 
@@ -688,6 +703,16 @@ def get_cases_by_criteria(
             query = query.filter(getattr(CaseRecord, key) == value)
 
     return query.order_by(CaseRecord.created_at.desc()).limit(limit).all()
+
+
+def _escape_like_pattern(value: str) -> str:
+    """Escape SQL LIKE wildcard characters in a user-supplied string.
+
+    Both ``%`` and ``_`` are prefixed with the escape character (``\\``) so
+    they are treated as literals rather than wildcards when used in a LIKE
+    expression with ``escape='\\'``.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def submit_user_feedback(

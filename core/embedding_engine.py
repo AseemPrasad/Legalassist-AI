@@ -8,6 +8,7 @@ import logging
 from typing import List, Optional, Dict, Any, Tuple
 import numpy as np
 from datetime import datetime, timezone
+from threading import RLock
 
 import openai
 from sqlalchemy.orm import Session
@@ -322,10 +323,18 @@ def get_embedding_engine(
 
 # Default singleton vector store for the application
 _vector_store: Optional[ShardedVectorStore] = None
+_vector_store_lock = RLock()
 
 
 def get_vector_store(num_shards: int = 4, dimension: int = 1536) -> ShardedVectorStore:
     global _vector_store
-    if _vector_store is None:
-        _vector_store = ShardedVectorStore(num_shards=num_shards, dimension=dimension)
-    return _vector_store
+    requested_shards = max(1, int(num_shards))
+    requested_dimension = int(dimension)
+    with _vector_store_lock:
+        if (
+            _vector_store is None
+            or _vector_store.num_shards != requested_shards
+            or _vector_store.dimension != requested_dimension
+        ):
+            _vector_store = ShardedVectorStore(num_shards=requested_shards, dimension=requested_dimension)
+        return _vector_store

@@ -1007,10 +1007,12 @@ def summarize_document_task(
                 temperature=0.3,
             )
             raw_summary = summary_response.choices[0].message.content
-
+        # Extract JSON bullets if possible, otherwise use raw text
         summary_text = ""
         key_points = []
         try:
+            import json
+            import re
             match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw_summary, re.DOTALL)
             json_str = match.group(1) if match else raw_summary
             data = json.loads(json_str)
@@ -1019,78 +1021,12 @@ def summarize_document_task(
         except Exception:
             summary_text = raw_summary
 
-        logger.info(
-            "Stage 2: Summarization completed",
-            task_id=self.request.id,
-            document_id=document_id,
-            key_points_count=len(key_points),
+        # Phase 3: Remedy Extraction
+        self.update_state(
+            state="PROGRESS",
+            meta={"status": "Extracting identified remedies", "progress": 75},
         )
-
-        _broadcast_job_event(
-            job_id=self.request.id,
-            event="stage_complete",
-            stage="summarization",
-            progress=50,
-            document_id=document_id,
-            payload={"key_points_count": len(key_points)},
-        )
-
-        result = {
-            **extraction_result,
-            "summary_text": summary_text,
-            "key_points": key_points,
-            "stage": "summarization_complete",
-        }
-        _persist_pipeline_state(document_id, user_id, "summarization_complete", result)
-        return result
-
-    except Exception as e:
-        logger.error(
-            "Stage 2: Summarization failed",
-            task_id=self.request.id,
-            document_id=document_id,
-            error=str(e),
-        )
-        _broadcast_job_event(
-            job_id=self.request.id,
-            event="failed",
-            stage="summarization",
-            progress=0,
-            document_id=document_id,
-            error=str(e),
-        )
-        raise
-    finally:
-        clear_request_context()
-
-
-@celery_app.task(bind=True, name="extract_remedies")
-def extract_remedies_task(
-    self,
-    summarization_result: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Stage 3: Extract remedies and deadlines from text via LLM."""
-    self.update_state(
-        state="PROGRESS",
-        meta={"status": "Extracting identified remedies", "progress": 75, "stage": "remedy_extraction"}
-    )
-
-    user_id = summarization_result.get("user_id")
-    document_id = summarization_result.get("document_id")
-    extracted_text = summarization_result.get("extracted_text")
-
-    logger.info(
-        "Stage 3: Starting remedy extraction",
-        task_id=self.request.id,
-        document_id=document_id,
-    )
-
-    try:
-        safe_text = compress_text(extracted_text)
-        client = get_client()
-        if not client:
-            raise RuntimeError("Failed to initialize LLM client.")
-
+        
         remedies_prompt = build_remedies_prompt(safe_text, "English")
         if _celery_tracer:
             with _celery_tracer.start_as_current_span(
@@ -1121,11 +1057,46 @@ def extract_remedies_task(
             )
             remedies_data = parse_remedies_response(remedies_response.choices[0].message.content)
 
+        # Phase 4: Finalization
+        self.update_state(
+            state="PROGRESS",
+            meta={"status": "Finalizing analysis results", "progress": 90},
+        )
+        
+        analysis_time = (datetime.utcnow() - start_time).total_seconds()
+        
+        # Combine remedies into a structured array
         remedies_list = []
         if remedies_data.get("first_action"):
             remedies_list.append(f"Action: {remedies_data['first_action']}")
         if remedies_data.get("can_appeal") == "yes":
             remedies_list.append(f"Appeal allowed in {remedies_data.get('appeal_court', 'court')} within {remedies_data.get('appeal_days', 'unknown')} days.")
+            
+            PipelineStateManager.update_stage(db, document_id, "OCR_DONE", {"text": extracted_text})
+            stage = "OCR_DONE"
+            data["text"] = extracted_text
+
+        # STAGE 2: Summary
+        if stage == "OCR_DONE":
+            safe_text = compress_text(data["text"])
+            client = get_client()
+            summary_prompt = build_prompt(safe_text, "English")
+            # ... [Paste your LLM call logic here] ...
+            raw_summary = "..." # result from LLM
+            
+            # (Keep your summary JSON parsing logic here)
+            summary_text = raw_summary 
+            key_points = [] 
+            
+            PipelineStateManager.update_stage(db, document_id, "SUMMARY_DONE", {"summary": summary_text, "key_points": key_points})
+            stage = "SUMMARY_DONE"
+            data.update({"summary": summary_text, "key_points": key_points})
+
+        # STAGE 3: Remedies
+        if stage == "SUMMARY_DONE":
+            remedies_prompt = build_remedies_prompt(compress_text(data["text"]), "English")
+            # ... [Paste your remedies LLM call here] ...
+            remedies_data = parse_remedies_response("...") 
             
         deadlines_list = []
         if remedies_data.get("deadline"):

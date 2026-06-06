@@ -1,8 +1,34 @@
 import os
-import logging
-import secrets
-from pathlib import Path
-from dotenv import load_dotenv
+from typing import Optional, Dict, Any
+from pydantic_settings import BaseSettings
+import re
+
+SENSITIVE_CONFIG_KEYS: set = {
+    "JWT_SECRET_KEY",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "CELERY_BROKER_URL",
+    "CELERY_RESULT_BACKEND",
+    "API_KEY_HEADER",
+    "LLM_MODEL",
+}
+
+
+def _should_mask(key: str, value: Any) -> bool:
+    """Return True if *value* should be masked in diagnostic output.
+
+    Numeric values (ports, timeouts, limits, counts) are preserved since
+    they carry operational context.  Only string values whose key matches
+    a known sensitive pattern are masked.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int | float):
+        return False
+    key_lower = key.lower()
+    if any(kw in key_lower for kw in ("_url", "_header")):
+        return True
+    return key in SENSITIVE_CONFIG_KEYS
 
 # Initialize logging for config phase
 logger = logging.getLogger(__name__)
@@ -338,6 +364,22 @@ class ConfigSanitizer:
     class Config:
         env_file = ".env"
         case_sensitive = True
+
+    def sanitized_dict(self) -> Dict[str, Any]:
+        """Return settings as a dict with sensitive values masked.
+
+        Numeric operational values (ports, timeouts, limits, counts) are
+        preserved so they remain useful for diagnostics.  Only string values
+        from sensitive keys are replaced with a placeholder.
+        """
+        raw = self.model_dump()
+        result: Dict[str, Any] = {}
+        for key, value in raw.items():
+            if _should_mask(key, value):
+                result[key] = "***"
+            else:
+                result[key] = value
+        return result
 
 
 def get_settings() -> APISettings:

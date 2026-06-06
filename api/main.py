@@ -20,8 +20,8 @@ from api.middleware import (
     logging_middleware,
     request_size_limit_middleware,
     security_headers_middleware,
+    idempotency_middleware,
 )
-from api.idempotency_middleware import idempotency_middleware
 from observability.integration import initialize_observability_for_environment
 from observability.instrumentation import get_metrics
 from api.errors import register_structured_error_handlers
@@ -32,9 +32,6 @@ from api.validation import (
 )
 from database import init_db
 
-# Import routes
-from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech, document_verification, argument_strength, deadline_engine, efiling, notifications as notifications_webhooks, anonymized_cases
-
 logger = structlog.get_logger(__name__)
 
 
@@ -42,8 +39,30 @@ logger = structlog.get_logger(__name__)
 # FastAPI Application
 # ============================================================================
 
+
 def create_app() -> FastAPI:
     """Create FastAPI application"""
+
+    # Import routers lazily so importing this module stays side-effect free.
+    from api.routes import (
+
+        documents,
+        cases,
+        reports,
+        analytics,
+        deadlines,
+        auth,
+        health,
+        case_search,
+        speech,
+        document_verification,
+        argument_strength,
+        deadline_engine,
+        efiling,
+        notifications as notifications_webhooks,
+        anonymized_cases,
+    )
+
 
     settings = get_settings()
 

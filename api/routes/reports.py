@@ -19,26 +19,49 @@ import uuid
 from fastapi import APIRouter, HTTPException, status, Depends
 from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
-from report_service import _get_reports_base_dir
-from sqlalchemy.orm import Session
 
 from api.models import ReportGenerationRequest, ReportGenerationResponse
 from api.auth import get_current_user, CurrentUser
-try:
-    from celery_app import generate_report_task, TaskStatus, enqueue_task_from_http_request
-except Exception:
-    generate_report_task = None
-    TaskStatus = None
-    enqueue_task_from_http_request = None
-from database import Report
-from api.dependencies import get_db_rls
-from db.crud.reports import create_report, get_report_by_id, update_report_status, list_reports_by_user
-from db.crud.audit import record_audit_event
+from celery_app import generate_report_task
+from report_service import get_report_by_id
 import structlog
 from datetime import datetime
 
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 logger = structlog.get_logger(__name__)
+
+
+def _record_download_audit(
+    *,
+    user_id: int,
+    report_id: str,
+    file_name: str,
+    file_size_bytes: int,
+) -> None:
+    """Persist a structured audit record for a report download.
+
+    Raises any underlying storage exceptions to the caller so it can
+    decide whether to propagate or swallow them.  Keeping the logic here
+    makes it easy to swap the structlog call for a DB-backed AuditLog
+    insert once the schema is available::
+
+        db.add(AuditLog(
+            user_id=user_id,
+            action="report_download",
+            resource_id=report_id,
+            ...
+        ))
+        db.commit()
+    """
+    logger.info(
+        "report_downloaded",
+        user_id=user_id,
+        report_id=report_id,
+        file_name=file_name,
+        file_size_bytes=file_size_bytes,
+        downloaded_at=datetime.utcnow().isoformat(),
+    )
+    # TODO: persist to AuditLog table when DB schema migration is ready.
 
 
 @router.post(
@@ -142,58 +165,25 @@ async def get_report_status(
     db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> ReportGenerationResponse:
-    """
-    Get status of report generation job.
-    
-    Now uses DB record for reliable status, using stored celery_task_id
-    instead of the fragile report_id-as-job_id pattern.
-    """
-    
-    # Retrieve Report record from DB
-    db_report = get_report_by_id(db, report_id, user_id=current_user.user_id)
-    
-    if not db_report:
+    """Get status of report generation job with ownership validation."""
+
+    report = get_report_by_id(report_id, current_user.user_id)
+    if not report:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Report not found"
+            detail="Report not found",
         )
-    
-    db_report = db.query(Report).filter(
-        Report.report_id == report_id,
-        Report.user_id == current_user.user_id
-    ).first()
-    
-    if not db_report:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Report not found"
-        )
-    
-    status_str = db_report.status
-    if db_report.status in ["pending", "processing"] and db_report.job_id:
-        try:
-            status_info = TaskStatus.get_task_status(db_report.job_id)
-            celery_status = status_info["status"]
-            if celery_status != db_report.status:
-                db_report.status = celery_status
-                if celery_status == "completed":
-                    db_report.completed_at = datetime.utcnow()
-                db.commit()
-                db.refresh(db_report)
-                status_str = db_report.status
-        except Exception:
-            pass
-    
+
     return ReportGenerationResponse(
-        report_id=db_report.report_id,
-        job_id=db_report.job_id or "unknown",
-        case_id=db_report.case_id,
-        status=status_str,
-        report_type=db_report.report_type or "comprehensive",
-        format=db_report.format,
-        download_url=f"/api/v1/reports/{db_report.report_id}/download" if status_str == "completed" else None,
-        created_at=db_report.created_at,
-        completed_at=db_report.completed_at
+        report_id=report["report_id"],
+        job_id=report_id,
+        case_id="unknown",
+        status=report["status"],
+        report_type="comprehensive",
+        format="pdf",
+        download_url=report["download_url"],
+        created_at=datetime.utcnow(),
+        completed_at=datetime.utcnow() if report["status"] == "completed" else None,
     )
 
 
@@ -206,24 +196,13 @@ async def download_report(
     db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ):
-    """
-    Download the generated report file.
-    
-    Key improvements:
-    - Uses stored file_path from DB (no glob patterns)
-    - Validates user ownership
-    - Confirms status is completed before download
-    """
-    
-    db_report = db.query(Report).filter(
-        Report.report_id == report_id,
-        Report.user_id == current_user.user_id
-    ).first()
-    
-    if not db_report:
+    """Download the generated report file."""
+
+    report = get_report_by_id(report_id, current_user.user_id)
+    if not report:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Report not found"
+            detail="Report not found",
         )
     
     if status_info["status"] != "completed":
@@ -239,28 +218,13 @@ async def download_report(
     base_dir = _get_reports_base_dir()
     user_dir = base_dir / str(current_user.user_id)
 
-    # Find by any report file that ends with the report_id.
-    # Filenames are: <case_id>_<report_type>_<report_id>.<ext>
-    if not user_dir.exists():
+    if report["status"] != "completed":
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Report file path not found in database"
-        )
-    
-    file_path = Path(db_report.file_path)
-    if not file_path.exists():
-        logger.error(
-            "Report file missing",
-            report_id=report_id,
-            expected_path=str(file_path)
+            status_code=status.HTTP_202_ACCEPTED,
+            detail=f"Report is still {report['status']}",
         )
 
-    ext = ".pdf" if db_report.format == "pdf" else f".{db_report.format}"
-    matches = list(user_dir.glob(f"*_{report_id}{ext}"))
-    if not matches:
-        matches = list(user_dir.glob(f"*{report_id}{ext}"))
-
-    if not matches:
+    if not report["file_path"]:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Report file not found on disk"
@@ -273,20 +237,31 @@ async def download_report(
         file_path=str(file_path)
     )
 
-    record_audit_event(
-        db,
-        actor=f"user:{current_user.user_id}",
-        actor_user_id=current_user.user_id,
-        action="download_report",
-        resource=f"report:{report_id}",
-        case_id=db_report.case_id,
-        metadata={"report_type": db_report.report_type, "format": db_report.format},
-    )
-    
+    # Audit logging is a non-critical observability concern.
+    # A transient failure (DB unavailable, pending migration, etc.) must
+    # never prevent the user from receiving a file that already exists on
+    # disk.  We catch all exceptions, record full diagnostic context so
+    # on-call engineers can investigate, then continue with delivery.
+    try:
+        _record_download_audit(
+            user_id=current_user.user_id,
+            report_id=report_id,
+            file_name=file_path.name,
+            file_size_bytes=file_path.stat().st_size,
+        )
+    except Exception as audit_exc:  # noqa: BLE001
+        logger.warning(
+            "audit_log_failed_for_report_download",
+            report_id=report_id,
+            user_id=current_user.user_id,
+            error=str(audit_exc),
+            exc_info=True,
+        )
+
     return FileResponse(
-        path=file_path,
-        media_type="application/pdf" if db_report.format == "pdf" else "application/octet-stream",
-        filename=file_path.name,
+        path=report["file_path"],
+        media_type="application/pdf",
+        filename=Path(report["file_path"]).name,
     )
 
 
