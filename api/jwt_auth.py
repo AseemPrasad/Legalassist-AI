@@ -6,6 +6,7 @@ implementation and avoid security drift.
 """
 from __future__ import annotations
 
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List
@@ -34,17 +35,81 @@ settings = get_settings()
 
 _REVOCATION_CACHE: dict[str, tuple[bool, float]] = {}
 _REVOCATION_CACHE_TTL: int = 300  # 5 minutes
+_REVOCATION_CACHE_MAX_SIZE: int = 10000
+_REVOCATION_CACHE_LOCK = threading.Lock()
+# In-flight events prevent query storms: when multiple threads miss the cache
+# for the same JTI simultaneously, only one performs the DB lookup; the others
+# wait on the event and read the result from the cache once it is populated.
+_REVOCATION_INFLIGHT: dict[str, threading.Event] = {}
+
+
+def _prune_revocation_cache() -> None:
+    """Remove expired entries and trim cache to max size.
+
+    Caller must hold _REVOCATION_CACHE_LOCK.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    cutoff = now - _REVOCATION_CACHE_TTL
+
+    expired = [k for k, (_, ts) in _REVOCATION_CACHE.items() if ts < cutoff]
+    for k in expired:
+        del _REVOCATION_CACHE[k]
+
+    if len(_REVOCATION_CACHE) > _REVOCATION_CACHE_MAX_SIZE:
+        sorted_keys = sorted(
+            _REVOCATION_CACHE.keys(),
+            key=lambda k: _REVOCATION_CACHE[k][1],
+        )
+        excess = len(_REVOCATION_CACHE) - _REVOCATION_CACHE_MAX_SIZE
+        for k in sorted_keys[:excess]:
+            del _REVOCATION_CACHE[k]
 
 
 def _is_token_revoked_cached(jti: str) -> bool:
     now = datetime.now(timezone.utc).timestamp()
-    cached = _REVOCATION_CACHE.get(jti)
-    if cached is not None and (now - cached[1]) < _REVOCATION_CACHE_TTL:
-        return cached[0]
-    from database import SessionLocal, is_token_revoked
-    with SessionLocal() as db:
-        revoked = is_token_revoked(db, jti)
-        _REVOCATION_CACHE[jti] = (revoked, now)
+
+    # Fast path: cache hit under lock
+    with _REVOCATION_CACHE_LOCK:
+        cached = _REVOCATION_CACHE.get(jti)
+        if cached is not None and (now - cached[1]) < _REVOCATION_CACHE_TTL:
+            return cached[0]
+
+        # Cache miss — check whether another thread is already querying the DB
+        # for this JTI.  If so, wait for it; if not, claim the query ourselves.
+        if jti in _REVOCATION_INFLIGHT:
+            event = _REVOCATION_INFLIGHT[jti]
+            leader = False
+        else:
+            event = threading.Event()
+            _REVOCATION_INFLIGHT[jti] = event
+            leader = True
+
+    if not leader:
+        # Wait for the leader thread to finish, then read from the cache.
+        event.wait(timeout=5.0)
+        with _REVOCATION_CACHE_LOCK:
+            cached = _REVOCATION_CACHE.get(jti)
+            if cached is not None:
+                return cached[0]
+        # If the cache is still empty after waiting (leader failed), fall
+        # through to perform our own DB query as a safety net.
+
+    try:
+        from database import SessionLocal, is_token_revoked
+        with SessionLocal() as db:
+            revoked = is_token_revoked(db, jti)
+
+        now = datetime.now(timezone.utc).timestamp()
+        with _REVOCATION_CACHE_LOCK:
+            _REVOCATION_CACHE[jti] = (revoked, now)
+            if len(_REVOCATION_CACHE) > _REVOCATION_CACHE_MAX_SIZE:
+                _prune_revocation_cache()
+    finally:
+        if leader:
+            with _REVOCATION_CACHE_LOCK:
+                _REVOCATION_INFLIGHT.pop(jti, None)
+            event.set()
+
     return revoked
 
 
@@ -92,6 +157,8 @@ def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -
 
 
 def verify_token(token: str) -> Dict:
+    if not token or token.count(".") != 2:
+        raise InvalidTokenError("Invalid token: JWT must have exactly 3 dot-separated segments")
     try:
         payload = None
         last_error = None
@@ -131,14 +198,28 @@ def verify_token(token: str) -> Dict:
             if _is_token_revoked_cached(jti):
                 raise InvalidTokenError("Token has been revoked")
         return payload
+    except (TokenExpiredError, InvalidTokenError):
+        # Expected authentication failures — pass through to caller unchanged.
+        raise
     except jwt.ExpiredSignatureError:
         raise TokenExpiredError("Token has expired")
-    except jwt.InvalidIssuerError:
-        raise InvalidTokenError("Invalid token issuer")
-    except jwt.InvalidAudienceError:
-        raise InvalidTokenError("Invalid token audience")
-    except jwt.InvalidTokenError:
-        raise InvalidTokenError("Invalid token")
+    except jwt.InvalidIssuerError as exc:
+        raise InvalidTokenError("Invalid token issuer") from exc
+    except jwt.InvalidAudienceError as exc:
+        raise InvalidTokenError("Invalid token audience") from exc
+    except jwt.InvalidTokenError as exc:
+        raise InvalidTokenError(str(exc) or "Invalid token") from exc
+    except Exception as exc:
+        # Unexpected error (e.g. DB failure in revocation check, config error).
+        # Log with full detail so operators can diagnose; do NOT silently
+        # convert to a generic auth failure — that hides infrastructure problems.
+        logger.error(
+            "jwt_verify_token_unexpected_error",
+            error=type(exc).__name__,
+            detail=str(exc),
+            exc_info=True,
+        )
+        raise
 
 
 def revoke_jwt_token(token: str) -> bool:
@@ -146,16 +227,6 @@ def revoke_jwt_token(token: str) -> bool:
         return False
 
     try:
-        try:
-            unverified = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
-            jti = unverified.get("jti")
-            exp = unverified.get("exp")
-            if not jti or not exp:
-                return False
-        except jwt.PyJWTError as exc:
-            logger.warning("revoke_token_decode_failed", error=str(exc))
-            return False
-
         payload = None
         last_error = None
         for secret in _get_jwt_secrets_to_try():
@@ -195,5 +266,5 @@ def revoke_jwt_token(token: str) -> bool:
                 _REVOCATION_CACHE[jti] = (True, now)
         return True
     except Exception as exc:
-        logger.error("revoke_jwt_token_failed", error=str(exc))
+        logger.error("revoke_jwt_token_failed", error=type(exc).__name__)
         return False

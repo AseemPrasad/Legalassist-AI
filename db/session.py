@@ -1,5 +1,6 @@
 import datetime as dt
 import logging
+import os
 from contextlib import contextmanager
 from typing import Optional
 
@@ -24,9 +25,19 @@ engine_kwargs: dict = {}
 if _is_sqlite:
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 else:
-    engine_kwargs["pool_size"] = 20
-    engine_kwargs["max_overflow"] = 10
+    engine_kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "20"))
+    engine_kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+    engine_kwargs["pool_timeout"] = int(os.getenv("DB_POOL_TIMEOUT", "30"))
+    engine_kwargs["pool_recycle"] = int(os.getenv("DB_POOL_RECYCLE", "1800"))
 engine = create_engine(DATABASE_URL, **engine_kwargs)
+
+if _is_sqlite:
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_fk_pragma(db_connection, connection_record):
+        cursor = db_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.close()
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
 
 
@@ -53,6 +64,44 @@ def init_db():
             connection.execute(text("CREATE INDEX IF NOT EXISTS ix_notification_logs_status ON notification_logs (status)"))
     except Exception as exc:
         logger.warning("Failed to create notification_logs index", error=str(exc))
+
+    try:
+        with engine.begin() as connection:
+            if _is_sqlite:
+                cursor = connection.execute(text("PRAGMA table_info(user_preferences)"))
+                cols = [row[1] for row in cursor.fetchall()]
+            else:
+                cursor = connection.execute(text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name='user_preferences' AND column_name='reminder_thresholds'"
+                ))
+                cols = [row[0] for row in cursor.fetchall()]
+            
+            if "reminder_thresholds" not in cols:
+                logger.info("Adding column reminder_thresholds to user_preferences table")
+                connection.execute(text("ALTER TABLE user_preferences ADD COLUMN reminder_thresholds TEXT"))
+    except Exception as exc:
+        logger.warning("Failed to migrate user_preferences schema", error=str(exc))
+
+    try:
+        with engine.begin() as connection:
+            if _is_sqlite:
+                cursor = connection.execute(text("PRAGMA table_info(case_deadlines)"))
+                cols = [row[1] for row in cursor.fetchall()]
+            else:
+                cursor = connection.execute(text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name='case_deadlines' AND column_name='status'"
+                ))
+                cols = [row[0] for row in cursor.fetchall()]
+            
+            if "status" not in cols:
+                logger.info("Adding column status to case_deadlines table")
+                connection.execute(text("ALTER TABLE case_deadlines ADD COLUMN status VARCHAR(50) DEFAULT 'active'"))
+                # Migrate existing completed deadlines
+                connection.execute(text("UPDATE case_deadlines SET status = 'completed' WHERE is_completed = 1"))
+    except Exception as exc:
+        logger.warning("Failed to migrate case_deadlines schema", error=str(exc))
 
     if _is_sqlite or _is_postgres:
         try:
@@ -82,6 +131,10 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 

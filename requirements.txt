@@ -10,12 +10,12 @@ uvicorn>=0.22.0
 python-multipart>=0.0.6
 
 # --- Document Processing Pipeline ---
-pypdf
-pdfplumber
-pytesseract
-pdf2image
-Pillow
-fpdf2
+pypdf==6.12.1
+pdfplumber==0.11.9
+pytesseract==0.3.13
+pdf2image==1.17.0
+Pillow==12.2.0
+fpdf2==2.8.7
 python-magic>=0.4.27
 filetype>=1.2.0
 
@@ -190,9 +190,9 @@ XlsxWriter>=3.1.0
 cerberus>=1.3.4
 marshmallow-sqlalchemy>=0.29.0
 fastapi-users>=12.1.0
-fastapi-jwt-auth>=0.5.0
+# fastapi-jwt-auth>=0.5.0  # Conflicts with fastapi-users pyjwt requirements; not used in codebase
 httptools>=0.6.0
-uvloop>=0.17.0
+# uvloop>=0.17.0 # Not supported on Windows
 websockets>=11.0.0
 anyio>=3.7.0
 sniffio>=1.3.0

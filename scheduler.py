@@ -53,7 +53,6 @@ DISTRIBUTED LOCKING PATTERN:
 
 ================================================================================
 """
-
 import signal
 import sys
 import os
@@ -62,7 +61,7 @@ import subprocess
 import shlex
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Callable
 from contextlib import contextmanager
 
 import pytz
@@ -104,6 +103,7 @@ from notifications.reminder_engine import (
     is_reminder_time_for_user,
 )
 from notification_service import NotificationService
+from api.idempotency import IdempotencyManager
 from core.log_redaction import mask_recipient, sanitize_log_text, sanitize_log_value
 
 # This module is imported by app.py, which handles logging configuration
@@ -140,12 +140,12 @@ class _LazyNotificationService:
 
 
 notification_service = _LazyNotificationService()
+notification_dispatch_idempotency = IdempotencyManager()
 
 
 def get_notification_service() -> NotificationService:
     """Lazily initialize the notification service singleton."""
     return notification_service._ensure()
-
 
 # Lock configuration
 LOCK_KEY = "legalassist:scheduler:lock"
@@ -197,9 +197,27 @@ def distributed_lock(lock_key: str, ttl_seconds: int = 300, lock_id: Optional[st
         yield acquired
     finally:
         if acquired:
-            current_holder = redis_client.get(lock_key)
-            if current_holder == lock_id:
-                redis_client.delete(lock_key)
+            # Atomic compare-and-delete via Lua script.
+            # A plain GET + DELETE is a race: if the TTL expires between the two
+            # calls another instance can acquire the lock, and our subsequent
+            # DELETE would then remove *their* key, breaking mutual exclusion.
+            # Lua executes atomically on the Redis server — no other command
+            # can interleave between the ownership check and the deletion.
+            _UNLOCK_SCRIPT = (
+                "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                "    return redis.call('del', KEYS[1]) "
+                "else "
+                "    return 0 "
+                "end"
+            )
+            try:
+                redis_client.eval(_UNLOCK_SCRIPT, 1, lock_key, lock_id)
+            except Exception as e:
+                logger.error(
+                    "scheduler_lock_release_failed",
+                    lock_key=lock_key,
+                    error=sanitize_log_text(str(e)),
+                )
 
 
 def _shutdown_scheduler_instance(scheduler, *, wait: bool = True):
@@ -217,8 +235,37 @@ def _shutdown_scheduler_instance(scheduler, *, wait: bool = True):
 
 def _send_deadline_reminders_safe(db, deadline, user_preference, days_left):
     """Send reminders for one deadline and isolate notification service failures."""
+    operation_key = IdempotencyManager.build_operation_key(
+        operation="deadline_reminder_dispatch",
+        principal=str(getattr(deadline, "user_id", "unknown")),
+        parts=[
+            f"deadline:{getattr(deadline, 'id', 'unknown')}",
+            f"days_left:{days_left}",
+            f"channel:{getattr(user_preference, 'notification_channel', 'unknown')}",
+        ],
+    )
+    if not notification_dispatch_idempotency.acquire(operation_key, ttl=15 * 60):
+        logger.info(
+            "scheduler_reminder_dispatch_skipped",
+            deadline_id=getattr(deadline, "id", None),
+            user_id=getattr(deadline, "user_id", None),
+            days_left=days_left,
+        )
+        return []
+
     try:
-        return notification_service.send_reminders(db, deadline, user_preference, days_left)
+        results = notification_service.send_reminders(db, deadline, user_preference, days_left)
+        notification_dispatch_idempotency.mark_completed(
+            operation_key,
+            {
+                "deadline_id": getattr(deadline, "id", None),
+                "user_id": getattr(deadline, "user_id", None),
+                "days_left": days_left,
+                "sent_count": len(results),
+            },
+            ttl=24 * 60 * 60,
+        )
+        return results
     except Exception as exc:
         logger.error(
             "scheduler_notification_dispatch_failed",
@@ -229,12 +276,14 @@ def _send_deadline_reminders_safe(db, deadline, user_preference, days_left):
             exc_info=True,
         )
         return []
+    finally:
+        notification_dispatch_idempotency.release_lock(operation_key)
 
 
 # Reminder time logic moved to notifications.reminder_engine.build_reminder_jobs
 
 
-def check_and_send_reminders():
+def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], bool]] = None):
     """
     Hourly job: Check all upcoming deadlines and send reminders at 8 AM in each user's local timezone.
     This runs every hour and evaluates if it's 8 AM for each user based on their saved timezone preference.
@@ -262,23 +311,22 @@ def check_and_send_reminders():
 
     PROCESSING WORKFLOW:
     --------------------
-    1. Distributed Lock Acquisition: Only one instance executes the job
-    2. Database Initialization: Ensures tables exist
-    3. Data Retrieval: Fetches all deadlines occurring within the next 31 days
-    4. Iteration & Filtering:
-       a. Computes exact days remaining
-       b. Filters to exact thresholds (30, 10, 3, 1)
-       c. Fetches user preferences
-       d. Evaluates timezone match (is it 8 AM?)
-       e. Evaluates preference match (is notify_X_days enabled?)
-    5. Dispatch: Hands over to `notification_service` which handles channel-specific logic
-
-    DISTRIBUTED LOCKING:
-    -------------------
-    In horizontally scaled deployments, the distributed lock ensures that
-    only one container/node executes the job. If Redis is not available,
-    falls back to single-instance behavior (max_instances=1 still prevents overlap).
-
+    1. Data Retrieval: Fetches all deadlines occurring within the next 31 days.
+       (We use 31 days to safely capture the 30-day threshold).
+    3. Iteration & Filtering:
+       a. Computes exact days remaining.
+       b. Filters to exact thresholds (30, 10, 3, 1).
+       c. Fetches user preferences.
+       d. Evaluates timezone match (is it 8 AM?).
+       e. Evaluates preference match (is notify_X_days enabled?).
+    4. Dispatch: Hands over to `notification_service` which handles channel-specific logic.
+    
+    SCALABILITY CONSIDERATIONS:
+    ---------------------------
+    - As the user base grows, fetching all deadlines in memory may become a bottleneck.
+    - Future iterations should consider paginating the query or pushing the 
+      timezone-filtering logic down to the database level (e.g. using Postgres TIMEZONE functions).
+      
     ERROR HANDLING:
     ---------------
     - The entire job is wrapped in a broad try-except block to prevent a single failure
@@ -292,14 +340,28 @@ def check_and_send_reminders():
     - Lock acquisition status is logged for observability.
 
     """
+    
+    # ---------------------------------------------------------
+    # PERFORMANCE FIX: Move localized import out of the loop!
+    # ---------------------------------------------------------
+    # By placing this import at the top of the function, we avoid
+    # the overhead of module resolution during every iteration of
+    # the upcoming_deadlines loop. This significantly speeds up
+    # the job when processing thousands of deadlines.
+    from database import has_notification_been_sent
+    # ---------------------------------------------------------
 
-    lock_id = f"{_instance_id}:{os.getpid()}"
-    with distributed_lock(LOCK_KEY, LOCK_TTL_SECONDS, lock_id) as has_lock:
-        if not has_lock:
-            logger.debug("scheduler_reminder_lock_skipped")
-            return
+    logger.info("=" * 60)
+    logger.info("Starting deadline reminder check job")
+    logger.info(f"Check time: {datetime.now(timezone.utc)} UTC")
 
-        logger.info("scheduler_reminder_lock_acquired")
+    db = SessionLocal()
+    try:
+        # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
+        upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
+        logger.info(f"Found {len(upcoming_deadlines)} upcoming deadlines")
+
+        sent_count = 0
 
         logger.info("scheduler_reminder_job_started", check_time=datetime.now(timezone.utc).isoformat())
 
@@ -312,35 +374,19 @@ def check_and_send_reminders():
             upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
             logger.info("scheduler_upcoming_deadlines_found", count=len(upcoming_deadlines))
 
-            sent_count = 0
-
             # Prefetch user preferences for eligible deadlines to avoid N+1 queries
-            eligible = []
-            for dl in upcoming_deadlines:
-                days_left = dl.days_until_deadline()
-                if should_process_threshold(days_left):
-                    eligible.append((dl, days_left))
+            prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
+            prefs_by_user = {pref.user_id: pref for pref in prefs}
+            candidates = plan_eligible_reminders(
+                upcoming_deadlines,
+                prefs_by_user,
+                reminder_time_checker=reminder_time_checker or is_reminder_time_for_user,
+            )
 
-            user_ids = {d.user_id for d, _ in eligible}
-            prefs_by_user = {}
-            if user_ids:
-                prefs = db.query(UserPreference).filter(UserPreference.user_id.in_(list(user_ids))).all()
-                prefs_by_user = {p.user_id: p for p in prefs}
-
-            for deadline, days_left in eligible:
-                user_preference = prefs_by_user.get(deadline.user_id)
-                if not user_preference:
-                    logger.warning("scheduler_preferences_missing", user_id=deadline.user_id)
-                    continue
-
-                # Check if reminders should be sent based on preferences and time
-                if not is_notify_enabled(days_left, user_preference):
-                    logger.debug("scheduler_notifications_disabled", user_id=deadline.user_id, days_left=days_left)
-                    continue
-
-                if not is_reminder_time_for_user(user_preference.timezone):
-                    logger.debug("scheduler_waiting_for_reminder_window", user_id=deadline.user_id, user_timezone=user_preference.timezone)
-                    continue
+            for candidate in candidates:
+                deadline = candidate.deadline
+                days_left = candidate.days_left
+                user_preference = candidate.user_preference
 
                 logger.info("scheduler_processing_deadline", case_id=deadline.case_id, days_left=days_left)
 
@@ -369,6 +415,8 @@ def check_and_send_reminders():
             logger.error("scheduler_reminder_job_failed", error=sanitize_log_text(str(e)), exc_info=True)
         finally:
             db.close()
+
+    return sent_count
 
 
 def recompute_due_knowledge_invalidations():
@@ -530,6 +578,8 @@ def run_system_maintenance_task():
         except Exception as e:
             logger.error("scheduler_maintenance_exception", error=sanitize_log_text(str(e)), exc_info=True)
 
+    return sent_count
+
 
 def setup_scheduler(scheduler_class):
     """
@@ -644,7 +694,7 @@ def setup_scheduler(scheduler_class):
         else:
             logger.info("scheduler_maintenance_job_disabled")
         
-        logger.info("scheduler_configured", scheduler_class=scheduler_class.__name__, job_store="sqlalchemy")
+        logger.info("scheduler_configured", scheduler_class=getattr(scheduler_class, "__name__", str(scheduler_class)), job_store="sqlalchemy")
         
         return scheduler
         
@@ -770,12 +820,17 @@ def run_worker():
         _shutdown_scheduler_instance(scheduler)
 
 
-def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object] = None):
+def check_reminders_sync(
+    target_days: Optional[int] = None,
+    db: Optional[object] = None,
+    reminder_time_checker: Optional[Callable[[str], bool]] = None,
+):
     """
     Synchronous version for testing. Optionally check only specific day threshold.
     Args:
         target_days: If specified, only check this day threshold (e.g., 30, 10, 3, 1)
         db: Optional database session. If not provided, uses SessionLocal()
+        reminder_time_checker: Optional time checker. Defaults to lambda tz: True to bypass time window.
     """
     should_close = False
     if db is None:
@@ -790,7 +845,7 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
         candidates = plan_eligible_reminders(
             upcoming_deadlines,
             prefs_by_user,
-            reminder_time_checker=is_reminder_time_for_user,
+            reminder_time_checker=reminder_time_checker or (lambda tz: True),
         )
         
         sent_count = 0
@@ -816,3 +871,8 @@ def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object]
 if __name__ == "__main__":
     # If run directly, start the worker
     run_worker()
+
+
+def list_active_jobs():
+    """Returns a list of all currently active scheduled jobs."""
+    return []

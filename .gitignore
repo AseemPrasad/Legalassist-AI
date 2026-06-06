@@ -9,6 +9,17 @@ env/
 
 # Environment variables
 .env
+.env.production
+.env.local
+.env.*.local
+
+# Secrets
+.jwt_secret
+*.secret
+
+# Secret files — must never be committed
+.jwt_secret
+*.secret
 
 # Streamlit secrets
 .streamlit/secrets.toml
@@ -22,6 +33,13 @@ legalassist.db
 .vscode/
 .idea/
 
+# Backup files
+*.bak
+
+# Secrets
+.jwt_secret
+secrets/
+
 # Generic
 *.db
 *.log
@@ -30,6 +48,15 @@ htmlcov/
 requirements.txt
 requirements.in
 /.venv
-.exports/
 
-.jwt_secret
+# Test cache
+.pytest_cache/
+
+# Runtime / user-generated data
+attachments/
+scratch/
+artifacts/
+
+# OS
+.DS_Store
+Thumbs.db

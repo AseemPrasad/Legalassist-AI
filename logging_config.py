@@ -194,3 +194,18 @@ def configure_logging(
     
     # Configure structlog
     configure_structlog(level)
+
+
+def get_sensitive_data_redactor():
+    """
+    Returns a structlog processor that automatically redacts sensitive keys 
+    such as passwords, tokens, API keys, and private customer details 
+    from log records to prevent security leaks in compliance with GDPR.
+    """
+    sensitive_keys = {"password", "token", "secret", "authorization", "ssn", "credit_card", "key"}
+    def processor(logger, name, event_dict):
+        for key in list(event_dict.keys()):
+            if any(s in key.lower() for s in sensitive_keys):
+                event_dict[key] = "[REDACTED]"
+        return event_dict
+    return processor
