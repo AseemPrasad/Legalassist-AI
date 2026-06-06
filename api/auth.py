@@ -9,6 +9,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
 import secrets
 import hashlib
+from passlib.context import CryptContext
 
 from api.config import get_settings
 
@@ -16,6 +17,19 @@ from api.config import get_settings
 settings = get_settings()
 security = HTTPBearer()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+
+# Password hashing (canonical source for all password operations)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=14)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a plain password against a bcrypt hash."""
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def get_password_hash(password: str) -> str:
+    """Generate a bcrypt hash for a password with cost factor 14."""
+    return pwd_context.hash(password)
 
 
 # ============================================================================
