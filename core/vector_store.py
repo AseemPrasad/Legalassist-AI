@@ -7,6 +7,7 @@ Simple sharded vector store implementation.
 This is a lightweight implementation suitable for local testing and small scale; can be extended to use FAISS or cloud vector DBs.
 """
 from typing import List, Tuple, Dict, Any, Optional
+import asyncio
 import numpy as np
 import os
 from threading import Lock, RLock
@@ -16,6 +17,7 @@ import logging
 import tempfile
 from collections import OrderedDict
 import copy
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +93,36 @@ class ShardedVectorStore:
                         'metadatas': copy.deepcopy(shard_data.get('metadatas', {})),
                     }
             return self.num_shards, snapshot
+
+    def _search_single_shard(
+        self,
+        shard: int,
+        query_vec: np.ndarray,
+        top_k: int,
+        shard_data: Dict[str, Any],
+    ) -> List[Tuple[int, float]]:
+        lock = self._locks.get(shard)
+        if lock is None:
+            return []
+
+        with lock:
+            vectors = np.array(shard_data['vectors'], copy=True)
+            ids = list(shard_data['ids'])
+
+        if vectors.shape[0] == 0:
+            return []
+
+        query_norm = np.linalg.norm(query_vec)
+        norms = np.linalg.norm(vectors, axis=1) * query_norm
+        dots = vectors.dot(query_vec)
+        sims = np.zeros_like(dots)
+        nonzero = norms != 0
+        sims[nonzero] = dots[nonzero] / norms[nonzero]
+        sims = np.clip((sims + 1) / 2, 0.0, 1.0)
+
+        shard_top_k = min(top_k, len(ids))
+        idxs = np.argsort(-sims)[:shard_top_k]
+        return [(int(ids[idx]), float(sims[idx])) for idx in idxs]
 
     def _build_rebalanced_state(self, snapshot: Dict[int, Dict[str, Any]], target_num_shards: int) -> Dict[int, Dict[str, Any]]:
         target_num_shards = max(1, int(target_num_shards))
@@ -349,29 +381,40 @@ class ShardedVectorStore:
 
         with self._state_lock:
             current_num_shards = self.num_shards
-            shard_snapshot = self._shards
+            shard_snapshot = {shard: self._shards[shard] for shard in range(current_num_shards)}
 
-        shards_to_search = shard_ids if shard_ids is not None else list(range(current_num_shards))
-        results: List[Tuple[int, float]] = []
-        for shard in shards_to_search:
-            shard_data = shard_snapshot[shard]
-            vectors = shard_data['vectors']
-            ids = shard_data['ids']
-            if vectors.shape[0] == 0:
-                continue
-            # compute cosine similarity
-            norms = np.linalg.norm(vectors, axis=1) * np.linalg.norm(q)
-            dots = vectors.dot(q)
-            sims = np.zeros_like(dots)
-            nonzero = norms != 0
-            sims[nonzero] = dots[nonzero] / norms[nonzero]
-            # normalize -1..1 to 0..1
-            sims = np.clip((sims + 1) / 2, 0.0, 1.0)
-            # get top k in this shard
-            idxs = np.argsort(-sims)[:top_k]
-            for idx in idxs:
-                results.append((ids[idx], float(sims[idx])))
+        shards_to_search = [shard for shard in (shard_ids if shard_ids is not None else list(range(current_num_shards))) if shard in shard_snapshot]
+        if not shards_to_search:
+            return []
 
-        # merge and return top_k overall
-        results.sort(key=lambda x: x[1], reverse=True)
+        max_workers = min(len(shards_to_search), max(1, os.cpu_count() or 4))
+        shard_results: List[List[Tuple[int, float]]] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(self._search_single_shard, shard, q, top_k, shard_snapshot[shard]) for shard in shards_to_search]
+            for future in futures:
+                shard_results.append(future.result())
+
+        results: List[Tuple[int, float]] = [item for batch in shard_results for item in batch]
+        results.sort(key=lambda x: (-x[1], x[0]))
+        return results[:top_k]
+
+    async def search_async(self, query_vec: List[float], top_k: int = 10, shard_ids: Optional[List[int]] = None) -> List[Tuple[int, float]]:
+        """Async retrieval that fans shard work out concurrently."""
+        q = np.array(query_vec, dtype=np.float32)
+        if q.shape[0] != self.dimension:
+            raise ValueError("Query vector dimension mismatch")
+
+        with self._state_lock:
+            current_num_shards = self.num_shards
+            shard_snapshot = {shard: self._shards[shard] for shard in range(current_num_shards)}
+
+        shards_to_search = [shard for shard in (shard_ids if shard_ids is not None else list(range(current_num_shards))) if shard in shard_snapshot]
+        if not shards_to_search:
+            return []
+
+        loop = asyncio.get_running_loop()
+        tasks = [loop.run_in_executor(None, self._search_single_shard, shard, q, top_k, shard_snapshot[shard]) for shard in shards_to_search]
+        shard_results = await asyncio.gather(*tasks)
+        results: List[Tuple[int, float]] = [item for batch in shard_results for item in batch]
+        results.sort(key=lambda x: (-x[1], x[0]))
         return results[:top_k]

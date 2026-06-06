@@ -19,6 +19,7 @@ from typing import Optional
 
 from core.storage import safe_filename
 from pdf_exporter import generate_case_pdf
+from celery_app import TaskStatus
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,38 @@ def _get_format_meta(format: str) -> tuple[str, str]:
     if fmt == "docx":
         return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"
     raise ValueError(f"Unsupported format: {format}")
+
+
+def get_report_by_id(report_id: str, user_id: str) -> Optional[dict]:
+    """Look up a report by its ID and validate ownership.
+
+    Returns a dict with report metadata, or None if not found or not owned
+    by the given user.  Callers should use the returned dict throughout the
+    request lifecycle instead of issuing follow-up queries.
+    """
+    status_info = TaskStatus.get_task_status(report_id)
+    if status_info.get("status") == "unknown":
+        return None
+
+    base_dir = _get_reports_base_dir()
+    user_dir = base_dir / str(user_id)
+
+    if not user_dir.exists():
+        return None
+
+    matches = list(user_dir.glob(f"*_{report_id}.pdf"))
+    if not matches:
+        matches = list(user_dir.glob(f"*{report_id}.pdf"))
+
+    file_path = str(matches[0]) if matches else None
+
+    return {
+        "report_id": report_id,
+        "user_id": user_id,
+        "status": status_info["status"],
+        "file_path": file_path,
+        "download_url": f"/api/v1/reports/{report_id}/download" if status_info["status"] == "completed" else None,
+    }
 
 
 def generate_report(
