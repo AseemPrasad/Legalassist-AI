@@ -129,34 +129,47 @@ async def search_cases(
                 search_time_seconds=round(perf_counter() - start, 4),
             )
 
-    # Score candidates and apply threshold
-    scored = []
-    for c in candidates:
-        if c.id == reference_case.id:
-            continue
-        raw = CaseSimilarityCalculator.case_similarity_score(reference_case, c)
-        # raw is 0..100. normalize to 0..1
-        score01 = raw / 100.0
-        # Optional: slight boost for recency to match ranking requirement.
-        # (Cheap: based on created_at within last ~365 days)
-        try:
-            created_at = c.created_at
-            if created_at and created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-            recency_days = (datetime.now(timezone.utc) - created_at).days if created_at else 0
-            recency_boost = max(0.0, 0.05 - recency_days * 0.0002)  # up to +0.05
-        except Exception:
-            recency_boost = 0.0
-        feedback_boost = CaseSimilarityCalculator.get_feedback_adjustment(
-            db,
-            c,
-            user_id=current_user.user_id,
-            query_signature=query_signature,
-        )
-        score01 = min(1.0, score01 + recency_boost + feedback_boost)
+        # Score candidates and apply threshold
+        scored = []
+        for c in candidates:
+            if c.id == reference_case.id:
+                continue
+            raw = CaseSimilarityCalculator.case_similarity_score(reference_case, c)
+            # raw is 0..100. normalize to 0..1
+            score01 = raw / 100.0
+            # Optional: slight boost for recency to match ranking requirement.
+            # (Cheap: based on created_at within last ~365 days)
+            try:
+                created_at = c.created_at
+                if created_at and created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                recency_days = (datetime.now(timezone.utc) - created_at).days if created_at else 0
+                recency_boost = max(0.0, 0.05 - recency_days * 0.0002)  # up to +0.05
+            except (TypeError, ValueError, AttributeError):
+                recency_boost = 0.0
+            feedback_boost = CaseSimilarityCalculator.get_feedback_adjustment(
+                db,
+                c,
+                user_id=current_user.user_id,
+                query_signature=query_signature,
+            )
+            score01 = min(1.0, score01 + recency_boost + feedback_boost)
 
-        if score01 > min_similarity:
-            scored.append((c, score01))
+            if score01 > min_similarity:
+                scored.append((c, score01))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top = scored[: request.limit]
+
+        # Fetch appeal analytics for the returned set
+        result_ids = [c.id for c, _ in top]
+        outcome_rows = []
+        if result_ids:
+            outcome_rows = (
+                db.query(CaseOutcome)
+                .filter(CaseOutcome.case_id.in_(result_ids))
+                .all()
+            )
 
     scored.sort(key=lambda x: x[1], reverse=True)
     top = scored[: request.limit]
