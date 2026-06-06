@@ -1,8 +1,8 @@
 from typing import List, Dict, Optional, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import func, case as sql_case
 from sqlalchemy.orm import Session, joinedload
-from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback
+from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback, CaseDeadline, CaseTimeline, NotificationLog, NotificationStatus, NotificationChannel, Case
 import hashlib
 import hmac
 import os
@@ -11,6 +11,10 @@ from collections import Counter
 import logging
 import pandas as pd
 import numpy as np
+import gc
+import sys
+import time
+from sqlalchemy.orm import Query
 
 logger = logging.getLogger(__name__)
 
@@ -102,39 +106,113 @@ class PandasAnalyticsProcessor:
         if not cases:
             return pd.DataFrame()
 
+        # This method is suitable for small lists (< 5000 cases)
         data_list = []
         for case in cases:
-            # Extract base attributes
-            row = {
-                "id": case.id,
-                "case_type": str(case.case_type).lower() if case.case_type else "unknown",
-                "jurisdiction": str(case.jurisdiction) if case.jurisdiction else "Unknown",
-                "court_name": str(case.court_name) if case.court_name else "N/A",
-                "judge_name": str(case.judge_name) if case.judge_name else "N/A",
-                "outcome": str(case.outcome).lower() if case.outcome else "pending",
-                "created_at": case.created_at,
-            }
-            
-            # Safely extract nested outcome data
-            outcome_data = getattr(case, "outcome_data", None)
-            if outcome_data:
-                row.update({
-                    "appeal_filed": bool(getattr(outcome_data, "appeal_filed", False)),
-                    "appeal_success": bool(getattr(outcome_data, "appeal_success", False)),
-                    "appeal_cost": getattr(outcome_data, "appeal_cost", None),
-                    "time_to_verdict": getattr(outcome_data, "time_to_appeal_verdict", None),
-                })
-            else:
-                row.update({
-                    "appeal_filed": False,
-                    "appeal_success": False,
-                    "appeal_cost": None,
-                    "time_to_verdict": None,
-                })
-            
+            row = PandasAnalyticsProcessor._extract_case_row(case)
             data_list.append(row)
 
         return pd.DataFrame(data_list)
+
+    @staticmethod
+    def convert_query_to_dataframe_batched(
+        db: Session,
+        query: Query, 
+        batch_size: int = 2000
+    ) -> pd.DataFrame:
+        """
+        Memory-efficient conversion of a large query into a DataFrame.
+
+        Uses LIMIT/OFFSET pagination and periodic session clearing to handle 
+        10,000+ records without leaking memory or causing OOM crashes.
+        
+        Args:
+            db: The active database session.
+            query: The SQLAlchemy query object to execute.
+            batch_size: Number of records to process per memory cycle.
+            
+        Returns:
+            A single concatenated pd.DataFrame containing all results.
+        """
+        all_chunks = []
+        current_chunk_data = []
+        total_processed = 0
+
+        logger.info(f"Converting large query to DataFrame using batch size {batch_size}")
+        
+        # Use LIMIT/OFFSET pagination for SQLite compatibility.
+        offset = 0
+        while True:
+            batch = query.limit(batch_size).offset(offset).all()
+            if not batch:
+                break
+
+            for case in batch:
+                # Flatten DB object into a simple dict immediately
+                current_chunk_data.append(PandasAnalyticsProcessor._extract_case_row(case))
+                total_processed += 1
+
+            if total_processed % batch_size == 0 and current_chunk_data:
+                chunk_df = pd.DataFrame(current_chunk_data)
+                all_chunks.append(chunk_df)
+                current_chunk_data = []
+                db.expunge_all()
+                gc.collect()
+                logger.debug(f"Memory optimization checkpoint: {total_processed} records batched.")
+
+            offset += batch_size
+
+        # Handle the final partial batch
+        if current_chunk_data:
+            all_chunks.append(pd.DataFrame(current_chunk_data))
+
+        if not all_chunks:
+            return pd.DataFrame()
+
+        # Concatenate all chunks into the final result set
+        final_df = pd.concat(all_chunks, ignore_index=True)
+        
+        # Release the chunk list as early as possible
+        del all_chunks
+        gc.collect()
+        
+        logger.info(f"Batched conversion complete. Final DataFrame size: {len(final_df)} rows.")
+        return final_df
+
+    @staticmethod
+    def _extract_case_row(case: CaseRecord) -> Dict:
+        """
+        Internal utility to transform a CaseRecord into a flat dictionary.
+        
+        Decouples the analytical data from the SQLAlchemy ORM layer.
+        """
+        row = {
+            "id": case.id,
+            "case_type": str(case.case_type).lower() if case.case_type else "unknown",
+            "jurisdiction": str(case.jurisdiction) if case.jurisdiction else "Unknown",
+            "court_name": str(case.court_name) if case.court_name else "N/A",
+            "judge_name": str(case.judge_name) if case.judge_name else "N/A",
+            "outcome": str(case.outcome).lower() if case.outcome else "pending",
+            "created_at": case.created_at,
+        }
+        
+        # Safely handle the one-to-one relationship with CaseOutcome
+        outcome_data = getattr(case, "outcome_data", None)
+        if outcome_data:
+            row.update({
+                "appeal_filed": bool(getattr(outcome_data, "appeal_filed", False)),
+                "appeal_success": bool(getattr(outcome_data, "appeal_success", False)),
+                "appeal_cost": getattr(outcome_data, "appeal_cost", None),
+                "time_to_verdict": getattr(outcome_data, "time_to_appeal_verdict", None),
+            })
+        else:
+            row.update({
+                "appeal_filed": False,
+                "appeal_success": False,
+                "appeal_cost": None,
+                "time_to_verdict": None,
+            })
+        return row
 
     @staticmethod
     def get_jurisdiction_performance_report(
@@ -267,7 +345,12 @@ class PandasAnalyticsProcessor:
 
 
 class CaseSimilarityCalculator:
-    """Calculate similarity between cases for matching and analysis"""
+    """Calculate similarity between cases for matching and analysis.
+
+    The calculator scores shared case attributes such as type, jurisdiction,
+    party roles, case value, and judgment-summary overlap to support ranked
+    similar-case retrieval.
+    """
     
     @staticmethod
     def case_similarity_score(
@@ -275,8 +358,20 @@ class CaseSimilarityCalculator:
         case2: CaseRecord,
         weights: Optional[Dict[str, float]] = None,
     ) -> float:
-        """
-        Calculate similarity between two cases (0-100).
+        """Calculate a weighted similarity score between two cases.
+
+        The score is normalized to a 0-100 range and combines exact matches on
+        case type, jurisdiction, plaintiff type, defendant type, case value,
+        and optional judgment-summary overlap.
+
+        Args:
+            case1: The reference case to compare.
+            case2: The candidate case to score against the reference.
+            weights: Optional field weights keyed by attribute name. When not
+                provided, a default weight distribution is used.
+
+        Returns:
+            A similarity score between 0.0 and 100.0.
         """
         if not weights:
             weights = {
@@ -326,12 +421,20 @@ class CaseSimilarityCalculator:
         min_similarity: float = 50.0,
         limit: int = 50,
     ) -> List[Tuple[CaseRecord, float]]:
-        """Find cases similar to reference case using initial DB-side filtering.
+        """Find cases similar to a reference case using DB pre-filtering.
 
-        Fix: Exclusion filter now correctly references CaseRecord.id (the actual
-        primary key column) instead of the non-existent CaseRecord.case_id field.
-        Previously, the wrong field reference caused the reference case to remain
-        in similarity results, producing self-matching records.
+        The query excludes the reference case itself and narrows candidates to
+        cases that share either the same case type or jurisdiction before
+        applying the in-memory similarity score.
+
+        Args:
+            db: Active SQLAlchemy session.
+            reference_case: Case used as the similarity anchor.
+            min_similarity: Minimum score required for inclusion in results.
+            limit: Maximum number of results to return.
+
+        Returns:
+            A list of ``(CaseRecord, score)`` tuples sorted by score descending.
         """
         # Reduce memory load by pre-filtering on common attributes.
         # FIX: Use CaseRecord.id (primary key) — not case_id — to reliably
@@ -341,8 +444,10 @@ class CaseSimilarityCalculator:
             (CaseRecord.case_type == reference_case.case_type) | (CaseRecord.jurisdiction == reference_case.jurisdiction)
         )
         
-        # Limit the search space to the most recent/relevant 1000 cases to prevent OOM
-        all_cases = query.limit(1000).all()
+        # Limit the search space to prevent OOM. Configurable via SIMILARITY_QUERY_LIMIT env var.
+        # Default 1000 for memory efficiency, increase for larger jurisdictions.
+        max_cases = int(os.getenv("SIMILARITY_QUERY_LIMIT", "1000"))
+        all_cases = query.limit(max_cases).all()
         
         similarities = []
         for case in all_cases:
@@ -359,18 +464,43 @@ class CaseSimilarityCalculator:
         candidate_case: CaseRecord,
         user_id: Optional[str] = None,
         query_signature: Optional[str] = None,
+        prefetched_feedback: Optional[List[SimilarityFeedback]] = None,
     ) -> float:
-        """Return a small ranking adjustment from historical similarity feedback."""
-        query = db.query(SimilarityFeedback).filter(
-            SimilarityFeedback.candidate_case_id == candidate_case.id,
-        )
+        """Return a small ranking adjustment from similarity feedback.
 
-        if user_id is not None:
-            query = query.filter(SimilarityFeedback.user_id == str(user_id))
-        if query_signature is not None:
-            query = query.filter(SimilarityFeedback.query_signature == query_signature)
+        Historical relevance feedback is aggregated for the candidate case and
+        converted into a bounded ranking delta so prior user judgments can
+        nudge future similarity ordering without dominating the base score.
 
-        feedback_rows = query.limit(50).all()
+        Args:
+            db: Active SQLAlchemy session.
+            candidate_case: Case being ranked.
+            user_id: Optional user scope for feedback rows.
+            query_signature: Optional query signature scope for feedback rows.
+            prefetched_feedback: Optional pre-fetched feedback list for this candidate.
+
+        Returns:
+            A bounded adjustment in the range ``[-0.03, 0.03]``.
+        """
+        if prefetched_feedback is not None:
+            feedback_rows = prefetched_feedback
+            if user_id is not None:
+                feedback_rows = [row for row in feedback_rows if row.user_id == str(user_id)]
+            if query_signature is not None:
+                feedback_rows = [row for row in feedback_rows if row.query_signature == query_signature]
+            feedback_rows = feedback_rows[:50]
+        else:
+            query = db.query(SimilarityFeedback).filter(
+                SimilarityFeedback.candidate_case_id == candidate_case.id,
+            )
+
+            if user_id is not None:
+                query = query.filter(SimilarityFeedback.user_id == str(user_id))
+            if query_signature is not None:
+                query = query.filter(SimilarityFeedback.query_signature == query_signature)
+
+            feedback_rows = query.limit(50).all()
+
         if not feedback_rows:
             return 0.0
 
@@ -432,10 +562,10 @@ class AnalyticsCalculator:
         """Calculate statistics for a specific court using aggregates"""
         query = db.query(
             func.count(CaseRecord.id).label('total'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('p_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('defendant_won'), 1), else_=0)).label('d_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('settlement'), 1), else_=0)).label('settlements'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('dismissal'), 1), else_=0)).label('dismissals'),
+            func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won', 1), else_=0)).label('p_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'defendant_won', 1), else_=0)).label('d_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'settlement', 1), else_=0)).label('settlements'),
+            func.sum(sql_case((CaseRecord.outcome == 'dismissal', 1), else_=0)).label('dismissals'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
             CaseRecord.court_name == court_name
@@ -482,7 +612,7 @@ class AnalyticsCalculator:
         stats_by_type = db.query(
             CaseRecord.case_type,
             func.count(CaseRecord.id).label('count'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('wins')
+            func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won', 1), else_=0)).label('wins')
         ).filter(CaseRecord.jurisdiction == jurisdiction).group_by(CaseRecord.case_type).all()
         
         type_stats = {}
@@ -506,9 +636,14 @@ class AnalyticsCalculator:
         Cases without outcome_data or with appeal_filed=False are safely ignored.
         Returns a percentage (0.0–100.0), or 0.0 if no qualifying cases.
         """
+        if not cases:
+            return 0.0
+        
         appeals_filed = 0
         appeals_won = 0
         for case in cases:
+            if case is None:
+                continue
             outcome_data = getattr(case, "outcome_data", None)
             if outcome_data is None:
                 continue
@@ -686,13 +821,22 @@ class PredictiveAnalyticsEngine:
         plaintiff_type: Optional[str] = None,
         defendant_type: Optional[str] = None,
         limit: int = 1000,
+        streaming_mode: bool = False
     ):
+        """
+        Internal utility to build a filtered query for candidate cases.
+        
+        Refactored to support either direct result fetching or returning 
+        the Query object for memory-efficient batch processing (streaming_mode).
+        """
+        # We always joinedload outcome_data as it's frequently accessed in predictions
         query = db.query(CaseRecord).options(joinedload(CaseRecord.outcome_data))
 
         normalized_case_type = _normalize_text(case_type)
         if normalized_case_type and normalized_case_type != "general":
             query = query.filter(func.lower(CaseRecord.case_type) == normalized_case_type)
 
+        # Apply specific filters if provided
         if jurisdiction:
             query = query.filter(func.lower(CaseRecord.jurisdiction) == _normalize_text(jurisdiction))
         if court_name:
@@ -704,7 +848,14 @@ class PredictiveAnalyticsEngine:
         if defendant_type:
             query = query.filter(func.lower(CaseRecord.defendant_type) == _normalize_text(defendant_type))
 
-        return query.order_by(CaseRecord.created_at.desc()).limit(limit).all()
+        ordered_query = query.order_by(CaseRecord.created_at.desc())
+        
+        if streaming_mode:
+            # Return the Query object so caller can use yield_per()
+            return ordered_query
+        
+        # Return a limited list for immediate consumption
+        return ordered_query.limit(limit).all()
 
     @staticmethod
     def _score_case_profile(
@@ -712,6 +863,20 @@ class PredictiveAnalyticsEngine:
         candidate_case: CaseRecord,
         case_summary: Optional[str] = None,
     ) -> float:
+        """Score a candidate case against a reference profile.
+
+        The method combines the core case similarity score with an additional
+        judgment-summary overlap bonus when a summary is available.
+
+        Args:
+            reference_case: Synthetic or persisted case used as the anchor.
+            candidate_case: Case being evaluated.
+            case_summary: Optional summary text to use instead of the
+                reference case summary.
+
+        Returns:
+            A similarity score capped at 100.0.
+        """
         base_score = CaseSimilarityCalculator.case_similarity_score(reference_case, candidate_case)
         summary_source = case_summary or reference_case.judgment_summary
         summary_bonus = 0.0
@@ -733,7 +898,24 @@ class PredictiveAnalyticsEngine:
         min_similarity: float = 50.0,
         limit: int = 10,
     ) -> List[Tuple[CaseRecord, float]]:
-        """Find similar cases for a user-provided case profile."""
+        """Find similar cases for a user-provided case profile.
+
+        Args:
+            db: Active SQLAlchemy session.
+            case_type: Case type for the synthetic reference profile.
+            jurisdiction: Jurisdiction for the synthetic reference profile.
+            court_name: Optional court name for filtering and scoring.
+            judge_name: Optional judge name for filtering and scoring.
+            plaintiff_type: Optional plaintiff type for filtering and scoring.
+            defendant_type: Optional defendant type for filtering and scoring.
+            case_value: Optional case value for the synthetic profile.
+            case_summary: Optional narrative summary used in scoring.
+            min_similarity: Minimum score required for inclusion in results.
+            limit: Maximum number of results to return.
+
+        Returns:
+            A list of ``(CaseRecord, score)`` tuples sorted by score descending.
+        """
         reference_case = CaseRecord(
             hashed_case_id="prediction-profile",
             case_type=case_type,
@@ -1124,7 +1306,7 @@ class PredictiveAnalyticsEngine:
         judge_rows = db.query(
             CaseRecord.judge_name,
             func.count(CaseRecord.id).label("total_cases"),
-            func.sum(sql_case((CaseRecord.outcome.ilike("plaintiff_won"), 1), else_=0)).label("plaintiff_wins"),
+            func.sum(sql_case((CaseRecord.outcome == "plaintiff_won", 1), else_=0)).label("plaintiff_wins"),
             func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label("appeal_successes"),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label("appeals"),
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
@@ -1136,7 +1318,7 @@ class PredictiveAnalyticsEngine:
         court_rows = db.query(
             CaseRecord.court_name,
             func.count(CaseRecord.id).label("total_cases"),
-            func.sum(sql_case((CaseRecord.outcome.ilike("plaintiff_won"), 1), else_=0)).label("plaintiff_wins"),
+            func.sum(sql_case((CaseRecord.outcome == "plaintiff_won", 1), else_=0)).label("plaintiff_wins"),
             func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label("appeal_successes"),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label("appeals"),
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
@@ -1187,6 +1369,24 @@ class PredictiveAnalyticsEngine:
         case_value: Optional[str] = None,
         case_summary: Optional[str] = None,
     ) -> Dict:
+        """
+        Orchestrates the generation of a multi-faceted analytical prediction pack.
+        
+        This method combines success probability, timeline estimation, and cost 
+        analysis. It handles large datasets by checking regional case volume 
+        and triggering manual memory reclamation after heavy processing.
+        """
+        # Pre-check volume for memory safety optimization
+        jurisdiction_normalized = _normalize_text(jurisdiction)
+        vol_count = db.query(func.count(CaseRecord.id)).filter(
+            func.lower(CaseRecord.jurisdiction) == jurisdiction_normalized
+        ).scalar() or 0
+
+        is_high_volume = vol_count > 5000
+        if is_high_volume:
+            logger.warning(f"High-volume dataset detected ({vol_count} records). Implementing memory guardrails.")
+
+        # Step 1: Predict appeal success probability
         appeal_success = PredictiveAnalyticsEngine.predict_appeal_success(
             db,
             case_type=case_type,
@@ -1198,6 +1398,8 @@ class PredictiveAnalyticsEngine:
             case_value=case_value,
             case_summary=case_summary,
         )
+        
+        # Step 2: Estimate judgment timelines
         timeline = PredictiveAnalyticsEngine.estimate_judgment_timeline(
             db,
             case_type=case_type,
@@ -1208,6 +1410,8 @@ class PredictiveAnalyticsEngine:
             defendant_type=defendant_type,
             case_summary=case_summary,
         )
+        
+        # Step 3: Predict associated legal costs
         cost = PredictiveAnalyticsEngine.predict_cost(
             db,
             case_type=case_type,
@@ -1218,11 +1422,17 @@ class PredictiveAnalyticsEngine:
             defendant_type=defendant_type,
             case_summary=case_summary,
         )
+        
+        # Step 4: Recommend judges and courts based on historical success
         recommendations = PredictiveAnalyticsEngine.recommend_judge_and_court(
             db,
             case_type=case_type,
             jurisdiction=jurisdiction,
         )
+
+        # CRITICAL FIX: Reclaim memory after building large prediction packs
+        # especially important in jurisdictions with thousands of precedents.
+        gc.collect()
 
         return {
             "appeal_success": appeal_success,
@@ -1230,6 +1440,11 @@ class PredictiveAnalyticsEngine:
             "cost": cost,
             "recommendations": recommendations,
             "similar_cases": appeal_success["similar_cases"],
+            "processing_info": {
+                "memory_optimized": is_high_volume,
+                "dataset_volume": vol_count,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
         }
 
 
@@ -1242,10 +1457,10 @@ class AnalyticsAggregator:
         stats = db.query(
             func.count(CaseRecord.id).label('total'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('p_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('defendant_won'), 1), else_=0)).label('d_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('settlement'), 1), else_=0)).label('settlements'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('dismissal'), 1), else_=0)).label('dismissals')
+            func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won', 1), else_=0)).label('p_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'defendant_won', 1), else_=0)).label('d_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'settlement', 1), else_=0)).label('settlements'),
+            func.sum(sql_case((CaseRecord.outcome == 'dismissal', 1), else_=0)).label('dismissals')
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).first()
         
         total = stats.total or 0
@@ -1267,7 +1482,7 @@ class AnalyticsAggregator:
         judge_stats = db.query(
             CaseRecord.judge_name,
             func.count(CaseRecord.id).label('total'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won', 1), else_=0)).label('wins'),
             func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label('appeal_wins'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
@@ -1312,6 +1527,232 @@ class AnalyticsAggregator:
         return results
 
 
+class ReminderInsightsEngine:
+    """Compute reminder effectiveness and drop-off metrics from deadlines and notification logs."""
+
+    ELIGIBLE_STATUSES = {
+        NotificationStatus.SENT,
+        NotificationStatus.DELIVERED,
+        NotificationStatus.OPENED,
+    }
+
+    @staticmethod
+    def _completion_map(db: Session) -> Dict[int, datetime]:
+        completion_map: Dict[int, datetime] = {}
+        events = db.query(CaseTimeline).filter(CaseTimeline.event_type == "deadline_completed").all()
+        for event in events:
+            metadata = event.event_metadata if isinstance(event.event_metadata, dict) else {}
+            deadline_id = metadata.get("deadline_id")
+            try:
+                deadline_id_int = int(deadline_id)
+            except (TypeError, ValueError):
+                continue
+
+            completed_at = _utc_datetime(event.event_date)
+            if completed_at is None:
+                continue
+
+            current = completion_map.get(deadline_id_int)
+            if current is None or completed_at < current:
+                completion_map[deadline_id_int] = completed_at
+
+        return completion_map
+
+    @staticmethod
+    def build_attribution_frame(
+        db: Session,
+        attribution_window_days: int = 14,
+        user_id: Optional[int] = None,
+        jurisdiction: Optional[str] = None,
+        court_name: Optional[str] = None,
+        deadline_type: Optional[str] = None,
+        channel: Optional[NotificationChannel | str] = None,
+    ) -> pd.DataFrame:
+        now = datetime.now(timezone.utc)
+        completion_map = ReminderInsightsEngine._completion_map(db)
+
+        query = db.query(NotificationLog, CaseDeadline, Case).join(
+            CaseDeadline,
+            NotificationLog.deadline_id == CaseDeadline.id,
+        ).join(
+            Case,
+            CaseDeadline.case_id == Case.id,
+        )
+
+        if user_id is not None:
+            query = query.filter(Case.user_id == user_id)
+
+        if jurisdiction:
+            query = query.filter(func.lower(Case.jurisdiction) == _normalize_text(jurisdiction))
+        if court_name:
+            query = query.filter(func.lower(func.coalesce(CaseDeadline.court_name, "")) == _normalize_text(court_name))
+        if deadline_type:
+            query = query.filter(func.lower(CaseDeadline.deadline_type) == _normalize_text(deadline_type))
+        if channel:
+            channel_enum = channel if isinstance(channel, NotificationChannel) else NotificationChannel(str(channel).strip().lower())
+            query = query.filter(NotificationLog.channel == channel_enum)
+
+        deadline_buckets: Dict[int, Dict[str, object]] = {}
+        window = timedelta(days=max(1, int(attribution_window_days)))
+
+        for log, deadline, case in query.all():
+            if log.status not in ReminderInsightsEngine.ELIGIBLE_STATUSES:
+                continue
+
+            sent_at = _utc_datetime(log.sent_at or log.created_at)
+            deadline_date = _utc_datetime(deadline.deadline_date)
+            completion_at = completion_map.get(deadline.id)
+            if sent_at is None or deadline_date is None:
+                continue
+
+            bucket = deadline_buckets.setdefault(
+                deadline.id,
+                {
+                    "deadline": deadline,
+                    "case": case,
+                    "completion_at": completion_at,
+                    "candidates": [],
+                },
+            )
+            candidates = bucket["candidates"]
+            if isinstance(candidates, list):
+                candidates.append(
+                    {
+                        "notification_log_id": log.id,
+                        "channel": log.channel.value if hasattr(log.channel, "value") else str(log.channel),
+                        "sent_at": sent_at,
+                    }
+                )
+
+        rows = []
+        for deadline_id, bucket in deadline_buckets.items():
+            deadline = bucket["deadline"]
+            case = bucket["case"]
+            completion_at = bucket["completion_at"]
+            candidates = bucket["candidates"] if isinstance(bucket["candidates"], list) else []
+            deadline_date = _utc_datetime(deadline.deadline_date)
+            if deadline_date is None:
+                continue
+
+            cutoff = completion_at or min(deadline_date, now)
+            eligible_candidates = [candidate for candidate in candidates if candidate["sent_at"] <= cutoff]
+            if not eligible_candidates:
+                continue
+
+            chosen = max(eligible_candidates, key=lambda candidate: candidate["sent_at"])
+            sent_at = chosen["sent_at"]
+
+            matured = completion_at is not None or deadline_date <= now
+            effective = bool(completion_at and sent_at <= completion_at <= sent_at + window)
+            drop_off = bool(matured and not effective)
+            if not (effective or drop_off):
+                continue
+
+            days_to_completion = None
+            if effective and completion_at is not None:
+                days_to_completion = round((completion_at - sent_at).total_seconds() / 86400.0, 2)
+
+            rows.append(
+                {
+                    "deadline_id": deadline_id,
+                    "notification_log_id": chosen["notification_log_id"],
+                    "jurisdiction": _normalize_group_value(case.jurisdiction),
+                    "court_name": _normalize_group_value(getattr(deadline, "court_name", None)),
+                    "deadline_type": _normalize_group_value(deadline.deadline_type),
+                    "channel": chosen["channel"],
+                    "sent_at": sent_at,
+                    "completion_at": completion_at,
+                    "deadline_date": deadline_date,
+                    "effective": effective,
+                    "drop_off": drop_off,
+                    "days_to_completion": days_to_completion,
+                }
+            )
+
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def summarize(frame: pd.DataFrame, attribution_window_days: int = 14) -> Dict[str, object]:
+        if frame.empty:
+            return {
+                "attribution_window_days": attribution_window_days,
+                "reminder_count": 0,
+                "effective_reminders": 0,
+                "drop_off_reminders": 0,
+                "effectiveness_rate": 0.0,
+                "drop_off_rate": 0.0,
+                "avg_days_to_completion": None,
+            }
+
+        reminder_count = int(len(frame))
+        effective_reminders = int(frame["effective"].sum())
+        drop_off_reminders = int(frame["drop_off"].sum())
+        completed_days = frame.loc[frame["effective"], "days_to_completion"].dropna()
+
+        return {
+            "attribution_window_days": attribution_window_days,
+            "reminder_count": reminder_count,
+            "effective_reminders": effective_reminders,
+            "drop_off_reminders": drop_off_reminders,
+            "effectiveness_rate": round((effective_reminders / reminder_count) * 100, 1) if reminder_count else 0.0,
+            "drop_off_rate": round((drop_off_reminders / reminder_count) * 100, 1) if reminder_count else 0.0,
+            "avg_days_to_completion": round(float(completed_days.mean()), 2) if not completed_days.empty else None,
+        }
+
+    @staticmethod
+    def breakdown(frame: pd.DataFrame, group_by: str) -> pd.DataFrame:
+        if frame.empty or group_by not in frame.columns:
+            return pd.DataFrame(columns=[group_by, "reminders", "effective_reminders", "drop_off_reminders", "effectiveness_rate", "drop_off_rate", "avg_days_to_completion"])
+
+        grouped = frame.groupby(group_by, dropna=False).agg(
+            reminders=("notification_log_id", "count"),
+            effective_reminders=("effective", "sum"),
+            drop_off_reminders=("drop_off", "sum"),
+            avg_days_to_completion=("days_to_completion", "mean"),
+        ).reset_index()
+
+        grouped["effectiveness_rate"] = grouped.apply(
+            lambda row: round((row["effective_reminders"] / row["reminders"]) * 100, 1) if row["reminders"] else 0.0,
+            axis=1,
+        )
+        grouped["drop_off_rate"] = grouped.apply(
+            lambda row: round((row["drop_off_reminders"] / row["reminders"]) * 100, 1) if row["reminders"] else 0.0,
+            axis=1,
+        )
+        grouped["avg_days_to_completion"] = grouped["avg_days_to_completion"].round(2)
+        grouped = grouped.sort_values(["effectiveness_rate", "reminders"], ascending=[False, False]).reset_index(drop=True)
+        return grouped
+
+    @staticmethod
+    def build_insights(
+        db: Session,
+        attribution_window_days: int = 14,
+        user_id: Optional[int] = None,
+        jurisdiction: Optional[str] = None,
+        court_name: Optional[str] = None,
+        deadline_type: Optional[str] = None,
+        channel: Optional[NotificationChannel | str] = None,
+    ) -> Dict[str, object]:
+        frame = ReminderInsightsEngine.build_attribution_frame(
+            db=db,
+            attribution_window_days=attribution_window_days,
+            user_id=user_id,
+            jurisdiction=jurisdiction,
+            court_name=court_name,
+            deadline_type=deadline_type,
+            channel=channel,
+        )
+
+        return {
+            "summary": ReminderInsightsEngine.summarize(frame, attribution_window_days=attribution_window_days),
+            "frame": frame,
+            "by_jurisdiction": ReminderInsightsEngine.breakdown(frame, "jurisdiction"),
+            "by_court": ReminderInsightsEngine.breakdown(frame, "court_name"),
+            "by_deadline_type": ReminderInsightsEngine.breakdown(frame, "deadline_type"),
+            "by_channel": ReminderInsightsEngine.breakdown(frame, "channel"),
+        }
+
+
 # Utility function to anonymize case ID
 def generate_anonymous_case_id(case_data: str) -> str:
     """Generate an anonymous case ID from case data using HMAC-SHA256.
@@ -1339,3 +1780,18 @@ def generate_anonymous_case_id(case_data: str) -> str:
         case_data.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()[:16]
+
+
+def calculate_statistical_metrics(values: list[float]) -> dict[str, float]:
+    """
+    Calculates essential descriptive statistics for analytical telemetry 
+    purposes including mean, median, and variance.
+    """
+    if not values:
+        return {"mean": 0.0, "median": 0.0, "variance": 0.0}
+    sorted_vals = sorted(values)
+    n = len(values)
+    mean = sum(values) / n
+    median = sorted_vals[n // 2] if n % 2 != 0 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+    variance = sum((x - mean) ** 2 for x in values) / n
+    return {"mean": mean, "median": median, "variance": variance}

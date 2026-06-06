@@ -2,7 +2,7 @@
 Pydantic models for API requests/responses
 """
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field, EmailStr
 
 
@@ -82,7 +82,9 @@ class DocumentAnalysisSummary(BaseModel):
     remedies: List[RemediaryItem]
     deadlines: List[DeadlineItem]
     obligations: List[str]
-    confidence_score: float = Field(ge=0, le=1)
+    confidence_score: float = Field(ge=0.0, le=1.0, description="Model confidence for extraction quality (0.0-1.0)")
+    remedies_confidence_score: Optional[float] = Field(None, ge=0.0, le=1.0, description="Confidence for remedies extraction (0.0-1.0)")
+    remedies_evidence_spans: List[Dict[str, Any]] = Field(default_factory=list)
     analysis_time_seconds: float
 
 
@@ -213,6 +215,47 @@ class CaseTimeline(BaseModel):
     duration_years: float
 
 
+class CaseNoteDraftRequest(BaseModel):
+    case_id: Optional[str] = None
+    note_text: str = Field(..., min_length=1)
+
+
+class CaseNotePublishRequest(BaseModel):
+    case_id: Optional[str] = None
+    note_text: Optional[str] = None
+
+
+class CaseNoteVersionItem(BaseModel):
+    version_number: int
+    note_text: str
+    change_type: str
+    changed_by_user_id: str
+    changed_by_email: Optional[str] = None
+    created_at: datetime
+    version_metadata: Optional[Dict[str, Any]] = None
+
+
+class CaseNoteHistoryResponse(BaseModel):
+    case_id: str
+    case_number: str
+    title: str
+    total_versions: int
+    versions: List[CaseNoteVersionItem]
+
+
+class AnonymizedShareCreateRequest(BaseModel):
+    scope: str = Field("personal_identifiers", min_length=1, max_length=255)
+    expires_in_hours: int = Field(72, ge=1, le=8760)
+
+
+class AnonymizedShareResponse(BaseModel):
+    token: str
+    anonymized_id: str
+    scope: str
+    share_url: str
+    expires_at: datetime
+
+
 # ============================================================================
 # Report Generation Models
 # ============================================================================
@@ -220,12 +263,34 @@ class CaseTimeline(BaseModel):
 class ReportGenerationRequest(BaseModel):
     """Request to generate a report"""
     case_id: str
-    report_type: str = "comprehensive"  # comprehensive, summary, legal_brief
+    report_type: Literal["comprehensive", "summary", "legal_brief"] = "comprehensive"
     include_remedies: bool = True
     include_timeline: bool = True
     include_similar_cases: bool = True
-    format: str = "pdf"  # pdf, docx, html
-    style: str = "formal"  # formal, casual
+    format: Literal["pdf", "docx", "html"] = "pdf"
+    style: Literal["formal", "casual"] = "formal"
+    privacy_profile: str = "personal_identifiers"
+
+
+# ============================================================================
+# Audit Models
+# ============================================================================
+
+class AuditEventItem(BaseModel):
+    id: int
+    actor: str
+    actor_user_id: Optional[int] = None
+    action: str
+    resource: str
+    case_id: Optional[int] = None
+    occurred_at: datetime
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditEventListResponse(BaseModel):
+    case_id: int
+    total: int
+    events: List[AuditEventItem]
 
 
 class ReportGenerationResponse(BaseModel):
@@ -271,6 +336,17 @@ class AnalyticsResponse(BaseModel):
     generated_at: datetime
 
 
+class DashboardSummaryResponse(BaseModel):
+    """Dashboard summary for frontend consumers."""
+    total_cases_processed: int
+    appeals_filed: int
+    appeal_rate_percent: float
+    plaintiff_wins: int
+    defendant_wins: int
+    settlements: int
+    dismissals: int
+
+
 # ============================================================================
 # Deadline Models
 # ============================================================================
@@ -295,11 +371,44 @@ class UpcomingDeadlinesResponse(BaseModel):
     """List of upcoming deadlines"""
     user_id: str
     total_deadlines: int
+    limit: int
+    offset: int
     critical_count: int
     high_count: int
     medium_count: int
     low_count: int
     deadlines: List[DeadlineResponse]
+    generated_at: datetime
+
+
+# ============================================================================
+# Knowledge Freshness Models
+# ============================================================================
+
+class KnowledgeInvalidationItem(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    case_id: Optional[int] = None
+    document_id: Optional[int] = None
+    scope_type: str
+    scope_value: str
+    reason: str
+    details: Optional[Dict[str, Any]] = None
+    status: str
+    invalidated_at: datetime
+    scheduled_for: Optional[datetime] = None
+    recompute_started_at: Optional[datetime] = None
+    recompute_completed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    recompute_attempts: int = 0
+
+
+class KnowledgeInvalidationListResponse(BaseModel):
+    items: List[KnowledgeInvalidationItem]
+    total: int
+    stale_count: int
+    fresh_count: int
+    next_recompute_at: Optional[datetime] = None
     generated_at: datetime
 
 
@@ -329,7 +438,7 @@ class ErrorResponse(BaseModel):
     error_code: str
     message: str
     details: Optional[Dict[str, Any]] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ValidationError(ErrorResponse):
@@ -354,3 +463,35 @@ class PaginatedResponse(BaseModel):
     limit: int
     offset: int
     items: List[Dict[str, Any]]
+
+
+# ============================================================================
+# Notification Preference Models
+# ============================================================================
+
+class UserPreferenceUpdate(BaseModel):
+    """Update user notification preferences"""
+    email: EmailStr
+    phone_number: Optional[str] = None
+    notification_channel: str = "both"  # "sms", "email", "both"
+    timezone: str = "UTC"
+    reminder_thresholds: List[int] = Field(default_factory=lambda: [30, 10, 3, 1])
+    holiday_aware_reminders: bool = False
+    holiday_country: Optional[str] = None
+    holiday_region: Optional[str] = None
+    holiday_calendar_json: Optional[str] = None
+
+
+class UserPreferenceResponse(BaseModel):
+    """User notification preferences response"""
+    user_id: int
+    email: str
+    phone_number: Optional[str] = None
+    notification_channel: str
+    timezone: str
+    reminder_thresholds: List[int]
+    holiday_aware_reminders: bool
+    holiday_country: Optional[str] = None
+    holiday_region: Optional[str] = None
+    holiday_calendar_json: Optional[str] = None
+    updated_at: datetime

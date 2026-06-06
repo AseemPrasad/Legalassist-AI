@@ -2,7 +2,7 @@
 replicaCount: 3
 
 image:
-  repository: ghcr.io/yourusername/legalassist-ai
+  repository: ghcr.io/AseemPrasad/legalassist-ai
   tag: latest
   pullPolicy: IfNotPresent
 
@@ -29,18 +29,18 @@ ingress:
     nginx.ingress.kubernetes.io/rate-limit: "100"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
   hosts:
-    - host: legalassist.example.com
+    - host: REPLACE_ME_WITH_YOUR_PRODUCTION_DOMAIN
       paths:
         - path: /
           pathType: Prefix
   tls:
     - secretName: legalassist-tls
       hosts:
-        - legalassist.example.com
+        - REPLACE_ME_WITH_YOUR_PRODUCTION_DOMAIN
 
 postgresql:
   auth:
-    password: ${DB_PASSWORD}  # Use external secret management
+    password: ""
   primary:
     persistence:
       size: 50Gi
@@ -54,7 +54,7 @@ postgresql:
 
 redis:
   auth:
-    password: ${REDIS_PASSWORD}  # Use external secret management
+    password: ""
   master:
     persistence:
       size: 10Gi
@@ -73,7 +73,7 @@ prometheus:
 
 grafana:
   enabled: true
-  adminPassword: ${GRAFANA_PASSWORD}
+  adminPassword: ""
 
 env:
   - name: ENVIRONMENT
@@ -83,7 +83,17 @@ env:
   - name: ENABLE_PROFILING
     value: "false"
   - name: SENTRY_DSN
-    value: ${SENTRY_DSN}
+    value: ""
+
+secrets:
+  create: false
+  externalSecrets:
+    enabled: true
+    backendType: aws-secrets-manager
+  openaiApiKey: ""
+  twilioAccountSid: ""
+  twilioAuthToken: ""
+  sendgridApiKey: ""
 
 podDisruptionBudget:
   enabled: true
