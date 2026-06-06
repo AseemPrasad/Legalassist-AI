@@ -1,5 +1,8 @@
 import os
 import threading
+import importlib
+import sys
+import types
 
 import numpy as np
 
@@ -74,3 +77,51 @@ def test_search_during_rebalance_does_not_error(tmp_path, monkeypatch):
     thread.join()
 
     assert not errors
+
+
+def test_search_fans_out_across_shards_in_parallel(tmp_path, monkeypatch):
+    monkeypatch.setattr(vector_store_module, "STORAGE_DIR", str(tmp_path))
+
+    store = ShardedVectorStore(num_shards=4, dimension=4)
+    store.add_batch(
+        [
+            (1, [1.0, 0.0, 0.0, 0.0]),
+            (2, [0.0, 1.0, 0.0, 0.0]),
+            (3, [0.0, 0.0, 1.0, 0.0]),
+            (4, [0.0, 0.0, 0.0, 1.0]),
+        ]
+    )
+
+    barrier = threading.Barrier(4)
+    original_search = store._search_single_shard
+
+    def wrapped_search_single_shard(*args, **kwargs):
+        barrier.wait(timeout=1)
+        return original_search(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_search_single_shard", wrapped_search_single_shard)
+
+    results = store.search([1.0, 0.0, 0.0, 0.0], top_k=1)
+
+    assert results[0][0] == 1
+
+
+def test_get_vector_store_reinitializes_when_shape_changes(monkeypatch):
+    fake_database = types.ModuleType("database")
+    fake_database.CaseEmbedding = object
+    fake_database.CaseDocument = object
+    fake_database.Case = object
+    fake_database.SessionLocal = object
+    monkeypatch.setitem(sys.modules, "database", fake_database)
+
+    embedding_engine_module = importlib.import_module("core.embedding_engine")
+    monkeypatch.setattr(embedding_engine_module, "_vector_store", None)
+
+    first = embedding_engine_module.get_vector_store(num_shards=2, dimension=4)
+    second = embedding_engine_module.get_vector_store(num_shards=3, dimension=4)
+    third = embedding_engine_module.get_vector_store(num_shards=3, dimension=8)
+
+    assert first is not second
+    assert second is not third
+    assert second.num_shards == 3
+    assert third.dimension == 8

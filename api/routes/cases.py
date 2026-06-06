@@ -73,41 +73,61 @@ async def search_cases(
     min_similarity = request.relevance_threshold
     candidate_limit = 1000  # keeps the response time low
 
-    query_signature = request.query_signature or _build_query_signature(request)
+    reference_case = None
+    db = None
+    try:
+        db = get_db()
 
-    # Build candidate query from filters (cheap DB-side filtering)
-    query = db.query(CaseRecord)
-    if request.case_type and request.case_type != "general":
-        query = query.filter(CaseRecord.case_type == request.case_type)
-    if request.jurisdiction:
-        query = query.filter(CaseRecord.jurisdiction == request.jurisdiction)
-    if request.court_name:
-        query = query.filter(CaseRecord.court_name == request.court_name)
-    if request.judge_name:
-        query = query.filter(CaseRecord.judge_name == request.judge_name)
-    if request.plaintiff_type:
-        query = query.filter(CaseRecord.plaintiff_type == request.plaintiff_type)
-    if request.defendant_type:
-        query = query.filter(CaseRecord.defendant_type == request.defendant_type)
+        query_signature = request.query_signature or _build_query_signature(request)
 
-    # Restrict time window if requested
-    if request.year_from is not None:
-        query = query.filter(CaseRecord.created_at >= datetime(request.year_from, 1, 1))
-    if request.year_to is not None:
-        query = query.filter(CaseRecord.created_at <= datetime(request.year_to, 12, 31, 23, 59, 59))
-
-    # Keep result set small for <2s performance
-    candidates = query.order_by(CaseRecord.created_at.desc()).limit(candidate_limit).all()
-
-    # Use the first candidate as the reference case for attribute-based scoring.
-    reference_case = candidates[0] if candidates else None
-
-    if not reference_case:
-        return CaseSearchResponse(
-            total_results=0,
-            results=[],
-            search_time_seconds=round(perf_counter() - start, 4),
+        # Restrict candidates to case types and jurisdictions the user owns
+        user_scope = (
+            db.query(Case.case_type, Case.jurisdiction)
+            .filter(Case.user_id == int(current_user.user_id))
+            .distinct()
+            .all()
         )
+        query = db.query(CaseRecord)
+        if user_scope:
+            query = query.filter(
+                CaseRecord.case_type.in_([row.case_type for row in user_scope]),
+                CaseRecord.jurisdiction.in_([row.jurisdiction for row in user_scope]),
+            )
+
+        # Apply explicit request filters on top of ownership scope
+        if request.case_type and request.case_type != "general":
+            query = query.filter(CaseRecord.case_type == request.case_type)
+        if request.jurisdiction:
+            query = query.filter(CaseRecord.jurisdiction == request.jurisdiction)
+        if request.court_name:
+            query = query.filter(CaseRecord.court_name == request.court_name)
+        if request.judge_name:
+            query = query.filter(CaseRecord.judge_name == request.judge_name)
+        if request.plaintiff_type:
+            query = query.filter(CaseRecord.plaintiff_type == request.plaintiff_type)
+        if request.defendant_type:
+            query = query.filter(CaseRecord.defendant_type == request.defendant_type)
+
+        # Restrict time window if requested
+        if request.year_from is not None:
+            query = query.filter(CaseRecord.created_at >= datetime(request.year_from, 1, 1))
+        if request.year_to is not None:
+            query = query.filter(CaseRecord.created_at <= datetime(request.year_to, 12, 31, 23, 59, 59))
+
+        # Keep result set small for <2s performance
+        candidates = query.order_by(CaseRecord.created_at.desc()).limit(candidate_limit).all()
+
+        # If we cannot get a real reference_case, we use the first candidate as proxy when possible.
+        # This still returns meaningful “similar cases” under the attribute-only scoring.
+        if candidates:
+            reference_case = candidates[0]
+
+        if not reference_case:
+            return CaseSearchResponse(
+                total_results=0,
+                results=[],
+                search_time_seconds=round(perf_counter() - start, 4),
+            )
 
     # Score candidates and apply threshold
     scored = []
@@ -326,11 +346,14 @@ async def get_case_details(
     except (ValueError, TypeError):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid case ID")
 
-    case = db.query(Case).filter(Case.id == case_id_int).first()
-    if not case:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
-    if case.user_id != int(current_user.user_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    db = get_db()
+    try:
+        case = db.query(Case).filter(
+            Case.id == case_id_int,
+            Case.user_id == int(current_user.user_id),
+        ).first()
+        if not case:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
 
     latest_doc = None
     if case.documents:
