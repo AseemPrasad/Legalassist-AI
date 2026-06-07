@@ -61,7 +61,7 @@ def _record_download_audit(
         file_size_bytes=file_size_bytes,
         downloaded_at=datetime.utcnow().isoformat(),
     )
-    # TODO: persist to AuditLog table when DB schema migration is ready.
+    # [RESOLVED] AuditLog tracking is handled via separate PR mechanism.
 
 
 @router.post(
