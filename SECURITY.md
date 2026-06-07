@@ -60,5 +60,13 @@ We take the security of our legal assistance platform seriously. If you discover
 - Accessing or modifying data that does not belong to you.
 - Social engineering against our team or users.
 
+### 🔐 Production Controls
+- JWT, Twilio, SendGrid, database, and Redis secrets must come from environment variables or a managed secret store.
+- Rotate JWT secrets by setting `JWT_SECRET` to the new value while keeping `JWT_SECRET_PREVIOUS` for a grace period, then remove the previous value after the longest token lifetime expires.
+- Production deployments must use HTTPS at the ingress or load balancer; application URLs must begin with `https://`.
+- `DEBUG` and `TESTING` must remain disabled in production.
+- CI should run `scripts/check_secrets_policy.py` before deployment to catch committed secrets or unsafe defaults.
+- CI pipelines fail on HIGH severity Bandit findings. MEDIUM severity findings must be reviewed and ignored using `# nosec` only if justified.
+
 ---
 *Thank you for helping keep Legalassist-AI secure!* 🙏

@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_PYTHON_VERSION_WARNING: "1"
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+
+      - name: Cache pytest state
+        uses: actions/cache@v4
+        with:
+          path: .pytest_cache
+          key: ${{ runner.os }}-py${{ matrix.python-version }}-pytest-${{ hashFiles('tests/**/*.py', 'core/**/*.py', 'api/**/*.py') }}
+          restore-keys: |
+            ${{ runner.os }}-py${{ matrix.python-version }}-pytest-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest-rerunfailures
+
+      - name: Run tests with flaky detection
+        id: pytest
+        env:
+          PYTHONPATH: .
+        shell: bash
+        run: |
+          set -eo pipefail
+          mkdir -p ci-artifacts
+          pytest -q -n auto --dist loadfile --reruns 2 --reruns-delay 1 --junitxml=ci-artifacts/junit-${{ matrix.python-version }}.xml 2>&1 | tee ci-artifacts/pytest-${{ matrix.python-version }}.log
+          pytest_status=${PIPESTATUS[0]}
+
+          if grep -E "(^|[[:space:]])RERUN[[:space:]]|rerun" ci-artifacts/pytest-${{ matrix.python-version }}.log > ci-artifacts/flaky-tests-${{ matrix.python-version }}.txt; then
+            echo "flaky=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "flaky=false" >> "$GITHUB_OUTPUT"
+            : > ci-artifacts/flaky-tests-${{ matrix.python-version }}.txt
+          fi
+
+          exit $pytest_status
+
+      - name: Summarize flaky tests
+        if: steps.pytest.outputs.flaky == 'true'
+        run: |
+          {
+            echo "### Flaky tests detected"
+            echo ""
+            echo "The rerun plugin retried one or more tests in this matrix entry."
+            echo "See the uploaded artifact for the exact nodeids."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts-py${{ matrix.python-version }}
+          path: ci-artifacts/
+
+  contract-tests:
+    name: Contract tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && vars.RUN_LLM_CONTRACTS == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest-rerunfailures
+
+      - name: Run LLM contract tests
+        env:
+          PYTHONPATH: .
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_BASE_URL: ${{ secrets.OPENROUTER_BASE_URL }}
+        shell: bash
+        run: |
+          set -eo pipefail
+          pytest -q -k contract --reruns 1 --reruns-delay 1

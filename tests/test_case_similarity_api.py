@@ -36,6 +36,8 @@ def client(test_db, monkeypatch):
     app = FastAPI()
     app.include_router(cases_route.router)
     app.dependency_overrides[get_current_user] = lambda: CurrentUser("42", "tester@example.com", "user")
+    app.dependency_overrides[cases_route.get_db] = lambda: test_db
+    app.dependency_overrides[cases_route.get_db_rls] = lambda: test_db
     monkeypatch.setattr(cases_route, "get_db", lambda: test_db)
     yield TestClient(app)
 
@@ -180,3 +182,56 @@ def test_similarity_feedback_persists_and_adjusts_ranking(client, test_db):
     assert response.status_code == 200
     results = response.json()["results"]
     assert results[0]["case_id"] == str(candidate_two.id)
+
+
+def test_similarity_search_query_count_is_bounded(client, test_db):
+    from sqlalchemy import event
+    reference, candidate_one, candidate_two, _ = _seed_similarity_cases(test_db)
+    query_signature = "jurisdiction=Delhi|case_type=civil|court_name=High Court|judge_name=|year_from=|year_to="
+
+    # Seed feedback for candidates to ensure there are feedback records to query
+    test_db.add_all([
+        SimilarityFeedback(
+            user_id="42",
+            candidate_case_id=candidate_one.id,
+            query_signature=query_signature,
+            relevance=True,
+        ),
+        SimilarityFeedback(
+            user_id="42",
+            candidate_case_id=candidate_two.id,
+            query_signature=query_signature,
+            relevance=False,
+        ),
+    ])
+    test_db.commit()
+
+    # Track executed queries using before_cursor_execute
+    queries = []
+
+    @event.listens_for(test_db.bind, "before_cursor_execute")
+    def receive_before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        queries.append(statement)
+
+    try:
+        response = client.post(
+            "/api/v1/cases/search",
+            json={
+                "jurisdiction": "Delhi",
+                "case_type": "civil",
+                "court_name": "High Court",
+                "relevance_threshold": 0.7,
+                "limit": 5,
+                "query_signature": query_signature,
+            },
+        )
+    finally:
+        event.remove(test_db.bind, "before_cursor_execute", receive_before_cursor_execute)
+
+    assert response.status_code == 200
+
+    # Find queries related to similarity_feedback (checking table name)
+    feedback_queries = [q for q in queries if "similarity_feedback" in q.lower()]
+
+    # Assert that there is exactly 1 query targeting the similarity_feedback table
+    assert len(feedback_queries) == 1, f"Expected exactly 1 query targeting similarity_feedback table, got {len(feedback_queries)}"

@@ -199,7 +199,9 @@ def create_business_metrics_dashboard() -> Dict:
 
 if __name__ == "__main__":
     grafana_url = os.getenv("GRAFANA_URL", "http://localhost:3000")
-    api_token = os.getenv("GRAFANA_API_TOKEN", "admin")
+    api_token = os.getenv("GRAFANA_API_TOKEN")
+    if not api_token:
+        raise RuntimeError("GRAFANA_API_TOKEN environment variable is required")
     
     provisioner = GrafanaDashboardProvisioner(grafana_url, api_token)
     provisioner.provision_all()
