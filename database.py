@@ -337,9 +337,10 @@ def record_otp_failed_attempt(
         return True
     return False
 
-    password_hash = Column(
-        String(255), 
-        nullable=True
+    subscription_tier = Column(
+        String(50),
+        default="free",
+        nullable=False
     )
 
     # -------------------------------------------------------------------------
