@@ -166,6 +166,32 @@ def _load_trusted_proxies() -> frozenset[str]:
     return frozenset(trusted)
 
 
+def get_trusted_proxies() -> frozenset[str]:
+    """Load trusted proxy IPs from environment (dynamic, per-call).
+
+    Reads ``RATE_LIMIT_TRUSTED_PROXIES`` on every invocation so that
+    configuration changes take effect without a server restart.
+    Silently skips entries that are not valid IP addresses.
+    Always includes loopback addresses.
+    """
+    import os
+    import ipaddress
+
+    raw = os.getenv("RATE_LIMIT_TRUSTED_PROXIES", "")
+    trusted: set[str] = set()
+    for entry in raw.split(","):
+        candidate = entry.strip()
+        if not candidate:
+            continue
+        try:
+            ipaddress.ip_address(candidate)
+            trusted.add(candidate)
+        except ValueError:
+            pass
+    trusted.update({"127.0.0.1", "::1"})
+    return frozenset(trusted)
+
+
 TRUSTED_PROXIES: frozenset[str] = _load_trusted_proxies()
 
 
@@ -429,26 +455,18 @@ def resolve_rate_limit_identifier(request: Request) -> str:
     """Return a per-identity rate-limit key.
 
     Resolution order:
-    1. Valid JWT ``sub`` / ``user_id`` claim  → ``user:<id>``
-    2. Direct client IP from ASGI transport   → ``ip:<addr>``
-    3. ``X-Forwarded-For`` first hop          → ``ip:<addr>``
-       (only when the direct client IP is in TRUSTED_PROXIES)
-    4. Unique per-request token               → ``anon:<uuid>``
+    1. Valid API key identity                    → ``api_key:<digest>``
+    2. Valid JWT ``sub`` / ``user_id`` claim     → ``user:<id>``
+    3. Direct client IP from ASGI transport      → ``ip:<addr>``
+    4. ``X-Forwarded-For`` first hop             → ``ip:<addr>``
+       (only when the direct peer is a known trusted proxy)
+    5. Unique per-request token                  → ``anon:<uuid>``
 
     The function NEVER returns a shared literal such as ``"anonymous"``.
     ``X-Forwarded-For`` is only trusted when the direct transport-layer
     peer is a known trusted proxy IP — accepting it unconditionally allows
     any client to spoof their IP and bypass per-IP rate limits.
     """
-       (only used when the direct client is a known trusted proxy)
-    4. Unique per-request token               → ``anon:<uuid>``
-
-    The function NEVER returns a shared literal such as ``"anonymous"``.
-    Returning a shared key would allow a single attacker to exhaust the
-    entire unauthenticated quota and lock out all other unauthenticated
-    users (login, OTP, password-reset) — a targeted DoS vector.
-    """
-    """Prefer API key identity, then verified JWT user_id; otherwise use source IP."""
 
     api_key_identifier = limiter._api_key_identifier(request)
     if api_key_identifier:
@@ -470,31 +488,19 @@ def resolve_rate_limit_identifier(request: Request) -> str:
             except HTTPException:
                 pass
 
-    # Prefer the direct transport-layer IP — it cannot be spoofed by the client.
-    direct_ip: str | None = None
-    if request.client and request.client.host:
-        direct_ip = request.client.host
+    direct_ip = request.client.host if request.client else None
+    if direct_ip:
+        # Only trust X-Forwarded-For when the direct transport-layer peer
+        # is a known trusted proxy.  Accepting XFF unconditionally lets
+        # any client forge their IP and bypass per-IP rate limits.
+        if direct_ip in get_trusted_proxies():
+            forwarded = request.headers.get("X-Forwarded-For")
+            if forwarded:
+                client_ip = forwarded.split(",")[0].strip()
+                if client_ip:
+                    return f"ip:{client_ip}"
         return f"ip:{direct_ip}"
 
-    # Only trust X-Forwarded-For when the direct peer is a known trusted proxy.
-    # Accepting XFF unconditionally allows any client to forge their IP address
-    # by injecting or prepending values to the header.
-    if direct_ip is not None and direct_ip in TRUSTED_PROXIES:
-    if request.client and request.client.host:
-        return f"ip:{request.client.host}"
-
-    # Only trust X-Forwarded-For when the direct peer is a known proxy/load-balancer.
-    # Accepting it unconditionally would let any client forge their IP.
-    direct_host = request.client.host if request.client else None
-    if direct_host in WHITELIST:
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            client_ip = forwarded.split(",")[0].strip()
-            if client_ip:
-                return f"ip:{client_ip}"
-
-    # Last resort: unique per-request identifier so unknown clients
-    # never share a single bucket that can be exhausted by one attacker.
     return f"anon:{uuid.uuid4().hex}"
 
 
