@@ -7,7 +7,7 @@ from typing import Any
 
 
 import structlog
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from api.errors import StructuredAPIError
@@ -232,14 +232,19 @@ async def get_user_preferences(
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db_rls),
 ) -> UserPreferenceResponse:
-    """Get the current authenticated user's notification preferences."""
+    """Get the current authenticated user's notification preferences.
+
+    Returns 404 when no preferences have been saved yet.
+    Use PUT /preferences to create or update preferences explicitly.
+    """
     pref = db.query(UserPreference).filter(UserPreference.user_id == current_user.user_id).first()
     if not pref:
-        # Create default preferences
-        pref = create_or_update_user_preference(
-            db=db,
-            user_id=current_user.user_id,
-            email=current_user.email,
+        # Return 404 rather than implicitly creating default preferences.
+        # GET must not modify persistent data; preference creation requires
+        # explicit user action via PUT /preferences.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Notification preferences not found. Use PUT /preferences to create them.",
         )
     
     return UserPreferenceResponse(
