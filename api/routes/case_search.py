@@ -4,6 +4,8 @@ Endpoints for finding similar cases, precedents, comparisons, and knowledge grap
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from api.query_validation import meaningful_search_query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -105,7 +107,7 @@ def search_similar_cases(
 
 @router.get("/search/text")
 def search_by_text(
-    query: str = Query(..., min_length=10),
+    query: str = Depends(meaningful_search_query),
     limit: int = Query(10, ge=1, le=50),
     min_similarity: float = Query(0.5, ge=0, le=1),
     case_type: Optional[str] = None,
@@ -117,7 +119,7 @@ def search_by_text(
     Search for cases by free text
     
     Args:
-        query: Search text (minimum 10 characters)
+        query: Search text (minimum 3 meaningful words)
         limit: Maximum results
         min_similarity: Minimum similarity threshold
         case_type: Filter by case type (optional)
