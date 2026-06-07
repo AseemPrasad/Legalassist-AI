@@ -117,6 +117,9 @@ RATE_LIMIT_RULES: list[tuple[str, str, str, RateLimitRule]] = [
     ("POST", "/api/v1/webhooks/twilio", "exact", RateLimitRule(60, 60)),
     ("POST", "/api/v1/webhooks/sendgrid", "exact", RateLimitRule(60, 60)),
     ("GET", "/api/cases/search/text", "exact", RateLimitRule(30, 60)),
+    ("GET", "/api/cases/search/statistics", "exact", RateLimitRule(30, 60)),
+    ("GET", "/api/cases/argument-analysis/", "prefix", RateLimitRule(15, 60)),
+    ("GET", "/api/cases/knowledge-graph/", "prefix", RateLimitRule(20, 60)),
     ("GET", "/api/cases/", "prefix", RateLimitRule(20, 60)),
     ("GET", "/api/v1/analytics/", "prefix", RateLimitRule(20, 60)),
 ]

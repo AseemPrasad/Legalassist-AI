@@ -13,6 +13,7 @@ from typing import List, Optional
 from api.auth import get_current_user
 from database import User, Case
 from api.dependencies import get_db_rls
+from api.limiter import RateLimit
 
 # Import case search engines
 from core.embedding_engine import EmbeddingEngine
@@ -48,7 +49,7 @@ def _require_owned_case(case_id: int, current_user: User, db: Session) -> Case:
 
 # ==================== Case Search Endpoints ====================
 
-@router.get("/{case_id}/search-similar")
+@router.get("/{case_id}/search-similar", dependencies=[Depends(RateLimit(requests=10, window=60))])
 def search_similar_cases(
     case_id: int,
     limit: int = Query(10, ge=1, le=50),
@@ -105,7 +106,7 @@ def search_similar_cases(
         raise HTTPException(status_code=500, detail="Failed to search similar cases")
 
 
-@router.get("/search/text")
+@router.get("/search/text", dependencies=[Depends(RateLimit(requests=30, window=60))])
 def search_by_text(
     query: str = Depends(meaningful_search_query),
     limit: int = Query(10, ge=1, le=50),
@@ -190,7 +191,7 @@ def get_search_statistics(
 
 # ==================== Precedent Matching Endpoints ====================
 
-@router.get("/{case_id}/precedents/winning")
+@router.get("/{case_id}/precedents/winning", dependencies=[Depends(RateLimit(requests=15, window=60))])
 def get_winning_precedents(
     case_id: int,
     issue: Optional[str] = None,
@@ -233,7 +234,7 @@ def get_winning_precedents(
         raise HTTPException(status_code=500, detail="Failed to find precedents")
 
 
-@router.get("/{case_id}/precedents/losing")
+@router.get("/{case_id}/precedents/losing", dependencies=[Depends(RateLimit(requests=15, window=60))])
 def get_losing_precedents(
     case_id: int,
     issue: Optional[str] = None,
@@ -273,7 +274,7 @@ def get_losing_precedents(
         raise HTTPException(status_code=500, detail="Failed to find precedents")
 
 
-@router.get("/argument-analysis/success-rate")
+@router.get("/argument-analysis/success-rate", dependencies=[Depends(RateLimit(requests=15, window=60))])
 def get_argument_success_rate(
     argument: str = Query(..., min_length=10),
     issue: Optional[str] = None,
@@ -384,7 +385,7 @@ def get_arguments_by_issue(
 
 # ==================== Case Comparison Endpoints ====================
 
-@router.get("/{case_id}/compare/{precedent_id}")
+@router.get("/{case_id}/compare/{precedent_id}", dependencies=[Depends(RateLimit(requests=5, window=60))])
 def compare_cases(
     case_id: int,
     precedent_id: int,
@@ -412,7 +413,7 @@ def compare_cases(
         raise HTTPException(status_code=500, detail="Failed to compare cases")
 
 
-@router.get("/{case_id}/comparison/{precedent_id}/suggestions")
+@router.get("/{case_id}/comparison/{precedent_id}/suggestions", dependencies=[Depends(RateLimit(requests=5, window=60))])
 def get_comparison_suggestions(
     case_id: int,
     precedent_id: int,
@@ -445,7 +446,7 @@ def get_comparison_suggestions(
         raise HTTPException(status_code=500, detail="Failed to generate suggestions")
 
 
-@router.get("/{case_id}/comparison/{precedent_id}/differences")
+@router.get("/{case_id}/comparison/{precedent_id}/differences", dependencies=[Depends(RateLimit(requests=10, window=60))])
 def get_comparison_differences(
     case_id: int,
     precedent_id: int,
@@ -475,7 +476,7 @@ def get_comparison_differences(
 
 # ==================== Knowledge Graph Endpoints ====================
 
-@router.get("/knowledge-graph/query")
+@router.get("/knowledge-graph/query", dependencies=[Depends(RateLimit(requests=20, window=60))])
 def query_knowledge_graph(
     issue: str = Query(..., min_length=3),
     outcome: Optional[str] = None,
@@ -540,7 +541,7 @@ def query_knowledge_graph(
         raise HTTPException(status_code=500, detail="Failed to query knowledge graph")
 
 
-@router.get("/knowledge-graph/statistics")
+@router.get("/knowledge-graph/statistics", dependencies=[Depends(RateLimit(requests=30, window=60))])
 def get_knowledge_graph_statistics(
     db: Session = Depends(get_db_rls),
     current_user: User = Depends(get_current_user),
