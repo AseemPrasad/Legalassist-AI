@@ -16,8 +16,8 @@ Key refactoring:
 - No more report_id = job_id confusion
 """
 import uuid
-from fastapi import APIRouter, HTTPException, status, Depends, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 
 from api.models import ReportGenerationRequest, ReportGenerationResponse
@@ -204,6 +204,19 @@ async def download_report(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Report not found",
         )
+    
+    if status_info["status"] != "completed":
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "report_id": report_id,
+                "status": status_info["status"],
+                "detail": f"Report is still {status_info['status']}",
+            },
+        )
+    
+    base_dir = _get_reports_base_dir()
+    user_dir = base_dir / str(current_user.user_id)
 
     if report["status"] != "completed":
         raise HTTPException(
