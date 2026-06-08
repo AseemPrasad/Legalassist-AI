@@ -4,44 +4,22 @@ The project has moved models and CRUD helpers into the `db/` package, but many
 existing imports still point at `database`. This module re-exports the pieces
 needed by the current codebase and keeps the authentication/OTP security path
 working while the refactor continues.
+
+CRITICAL: This file should be a PURE RE-EXPORT MODULE. All implementations must
+come from db/ subpackages. Do not define duplicate functions here.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import logging
 import threading
-from typing import Optional, List
-from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    DateTime,
-    Boolean,
-    Text,
-    ForeignKey,
-    Enum as SQLEnum,
-    JSON,
-    UniqueConstraint,
-    Index,
-)
-from sqlalchemy.engine import make_url
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
-import enum
-from contextlib import contextmanager
-from config import Config
-try:
-    import redis
-except ImportError:
-    redis = None
-
 from typing import Optional, List
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from db.base import Base
 from db.session import engine, SessionLocal, init_db, db_session, get_db, _to_utc_datetime, _datetime_for_db
+
 _OTP_RATE_LIMIT_LOCK = threading.RLock()
 _OTP_RATE_LIMIT_EVENTS: dict[str, list[dt.datetime]] = {}
 
@@ -87,9 +65,8 @@ from db.models import (
     CaseArgument,
     KnowledgeGraphEdge,
     PrecedentMatch,
-    CaseNote,
-    CaseNoteVersion,
 )
+
 from db.crud.notifications import (
     create_case_deadline,
     get_upcoming_deadlines,
@@ -99,23 +76,64 @@ from db.crud.notifications import (
     reserve_notification,
     update_notification_result,
 )
+
+from db.crud.users import (
+    get_user_by_email,
+    create_user,
+    update_user_last_login,
+    create_otp_verification,
+    get_pending_otp,
+    mark_otp_as_used,
+    is_email_locked_out,
+    record_otp_failed_attempt,
+    reset_otp_failed_attempts,
+    cleanup_expired_otps,
+    create_or_update_user_preference,
+)
+
+from db.crud.cases import (
+    create_case,
+    get_user_cases,
+    get_case_by_id,
+    get_case_by_number,
+    update_case_status,
+    delete_case,
+    create_case_document,
+    get_case_documents,
+    get_case_document_by_id,
+    create_case_record,
+    get_case_record,
+    get_cases_by_criteria,
+    update_case_outcome,
+    submit_user_feedback,
+    get_user_feedback,
+    submit_model_feedback,
+    get_case_timeline,
+    create_timeline_event,
+    create_attachment,
+    get_attachments_for_case,
+    get_user_stats,
+    get_similarity_feedback,
+)
+
+from db.crud.tokens import (
+    revoke_token,
+    cleanup_expired_revoked_tokens,
+    is_token_revoked,
+)
+
 from db.case_service import (
     save_case_note_draft,
     publish_case_note,
     get_case_note_history,
 )
-from db.otp_service import (
-    revoke_token,
-    cleanup_expired_revoked_tokens,
-    is_token_revoked,
-)
+
 from db.crud.comments import (
     create_case_comment,
     get_case_comments,
     upsert_case_presence,
     get_case_presence,
 )
-from db.case_service import save_case_note_draft
 
 __all__ = [
     "Base",
@@ -159,7 +177,6 @@ __all__ = [
     "PrecedentMatch",
     "create_case_deadline",
     "get_upcoming_deadlines",
-    "get_user_deadlines",
     "has_notification_been_sent",
     "log_notification",
     "get_notification_history",

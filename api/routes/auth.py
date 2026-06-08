@@ -193,15 +193,19 @@ async def delete_api_key(
     summary="Get current user info"
 )
 async def get_current_user_info(
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ) -> dict:
     """Get information about current user"""
+    
+    user = db.query(User).filter(User.id == int(current_user.user_id)).first()
+    subscription_tier = user.subscription_tier if user else "free"
     
     return {
         "user_id": current_user.user_id,
         "email": current_user.email,
         "role": current_user.role,
-        "subscription_tier": "pro"
+        "subscription_tier": subscription_tier
     }
 
 

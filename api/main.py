@@ -32,6 +32,10 @@ from api.validation import (
 )
 from database import init_db
 
+# Import routes
+from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search
+
+settings = get_settings()
 logger = structlog.get_logger(__name__)
 
 
@@ -108,12 +112,11 @@ def create_app() -> FastAPI:
     ValidationConfig.from_settings(settings)
     
     # Add middleware
-    # NOTE: FastAPI registers @app.middleware decorators in LIFO order, so the
-    # last-registered middleware runs first on incoming requests. We register
-    # request_size_limit_middleware last so it executes first, rejecting
-    # oversized payloads before any other middleware or handler is invoked.
-    app.middleware("http")(add_correlation_id_middleware)
+    app.middleware("http")(request_size_limit_middleware)
+    # Idempotency middleware should run early for POST/PUT/PATCH/DELETE
+    app.middleware("http")(idempotency_middleware)
     app.middleware("http")(logging_middleware)
+    app.middleware("http")(add_correlation_id_middleware)
     app.middleware("http")(error_handling_middleware)
 
     if settings.RATE_LIMIT_ENABLED:
@@ -134,14 +137,6 @@ def create_app() -> FastAPI:
     app.include_router(deadlines.router)
     app.include_router(auth.router)
     app.include_router(case_search.router)  # Case search and precedent matching
-    app.include_router(speech.router)
-    app.include_router(document_verification.router)
-    app.include_router(argument_strength.router)
-    app.include_router(deadline_engine.router)
-    app.include_router(efiling.router)
-    app.include_router(notifications_webhooks.router)
-    app.include_router(notifications_webhooks.pref_router)
-    app.include_router(anonymized_cases.router)
     # Model feedback & optimization
     from api.routes import models as models_router
     app.include_router(models_router.router)

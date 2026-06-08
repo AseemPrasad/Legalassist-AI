@@ -185,7 +185,7 @@ def generate_report(
     else:
         pdf_bytes = generate_case_pdf(user_id=int(user_id), case_id=int(case_id))
     if not pdf_bytes:
-        raise RuntimeError("PDF generation returned empty content")
+        raise RuntimeError(f"PDF generation returned empty content for case_id={case_id}, user_id={user_id}")
 
     file_path = out_dir / file_name
     _store_report(file_path, pdf_bytes, _storage_type)

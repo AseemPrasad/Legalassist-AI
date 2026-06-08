@@ -101,7 +101,9 @@ def get_db_rls(
         if _is_postgres:
             try:
                 clear_rls_context(db)
-            except Exception:
+            except Exception as e:
+            import logging
+            logging.error(f"Dependency error: {e}")
                 pass
         db.close()
 

@@ -171,7 +171,9 @@ class Config:
             vault_secret = get_secret("jwt_secret")
             if vault_secret:
                 return str(vault_secret).strip()
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.error(f"Config error: {e}")
             pass
 
         env_name = cls.APP_ENV.upper()

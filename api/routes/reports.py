@@ -16,8 +16,8 @@ Key refactoring:
 - No more report_id = job_id confusion
 """
 import uuid
-from fastapi import APIRouter, HTTPException, status, Depends, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 
 from api.models import ReportGenerationRequest, ReportGenerationResponse
@@ -204,17 +204,31 @@ async def download_report(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Report not found",
         )
-
-    if report["status"] != "completed":
+    
+    if status_info["status"] != "completed":
+        current = status_info["status"]
         raise HTTPException(
             status_code=status.HTTP_202_ACCEPTED,
-            detail=f"Report is still {report['status']}",
+            detail=f"Report {report_id} has status '{current}'; check back after generation completes"
         )
+    
+    base_dir = _get_reports_base_dir()
+    user_dir = base_dir / str(current_user.user_id)
 
-    if not report["file_path"]:
+    if not user_dir.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Report file not found on disk"
+            detail=f"Report {report_id} output directory not found; the report may not have been generated yet",
+        )
+
+    matches = list(user_dir.glob(f"*_{report_id}.pdf"))
+    if not matches:
+        matches = list(user_dir.glob(f"*{report_id}.pdf"))
+
+    if not matches:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Report {report_id} file not found on disk at {user_dir}",
         )
     
     logger.info(

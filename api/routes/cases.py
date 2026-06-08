@@ -5,6 +5,7 @@ POST /api/v1/cases/similarity-feedback - Save similarity feedback
 GET /api/v1/cases/{id}/timeline - Get case timeline
 """
 from datetime import datetime, timedelta, timezone
+from typing import Dict
 
 from fastapi import APIRouter, HTTPException, status, Depends
 from api.models import (
@@ -23,6 +24,7 @@ from database import (
     Case,
     get_db,
     submit_similarity_feedback,
+    SimilarityFeedback,
 )
 from analytics_engine import CaseSimilarityCalculator
 
@@ -58,6 +60,7 @@ async def search_cases(
 
     Returns paginated list of matching cases
     """
+
     logger.info(
         "Searching cases",
         user_id=current_user.user_id,
@@ -69,32 +72,19 @@ async def search_cases(
 
     start = perf_counter()
 
-    # Similarity constraints/knobs
     min_similarity = request.relevance_threshold
-    candidate_limit = 1000  # keeps the response time low
+    candidate_limit = 1000
 
     reference_case = None
+    candidates = []
+    outcome_rows = []
+    feedback_rows = []
     db = None
     try:
         db = get_db()
-
         query_signature = request.query_signature or _build_query_signature(request)
 
-        # Restrict candidates to case types and jurisdictions the user owns
-        user_scope = (
-            db.query(Case.case_type, Case.jurisdiction)
-            .filter(Case.user_id == int(current_user.user_id))
-            .distinct()
-            .all()
-        )
         query = db.query(CaseRecord)
-        if user_scope:
-            query = query.filter(
-                CaseRecord.case_type.in_([row.case_type for row in user_scope]),
-                CaseRecord.jurisdiction.in_([row.jurisdiction for row in user_scope]),
-            )
-
-        # Apply explicit request filters on top of ownership scope
         if request.case_type and request.case_type != "general":
             query = query.filter(CaseRecord.case_type == request.case_type)
         if request.jurisdiction:
@@ -108,20 +98,14 @@ async def search_cases(
         if request.defendant_type:
             query = query.filter(CaseRecord.defendant_type == request.defendant_type)
 
-        # Restrict time window if requested
         if request.year_from is not None:
             query = query.filter(CaseRecord.created_at >= datetime(request.year_from, 1, 1))
         if request.year_to is not None:
             query = query.filter(CaseRecord.created_at <= datetime(request.year_to, 12, 31, 23, 59, 59))
 
-        # Keep result set small for <2s performance
         candidates = query.order_by(CaseRecord.created_at.desc()).limit(candidate_limit).all()
 
-        # If we cannot get a real reference_case, we use the first candidate as proxy when possible.
-        # This still returns meaningful “similar cases” under the attribute-only scoring.
-        if candidates:
-            reference_case = candidates[0]
-
+        reference_case = candidates[0] if candidates else None
         if not reference_case:
             return CaseSearchResponse(
                 total_results=0,
@@ -129,60 +113,30 @@ async def search_cases(
                 search_time_seconds=round(perf_counter() - start, 4),
             )
 
-        # Score candidates and apply threshold
-        scored = []
-        for c in candidates:
-            if c.id == reference_case.id:
-                continue
-            raw = CaseSimilarityCalculator.case_similarity_score(reference_case, c)
-            # raw is 0..100. normalize to 0..1
-            score01 = raw / 100.0
-            # Optional: slight boost for recency to match ranking requirement.
-            # (Cheap: based on created_at within last ~365 days)
-            try:
-                created_at = c.created_at
-                if created_at and created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=timezone.utc)
-                recency_days = (datetime.now(timezone.utc) - created_at).days if created_at else 0
-                recency_boost = max(0.0, 0.05 - recency_days * 0.0002)  # up to +0.05
-            except (TypeError, ValueError, AttributeError):
-                recency_boost = 0.0
-            feedback_boost = CaseSimilarityCalculator.get_feedback_adjustment(
-                db,
-                c,
-                user_id=current_user.user_id,
-                query_signature=query_signature,
-            )
-            score01 = min(1.0, score01 + recency_boost + feedback_boost)
+        candidate_ids = [c.id for c in candidates if c.id != reference_case.id]
 
-            if score01 > min_similarity:
-                scored.append((c, score01))
-
-        scored.sort(key=lambda x: x[1], reverse=True)
-        top = scored[: request.limit]
-
-        # Fetch appeal analytics for the returned set
-        result_ids = [c.id for c, _ in top]
-        outcome_rows = []
-        if result_ids:
-            outcome_rows = (
-                db.query(CaseOutcome)
-                .filter(CaseOutcome.case_id.in_(result_ids))
+        feedback_rows = []
+        if candidate_ids:
+            feedback_rows = (
+                db.query(SimilarityFeedback)
+                .filter(
+                    SimilarityFeedback.candidate_case_id.in_(candidate_ids),
+                    SimilarityFeedback.user_id == str(current_user.user_id),
+                )
                 .all()
             )
 
-    scored.sort(key=lambda x: x[1], reverse=True)
-    top = scored[: request.limit]
+        outcome_rows = []
+        if candidate_ids:
+            outcome_rows = (
+                db.query(CaseOutcome)
+                .filter(CaseOutcome.case_id.in_(candidate_ids))
+                .all()
+            )
 
-    # Fetch appeal analytics for the returned set
-    result_ids = [c.id for c, _ in top]
-    outcome_rows = []
-    if result_ids:
-        outcome_rows = (
-            db.query(CaseOutcome)
-            .filter(CaseOutcome.case_id.in_(result_ids))
-            .all()
-        )
+    finally:
+        if db is not None:
+            db.close()
 
     outcome_map = {row.case_id: row for row in outcome_rows}
     appealed_cases = sum(1 for row in outcome_rows if row.appeal_filed)
@@ -190,6 +144,37 @@ async def search_cases(
     appeal_success_rate = (
         round(appeal_successful_cases / appealed_cases, 4) if appealed_cases > 0 else None
     )
+
+    feedback_adjustments: Dict[int, float] = {}
+    for f in feedback_rows:
+        current = feedback_adjustments.get(f.candidate_case_id, 0.0)
+        adjustment = 0.03 if f.relevance else -0.03
+        feedback_adjustments[f.candidate_case_id] = current + adjustment
+    for cid in feedback_adjustments:
+        feedback_adjustments[cid] = max(-0.03, min(0.03, feedback_adjustments[cid]))
+
+    scored = []
+    for c in candidates:
+        if c.id == reference_case.id:
+            continue
+        raw = CaseSimilarityCalculator.case_similarity_score(reference_case, c)
+        score01 = raw / 100.0
+        try:
+            created_at = c.created_at
+            if created_at and created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            recency_days = (datetime.now(timezone.utc) - created_at).days if created_at else 0
+            recency_boost = max(0.0, 0.05 - recency_days * 0.0002)
+        except Exception:
+            recency_boost = 0.0
+        feedback_boost = feedback_adjustments.get(c.id, 0.0)
+        score01 = min(1.0, score01 + recency_boost + feedback_boost)
+
+        if score01 > min_similarity:
+            scored.append((c, score01))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top = scored[: request.limit]
 
     results = []
     for c, score in top:
@@ -217,14 +202,15 @@ async def search_cases(
             )
         )
 
+    total_results = len(scored)
     return CaseSearchResponse(
-        total_results=len(scored),
+        total_results=total_results,
         results=results,
         search_time_seconds=round(perf_counter() - start, 4),
         appeal_success_rate=appeal_success_rate,
         appealed_cases=appealed_cases,
         appeal_successful_cases=appeal_successful_cases,
-    )se()
+    )
 
 
 @router.post(
