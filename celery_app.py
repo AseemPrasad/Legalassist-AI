@@ -63,7 +63,9 @@ except ImportError:  # pragma: no cover - fallback for minimal test environments
         def delay(self, *args, **kwargs):
             try:
                 self.run(*args, **kwargs)
-            except Exception:
+            except Exception as e:
+            import logging
+            logging.error(f"Celery error: {e}")
                 pass
             import uuid
             return SimpleNamespace(id=uuid.uuid4().hex, state="SUCCESS", info=None, result=None)
