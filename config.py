@@ -16,16 +16,25 @@ if PROJECT_ENV_PATH.exists():
 else:
     load_dotenv()
 
-def _get_val(key, default=None):
-    # Try Streamlit secrets first (if in a Streamlit context)
+_STREAMLIT_SECRETS = None
+
+def _load_streamlit_secrets():
+    """Load Streamlit secrets once and cache them."""
+    global _STREAMLIT_SECRETS
+    if _STREAMLIT_SECRETS is not None:
+        return _STREAMLIT_SECRETS
     try:
         import streamlit as st
-        if key in st.secrets:
-            return st.secrets[key]
+        _STREAMLIT_SECRETS = dict(st.secrets)
     except (ImportError, RuntimeError, AttributeError, FileNotFoundError):
-        pass
-    
-    # Fallback to environment variables
+        _STREAMLIT_SECRETS = {}
+    return _STREAMLIT_SECRETS
+
+
+def _get_val(key, default=None):
+    secrets = _load_streamlit_secrets()
+    if key in secrets:
+        return secrets[key]
     return os.getenv(key, default)
 
 def _get_bool_env(key, default=False):
@@ -38,15 +47,28 @@ def _get_int_env(key, default):
     except (ValueError, TypeError):
         return default
 
-class Config:
+class _ConfigMeta(type):
+    """Metaclass that resolves debug-related config dynamically from environment."""
+
+    _DYNAMIC = frozenset({"APP_ENV", "DEBUG", "TESTING", "LOG_LEVEL"})
+
+    def __getattr__(cls, name):
+        if name == "APP_ENV":
+            return _get_val("APP_ENV", _get_val("ENVIRONMENT", "development")).lower()
+        if name == "DEBUG":
+            return _get_bool_env("DEBUG", cls.APP_ENV in ("dev", "development", "local"))
+        if name == "TESTING":
+            return _get_bool_env("TESTING", False)
+        if name == "LOG_LEVEL":
+            return _get_val("LOG_LEVEL", "INFO")
+        raise AttributeError(f"type object '{cls.__name__}' has no attribute '{name}'")
+
+
+class Config(metaclass=_ConfigMeta):
     # --- App Identity ---
     APP_NAME = _get_val("APP_NAME", "LegalEase AI")
-    APP_ENV = _get_val("APP_ENV", _get_val("ENVIRONMENT", "development")).lower()
-    DEBUG = _get_bool_env("DEBUG", APP_ENV in ("dev", "development", "local"))
-    TESTING = _get_bool_env("TESTING", False)
     
-    # --- Logging ---
-    LOG_LEVEL = _get_val("LOG_LEVEL", "INFO")
+    # APP_ENV, DEBUG, TESTING, LOG_LEVEL are resolved dynamically via _ConfigMeta.__getattr__
     
     # --- Model Settings (LLM) ---
     # The primary model used for generating summaries and legal remedies analysis.
@@ -116,6 +138,9 @@ class Config:
     OTP_RATE_LIMIT_HOURS = _get_int_env("OTP_RATE_LIMIT_HOURS", 1)
     OTP_RATE_LIMIT_MAX = _get_int_env("OTP_RATE_LIMIT_MAX", 3)
     
+    _MISSING = object()
+    _cached_jwt_secret = _MISSING
+
     @classmethod
     def get_jwt_secret(cls):
         """
@@ -127,20 +152,26 @@ class Config:
         Raises:
             RuntimeError: If JWT_SECRET is not configured in environment variables.
         """
-        # Try environment / streamlit secrets first
+        if cls._cached_jwt_secret is not cls._MISSING:
+            return cls._cached_jwt_secret
+
         secret = str(_get_val("JWT_SECRET", "")).strip()
         if secret:
+            cls._cached_jwt_secret = secret
             return secret
-
-        # Try central secret manager (Vault or env fallback)
-        try:
-            from utils.secret_manager import get_secret
-            vault_secret = get_secret("jwt_secret")
-            if vault_secret:
-                return str(vault_secret).strip()
-        except Exception:
-            pass
-
+            
+        secret_file = PROJECT_ROOT / ".jwt_secret"
+        if secret_file.exists():
+            try:
+                file_secret = secret_file.read_text(encoding="utf-8").strip()
+                if file_secret:
+                    cls._cached_jwt_secret = file_secret
+                    return file_secret
+            except Exception as e:
+                logger.warning(f"Failed to read .jwt_secret file: {e}")
+        
+        # We no longer auto-generate secrets to prevent insecure fallback.
+        # This forces explicit configuration which is a security best practice.
         env_name = cls.APP_ENV.upper()
         raise RuntimeError(
             f"JWT_SECRET is not configured for the {env_name} environment. "
@@ -153,34 +184,31 @@ class Config:
     TWILIO_FROM_NUMBER = _get_val("TWILIO_FROM_NUMBER", "")
     TWILIO_AUTH_TOKEN = None
 
+    _cached_twilio_auth_token = _MISSING
+
     @classmethod
     def get_twilio_auth_token(cls) -> str:
         """Return the Twilio auth token, retrieved on demand to limit exposure."""
-        if cls.TWILIO_AUTH_TOKEN is not None:
-            return cls.TWILIO_AUTH_TOKEN
-        # Prefer centralized secret manager
-        try:
-            from utils.secret_manager import get_secret
-            val = get_secret("twilio_auth_token") or _get_val("TWILIO_AUTH_TOKEN", "")
-            return str(val or "")
-        except Exception:
-            return str(_get_val("TWILIO_AUTH_TOKEN", "") or "")
+        if cls._cached_twilio_auth_token is not cls._MISSING:
+            return cls._cached_twilio_auth_token
+        val = str(_get_val("TWILIO_AUTH_TOKEN", "") or "")
+        cls._cached_twilio_auth_token = val
+        return val
 
     # --- Notification Settings (Email) ---
     SENDGRID_FROM_EMAIL = _get_val("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
     SENDGRID_API_KEY = None
 
+    _cached_sendgrid_api_key = _MISSING
+
     @classmethod
     def get_sendgrid_api_key(cls) -> str:
         """Return the SendGrid API key, retrieved on demand to limit exposure."""
-        if cls.SENDGRID_API_KEY is not None:
-            return cls.SENDGRID_API_KEY
-        try:
-            from utils.secret_manager import get_secret
-            val = get_secret("sendgrid_api_key") or _get_val("SENDGRID_API_KEY", "")
-            return str(val or "")
-        except Exception:
-            return str(_get_val("SENDGRID_API_KEY", "") or "")
+        if cls._cached_sendgrid_api_key is not cls._MISSING:
+            return cls._cached_sendgrid_api_key
+        val = str(_get_val("SENDGRID_API_KEY", "") or "")
+        cls._cached_sendgrid_api_key = val
+        return val
 
     # --- Application URLs ---
     BASE_URL = _get_val("BASE_URL", "https://legalassist.ai")

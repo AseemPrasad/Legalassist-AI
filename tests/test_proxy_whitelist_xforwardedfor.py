@@ -130,37 +130,35 @@ def test_xff_ignored_when_direct_client_is_untrusted():
 
 def test_xff_trusted_when_direct_client_is_trusted_proxy(monkeypatch):
     """X-Forwarded-For IS used when the direct peer is a known trusted proxy."""
-    # Temporarily add a proxy IP to TRUSTED_PROXIES for this test
-    import api.limiter as lim
-    monkeypatch.setattr(lim, "TRUSTED_PROXIES", frozenset({"10.0.0.1", "127.0.0.1", "::1"}))
+    monkeypatch.setenv("RATE_LIMIT_TRUSTED_PROXIES", "10.0.0.1,127.0.0.1,::1")
 
     request = _FakeRequest(
         headers={"X-Forwarded-For": "5.6.7.8"},
         client_host="10.0.0.1",
     )
-    # The direct client returns its IP first (before XFF check)
-    # because resolve_rate_limit_identifier returns on the first direct IP match.
-    # XFF is only checked when there is no direct IP — test that path.
+    key = resolve_rate_limit_identifier(request)
+    # Direct peer 10.0.0.1 is a trusted proxy → use XFF first hop
+    assert key == "ip:5.6.7.8"
+
+    # Without a direct client IP, proxy trust cannot be verified → anon
     request_no_direct = _FakeRequest(
         headers={"X-Forwarded-For": "5.6.7.8"},
         client_host=None,
     )
-    key = resolve_rate_limit_identifier(request_no_direct)
-    # No direct IP, no trusted proxy check possible — gets anon token
-    assert key.startswith("anon:")
+    key_no_direct = resolve_rate_limit_identifier(request_no_direct)
+    assert key_no_direct.startswith("anon:")
 
 
-def test_xff_multiple_hops_uses_first():
+def test_xff_multiple_hops_uses_first(monkeypatch):
     """With multiple XFF hops, only the first (leftmost) client IP is used."""
+    monkeypatch.setenv("RATE_LIMIT_TRUSTED_PROXIES", "127.0.0.1,::1")
     request = _FakeRequest(
         headers={"X-Forwarded-For": "9.8.7.6, 10.0.0.1, 10.0.0.2"},
         client_host="127.0.0.1",  # loopback — trusted proxy
     )
-    import api.limiter as lim
-    with patch.object(lim, "TRUSTED_PROXIES", frozenset({"127.0.0.1", "::1"})):
-        # Direct IP is returned before XFF is checked
-        key = resolve_rate_limit_identifier(request)
-    assert key == "ip:127.0.0.1"
+    key = resolve_rate_limit_identifier(request)
+    # Direct peer 127.0.0.1 is a trusted proxy → use first XFF hop
+    assert key == "ip:9.8.7.6"
 
 
 # ---------------------------------------------------------------------------

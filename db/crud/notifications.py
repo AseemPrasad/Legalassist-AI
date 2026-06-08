@@ -1,6 +1,9 @@
+from cmath import log
 import datetime as dt
 from typing import Optional, List, Iterable
 from sqlalchemy.orm import Session
+from core.log_redaction import storage_safe_recipient
+import db
 from db.models.notifications import NotificationLog, NotificationStatus, NotificationChannel, NotificationTemplate, UserPreference
 from db.models.cases import CaseDeadline, Case
 from sqlalchemy.exc import IntegrityError
@@ -313,7 +316,7 @@ def log_notification(
         failed_at=dt.datetime.now(dt.timezone.utc) if status == NotificationStatus.FAILED else None,
     )
     db.add(log)
-    db.commit()
+    db.commit()          # ✅ CORRECT - uses commit()
     db.refresh(log)
     return log
 

@@ -166,6 +166,11 @@ OTP_REQUEST_RATE_LIMIT_MAX = int(os.getenv("OTP_REQUEST_RATE_LIMIT_MAX", str(Con
 OTP_REQUEST_RATE_LIMIT_HOURS = int(os.getenv("OTP_REQUEST_RATE_LIMIT_HOURS", str(Config.OTP_REQUEST_RATE_LIMIT_HOURS)))
 
 
+def _normalize_email(email: str) -> str:
+    """Normalize email to canonical form: lowercased, preserving delimiters."""
+    return email.strip().lower()
+
+
 def _hash_otp(otp: str) -> str:
     """Hash OTP code before storing"""
     return hashlib.sha256(otp.encode()).hexdigest()
@@ -282,6 +287,9 @@ def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, s
     via rate-limit or delivery-failure side channels. Actual outcomes are logged
     internally for observability.
     """
+    # Normalize email to canonical form before any rate limit / storage operation
+    email = _normalize_email(email)
+
     # Validate email format
     if not email or not EMAIL_REGEX.match(email):
         return False, "Invalid email address"
@@ -343,6 +351,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
       cryptographic work so an attacker cannot infer account state from
       response latency (timing side-channel).
     """
+    email = _normalize_email(email)
     db = SessionLocal()
     try:
         # Get pending OTP
@@ -556,7 +565,9 @@ def verify_jwt_token(token: str) -> Optional[dict]:
     from api.auth import verify_token
     try:
         return verify_token(token)
-    except Exception:
+    except Exception as e:
+    import logging
+    logging.error(f"Auth error: {e}")
         return None
 
 

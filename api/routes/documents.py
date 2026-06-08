@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
 from fastapi import Request
-from sqlalchemy.orm import Session
+from fastapi.responses import JSONResponse
 from api.models import DocumentAnalysisRequest, DocumentAnalysisSummary, AnalysisJobResponse
 from api.auth import get_current_user, CurrentUser
 from api.dependencies import get_db_rls
@@ -210,9 +210,13 @@ async def get_analysis_result(
     status_info = TaskStatus.get_task_status(job_id)
     
     if status_info["status"] != "completed":
-        raise HTTPException(
+        return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
-            detail=f"Job is still {status_info['status']}"
+            content={
+                "job_id": job_id,
+                "status": status_info["status"],
+                "detail": f"Job is still {status_info['status']}",
+            },
         )
     
     result = status_info["info"]

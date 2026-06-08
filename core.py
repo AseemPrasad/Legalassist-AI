@@ -103,7 +103,9 @@ def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
             continue
         try:
             conf = float(confs[i])
-        except Exception:
+        except Exception as e:
+        import logging
+        logging.error(f"Core error: {e}")
             conf = -1.0
         if conf < 0:
             continue
