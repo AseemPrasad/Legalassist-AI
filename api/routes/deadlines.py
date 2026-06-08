@@ -15,14 +15,11 @@ router = APIRouter(prefix="/api/v1/deadlines", tags=["deadlines"])
 logger = structlog.get_logger(__name__)
 
 
-def _deadline_priority(days_until_due: int) -> str:
-    if days_until_due <= 3:
-        return "critical"
-    if days_until_due <= 10:
-        return "high"
-    if days_until_due <= 30:
-        return "medium"
-    return "low"
+def _derive_deadline_status(due_date: datetime) -> str:
+    """Return 'overdue' if past due, 'pending' otherwise."""
+    if due_date < datetime.now(timezone.utc):
+        return "overdue"
+    return "pending"
 
 
 @router.get(
@@ -42,27 +39,72 @@ async def get_upcoming_deadlines(
         offset=offset,
     )
     
-    # Mock deadline data — priority is computed from days_until_due
     now = datetime.now(timezone.utc)
-    mock_items = [
-        ("Motion Response Due", "Response to plaintiff's motion for summary judgment", 3),
-        ("Filing Deadline", "Appeal filing deadline", 10),
-        ("Document Production", "Produce documents per discovery order", 21),
-    ]
     deadlines = [
         DeadlineResponse(
-            deadline_id=f"dl_{i:03d}",
+            deadline_id="dl_001",
             user_id=current_user.user_id,
-            case_id=f"case_{i:03d}",
-            title=title,
-            description=desc,
-            due_date=now + timedelta(days=d),
-            days_until_due=d,
-            priority=_deadline_priority(d),
-            status="pending",
+            case_id="case_001",
+            title="Motion Response Due",
+            description="Response to plaintiff's motion for summary judgment",
+            due_date=now + timedelta(days=3),
+            days_until_due=3,
+            priority="critical",
+            status=_derive_deadline_status(now + timedelta(days=3)),
             reminder_enabled=True,
             reminder_days=7,
             created_at=now
+        ),
+        DeadlineResponse(
+            deadline_id="dl_002",
+            user_id=current_user.user_id,
+            case_id="case_002",
+            title="Filing Deadline",
+            description="Appeal filing deadline",
+            due_date=now + timedelta(days=10),
+            days_until_due=10,
+            priority="high",
+            status=_derive_deadline_status(now + timedelta(days=10)),
+            reminder_enabled=True,
+            reminder_days=7,
+            created_at=now
+        ),
+        DeadlineResponse(
+            deadline_id="dl_003",
+            user_id=current_user.user_id,
+            case_id="case_003",
+            title="Document Production",
+            description="Produce documents per discovery order",
+            due_date=now + timedelta(days=21),
+            days_until_due=21,
+            priority="medium",
+            status=_derive_deadline_status(now + timedelta(days=21)),
+            reminder_enabled=True,
+            reminder_days=7,
+            created_at=now
+        ),
+                {**base_params, "limit": limit, "offset": offset},
+    ).mappings().all()
+
+    deadlines = []
+    for deadline in deadline_rows:
+        due_date = _normalize_utc_datetime(deadline["deadline_date"])
+        days_until_due = _days_until_due(due_date, now)
+        deadlines.append(
+            DeadlineResponse(
+                deadline_id=str(deadline["deadline_id"]),
+                user_id=str(deadline["user_id"]),
+                case_id=str(deadline["case_id"]),
+                title=deadline["case_title_from_case"] or deadline["case_number"],
+                description=deadline["description"] or "",
+                due_date=due_date or now,
+                days_until_due=days_until_due,
+                priority=_deadline_priority(days_until_due),
+                status=deadline["status"] or "active",
+                reminder_enabled=True,
+                reminder_days=7,
+                created_at=deadline["created_at"],
+            )
         )
         for i, (title, desc, d) in enumerate(mock_items, start=1)
     ]
@@ -101,17 +143,17 @@ async def get_deadline_details(
     )
     
     now = datetime.now(timezone.utc)
-    days_until = 5
+    due = now + timedelta(days=5)
     return DeadlineResponse(
         deadline_id=deadline_id,
         user_id=current_user.user_id,
         case_id="case_001",
         title="Example Deadline",
         description="Example deadline description",
-        due_date=now + timedelta(days=days_until),
-        days_until_due=days_until,
-        priority=_deadline_priority(days_until),
-        status="pending",
+        due_date=due,
+        days_until_due=5,
+        priority="high",
+        status=_derive_deadline_status(due),
         reminder_enabled=True,
         reminder_days=7,
         created_at=now
@@ -133,6 +175,14 @@ async def create_deadline(
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DeadlineResponse:
+    """Create a new deadline and persist it to the database."""
+
+    if not case_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="case_id is required",
+        )
+
     logger.info(
         "Creating deadline",
         user_id=current_user.user_id,
@@ -140,8 +190,7 @@ async def create_deadline(
     )
     
     now = datetime.now(timezone.utc)
-    due_date_utc = due_date.replace(tzinfo=timezone.utc) if due_date.tzinfo is None else due_date.astimezone(timezone.utc)
-    days_until = max(0, (due_date_utc.date() - now.date()).days)
+    days_until = (due_date - now).days
     
     return DeadlineResponse(
         deadline_id=str(deadline_id),
@@ -149,10 +198,10 @@ async def create_deadline(
         case_id=str(case["id"]),
         title=title,
         description=description,
-        due_date=due_date_utc,
+        due_date=normalized_due_date,
         days_until_due=days_until,
-        priority=_deadline_priority(days_until),
-        status="pending",
+        priority=priority,
+        status=_derive_deadline_status(due_date),
         reminder_enabled=True,
         reminder_days=request.reminder_days,
         created_at=now
@@ -200,24 +249,14 @@ async def update_deadline(
         created_at=updated_deadline.created_at
     )
 
-    db = None
-    try:
-        updated_deadline = transition_deadline(
-            db=db,
-            deadline_id=int(deadline_id),
-            target_status="active",
-            actor_user_id=current_user.user_id
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-        
-    now = datetime.now(timezone.utc)
-    due_date = _normalize_utc_datetime(updated_deadline.deadline_date)
-    days_until = _days_until_due(due_date, now)
+    logger.info(
+        "Updating deadline",
+        deadline_id=deadline_id,
+        user_id=current_user.user_id
+    )
     
+    now = datetime.now(timezone.utc)
+    due = due_date or (now + timedelta(days=7))
     return DeadlineResponse(
         deadline_id=str(updated_deadline.id),
         user_id=str(updated_deadline.user_id),
@@ -226,8 +265,30 @@ async def update_deadline(
         description=updated_deadline.description or "",
         due_date=due_date or now,
         days_until_due=days_until,
-        priority=_deadline_priority(days_until),
+        priority=updated_deadline.deadline_type or _deadline_priority(days_until),
         status=updated_deadline.status,
+        reminder_enabled=True,
+        reminder_days=7,
+        created_at=updated_deadline.created_at
+    )
+
+    db.commit()
+    db.refresh(deadline)
+
+    now = datetime.now(timezone.utc)
+    days_until = (deadline.deadline_date - now).days
+
+    logger.info(
+        "Reopening deadline",
+        deadline_id=deadline_id,
+        user_id=current_user.user_id,
+        case_id="case_001",
+        title=title or "Updated Deadline",
+        description="Updated description",
+        due_date=due,
+        days_until_due=7,
+        priority=priority or "medium",
+        status=_derive_deadline_status(due),
         reminder_enabled=True,
         reminder_days=7,
         created_at=updated_deadline.created_at
