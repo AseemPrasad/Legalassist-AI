@@ -229,7 +229,9 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
                     payload = verify_token(access_token)
                     user_id = int(payload.get("sub", 0))
                     request.state.csrf_user_id = user_id
-                except Exception:
+                except Exception as e:
+                import logging
+                logging.error(f"CSRF error: {e}")
                     user_id = 0
             session_id = secrets.token_urlsafe(16)
             token = generate_csrf_token(int(user_id) if str(user_id).isdigit() else 0, session_id)
