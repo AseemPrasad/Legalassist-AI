@@ -185,6 +185,7 @@ async def get_deadline_details(
 @router.post(
     "",
     response_model=DeadlineResponse,
+    status_code=status.HTTP_201_CREATED,
     summary="Create new deadline"
 )
 async def create_deadline(
@@ -204,25 +205,48 @@ async def create_deadline(
         user_id=current_user.user_id,
         title=title
     )
-    
-    _require_owned_case(case_id, current_user, db)
+
+    case = _require_owned_case(case_id, current_user, db)
+
+    # Ensure due_date is timezone-aware
+    if due_date.tzinfo is None:
+        due_date = due_date.replace(tzinfo=timezone.utc)
 
     now = datetime.now(timezone.utc)
-    days_until = (due_date - now).days
-    
-    return DeadlineResponse(
-        deadline_id="dl_new",
+    days_until = max(0, (due_date.date() - now.date()).days)
+
+    deadline = CaseDeadline(
         user_id=current_user.user_id,
-        case_id=case_id,
-        title=title,
+        case_id=int(case_id),
+        case_title=title,
+        deadline_date=due_date,
+        deadline_type=priority or _deadline_priority(days_until),
         description=description,
-        due_date=due_date,
-        days_until_due=days_until,
-        priority=priority or _deadline_priority(days_until),
+        is_completed=False,
+    )
+    db.add(deadline)
+    db.commit()
+    db.refresh(deadline)
+
+    logger.info(
+        "Deadline created",
+        deadline_id=deadline.id,
+        user_id=current_user.user_id,
+    )
+
+    return DeadlineResponse(
+        deadline_id=str(deadline.id),
+        user_id=current_user.user_id,
+        case_id=str(deadline.case_id),
+        title=deadline.case_title,
+        description=deadline.description or "",
+        due_date=deadline.deadline_date,
+        days_until_due=deadline.days_until_deadline(),
+        priority=_deadline_priority(deadline.days_until_deadline()),
         status="pending",
         reminder_enabled=True,
         reminder_days=reminder_days,
-        created_at=now
+        created_at=deadline.created_at
     )
 
 
