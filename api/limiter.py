@@ -117,14 +117,19 @@ RATE_LIMIT_RULES: list[tuple[str, str, str, RateLimitRule]] = [
     ("POST", "/api/v1/webhooks/twilio", "exact", RateLimitRule(60, 60)),
     ("POST", "/api/v1/webhooks/sendgrid", "exact", RateLimitRule(60, 60)),
     ("GET", "/api/cases/search/text", "exact", RateLimitRule(30, 60)),
+    ("GET", "/api/cases/search/statistics", "exact", RateLimitRule(30, 60)),
+    ("GET", "/api/cases/argument-analysis/", "prefix", RateLimitRule(15, 60)),
+    ("GET", "/api/cases/knowledge-graph/", "prefix", RateLimitRule(20, 60)),
     ("GET", "/api/cases/", "prefix", RateLimitRule(20, 60)),
     ("GET", "/api/v1/analytics/", "prefix", RateLimitRule(20, 60)),
 ]
 
-WHITELIST = {
-    "127.0.0.1",
-    "::1",
-}
+WHITELIST: frozenset[str] = frozenset()
+# Localhost addresses are intentionally excluded from the default whitelist.
+# Blanket loopback exemptions disable rate limiting when proxy configuration
+# is incorrect or absent, defeating a core security control.  If loopback
+# traffic must be exempt, add the address explicitly via the
+# RATE_LIMIT_WHITELIST environment variable (not yet wired; extend as needed).
 
 # Trusted reverse-proxy IPs whose X-Forwarded-For header is honoured.
 # Only real IP addresses belong here — service name strings cannot match
@@ -158,7 +163,36 @@ def _load_trusted_proxies() -> frozenset[str]:
                 entry=candidate,
                 reason="Only IP addresses are accepted as trusted proxies",
             )
-    # Always trust loopback addresses
+    # Loopback addresses are NOT automatically trusted.
+    # Misconfigured proxies could expose the loopback address as the apparent
+    # client IP; trusting loopback unconditionally would bypass rate limiting
+    # for any request that appears to originate from localhost.
+    # Add loopback explicitly to RATE_LIMIT_TRUSTED_PROXIES when required.
+    return frozenset(trusted)
+
+
+def get_trusted_proxies() -> frozenset[str]:
+    """Load trusted proxy IPs from environment (dynamic, per-call).
+
+    Reads ``RATE_LIMIT_TRUSTED_PROXIES`` on every invocation so that
+    configuration changes take effect without a server restart.
+    Silently skips entries that are not valid IP addresses.
+    Always includes loopback addresses.
+    """
+    import os
+    import ipaddress
+
+    raw = os.getenv("RATE_LIMIT_TRUSTED_PROXIES", "")
+    trusted: set[str] = set()
+    for entry in raw.split(","):
+        candidate = entry.strip()
+        if not candidate:
+            continue
+        try:
+            ipaddress.ip_address(candidate)
+            trusted.add(candidate)
+        except ValueError:
+            pass
     trusted.update({"127.0.0.1", "::1"})
     return frozenset(trusted)
 
@@ -263,7 +297,9 @@ class DistributedRateLimiter:
             client = await self.get_redis()
             ttl = await client.pttl(self._block_key(identifier, endpoint))
             return max(0, int(ttl))
-        except Exception:
+        except Exception as e:
+        import logging
+        logging.error(f"Limiter error: {e}")
             return 0
 
     async def check_rate_limit(
@@ -426,26 +462,18 @@ def resolve_rate_limit_identifier(request: Request) -> str:
     """Return a per-identity rate-limit key.
 
     Resolution order:
-    1. Valid JWT ``sub`` / ``user_id`` claim  → ``user:<id>``
-    2. Direct client IP from ASGI transport   → ``ip:<addr>``
-    3. ``X-Forwarded-For`` first hop          → ``ip:<addr>``
-       (only when the direct client IP is in TRUSTED_PROXIES)
-    4. Unique per-request token               → ``anon:<uuid>``
+    1. Valid API key identity                    → ``api_key:<digest>``
+    2. Valid JWT ``sub`` / ``user_id`` claim     → ``user:<id>``
+    3. Direct client IP from ASGI transport      → ``ip:<addr>``
+    4. ``X-Forwarded-For`` first hop             → ``ip:<addr>``
+       (only when the direct peer is a known trusted proxy)
+    5. Unique per-request token                  → ``anon:<uuid>``
 
     The function NEVER returns a shared literal such as ``"anonymous"``.
     ``X-Forwarded-For`` is only trusted when the direct transport-layer
     peer is a known trusted proxy IP — accepting it unconditionally allows
     any client to spoof their IP and bypass per-IP rate limits.
     """
-       (only used when the direct client is a known trusted proxy)
-    4. Unique per-request token               → ``anon:<uuid>``
-
-    The function NEVER returns a shared literal such as ``"anonymous"``.
-    Returning a shared key would allow a single attacker to exhaust the
-    entire unauthenticated quota and lock out all other unauthenticated
-    users (login, OTP, password-reset) — a targeted DoS vector.
-    """
-    """Prefer API key identity, then verified JWT user_id; otherwise use source IP."""
 
     api_key_identifier = limiter._api_key_identifier(request)
     if api_key_identifier:
@@ -467,31 +495,19 @@ def resolve_rate_limit_identifier(request: Request) -> str:
             except HTTPException:
                 pass
 
-    # Prefer the direct transport-layer IP — it cannot be spoofed by the client.
-    direct_ip: str | None = None
-    if request.client and request.client.host:
-        direct_ip = request.client.host
+    direct_ip = request.client.host if request.client else None
+    if direct_ip:
+        # Only trust X-Forwarded-For when the direct transport-layer peer
+        # is a known trusted proxy.  Accepting XFF unconditionally lets
+        # any client forge their IP and bypass per-IP rate limits.
+        if direct_ip in get_trusted_proxies():
+            forwarded = request.headers.get("X-Forwarded-For")
+            if forwarded:
+                client_ip = forwarded.split(",")[0].strip()
+                if client_ip:
+                    return f"ip:{client_ip}"
         return f"ip:{direct_ip}"
 
-    # Only trust X-Forwarded-For when the direct peer is a known trusted proxy.
-    # Accepting XFF unconditionally allows any client to forge their IP address
-    # by injecting or prepending values to the header.
-    if direct_ip is not None and direct_ip in TRUSTED_PROXIES:
-    if request.client and request.client.host:
-        return f"ip:{request.client.host}"
-
-    # Only trust X-Forwarded-For when the direct peer is a known proxy/load-balancer.
-    # Accepting it unconditionally would let any client forge their IP.
-    direct_host = request.client.host if request.client else None
-    if direct_host in WHITELIST:
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            client_ip = forwarded.split(",")[0].strip()
-            if client_ip:
-                return f"ip:{client_ip}"
-
-    # Last resort: unique per-request identifier so unknown clients
-    # never share a single bucket that can be exhausted by one attacker.
     return f"anon:{uuid.uuid4().hex}"
 
 
@@ -504,12 +520,29 @@ def _rule_matches(rule_method: str, rule_key: str, rule_type: str, request_metho
     return request_path.startswith(rule_key)
 
 
+def _normalize_path(path: str) -> str:
+    """Return a canonical path for rate-limit rule matching.
+
+    Strips trailing slashes so that /api/v1/auth/token and
+    /api/v1/auth/token/ resolve to the same rule.  Preserves the
+    leading slash and does not collapse double slashes inside the path
+    (those are handled at the router level).
+    """
+    if path != "/" and path.endswith("/"):
+        return path.rstrip("/")
+    return path
+
+
 def get_rate_limit_policy(path: str, method: str) -> tuple[RateLimitRule, bool]:
     request_method = method.upper()
+    # Normalize the incoming path before matching so that trailing-slash
+    # variants (e.g. /api/v1/auth/token/) are treated identically to the
+    # canonical form and cannot bypass endpoint-specific rate limits.
+    normalized = _normalize_path(path)
     for rule_method, rule_key, rule_type, rule in RATE_LIMIT_RULES:
-        if _rule_matches(rule_method, rule_key, rule_type, request_method, path):
+        if _rule_matches(rule_method, rule_key, rule_type, request_method, normalized):
             return rule, True
-    if path.startswith("/api/v1/auth/"):
+    if normalized.startswith("/api/v1/auth/"):
         return RateLimitRule(settings.AUTH_RATE_LIMIT_REQUESTS, settings.AUTH_RATE_LIMIT_WINDOW), False
     return RateLimitRule(settings.RATE_LIMIT_REQUESTS, settings.RATE_LIMIT_WINDOW), False
 

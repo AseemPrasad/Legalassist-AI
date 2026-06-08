@@ -14,7 +14,9 @@ import structlog
 
 try:
     import redis
-except Exception:  # pragma: no cover - runtime dependency may not be present in tests
+except Exception as e:
+        import logging
+        logging.error(f"Idempotency error: {e}")  # pragma: no cover - runtime dependency may not be present in tests
     redis = None
 
 logger = structlog.get_logger(__name__)

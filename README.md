@@ -185,6 +185,18 @@ python cli.py batch --folder ./tests/samples --output ./outputs/results.csv --wo
 
 This command is suitable for validating a 10+ file run with concurrency, checkpoint resume, and export outputs.
 
+## Continuous Integration
+
+The repository CI runs a Python version matrix on GitHub Actions:
+
+- Python `3.10`, `3.11`, and `3.12`
+- `pip` caching via `actions/setup-python`
+- `.pytest_cache` reuse between runs
+- `pytest-xdist` parallel execution
+- `pytest-rerunfailures` retry-based flaky-test detection
+
+If a test flakes and passes on retry, the workflow uploads a `ci-artifacts-*.zip` artifact containing the pytest log and the flaky node IDs.
+
 ## 🔍 Metadata Extraction
 
 LegalEase AI can automatically extract key case metadata from judgment documents, including:
