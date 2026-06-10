@@ -13,6 +13,9 @@ import hashlib
 import uuid
 
 from api.config import get_settings
+from api.errors import StructuredAPIError
+from database import SessionLocal, db_session
+from db.models import APIKey, User
 from database import SessionLocal, revoke_token
 
 # Import canonical JWT utilities from shared module
@@ -132,6 +135,10 @@ def revoke_jwt_token(token: str, user_id: int) -> bool:
     finally:
         db.close()
 
+        # Persist revocation
+        with db_session() as db:
+            # db-level revoke_token is available via database shim
+            from database import revoke_token, is_token_revoked
 
 def verify_token(token: str) -> Dict:
     """Verify JWT token and check revocation status.
@@ -315,42 +322,51 @@ async def get_current_user(
             finally:
                 db.close()
 
-            return CurrentUser(user_id, email, role)
-        except HTTPException:
-            raise
+        with db_session() as db:
+            user = db.query(User).filter(User.id == int(user_id)).first()
+            if not user:
+                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="USER_NOT_FOUND", message="User not found")
+            return CurrentUser(user.id, user.email, "admin" if getattr(user, "is_admin", False) else "user")
     
     # Try API Key from header — look up explicitly from authoritative store.
     if http_auth:
         api_key = http_auth.credentials
         
-        # Assume structural prefix like key_xx or split appropriately
-        from database import SessionLocal
-        db = SessionLocal()
-        try:
-            payload = verify_token(api_key)
-            user_id = payload.get("sub")
-            email = payload.get("email", "api@example.com")
-            role = payload.get("role", "user")
+        if "." not in api_key:
+            raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY_FORMAT", message="Invalid API key format")
 
-            if not user_id:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid API key payload"
-                )
+        key_id, secret = api_key.split(".", 1)
 
-            # Validate the user exists in the database — prevents access via
-            # orphaned tokens (e.g. dev-mode placeholders or tokens whose
-            # backing user account was deleted while the token remained valid).
-            db = SessionLocal()
-            try:
-                user = get_user_by_email(db, email) if email else None
-                if not user or str(user.id) != user_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="User account not found"
+        with db_session() as db:
+            key_record = db.query(APIKey).filter(
+                APIKey.key_id == key_id
+            ).first()
+
+            if not key_record:
+                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY", message="Invalid API key")
+
+            if not key_record.is_valid():
+                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="API_KEY_EXPIRED", message="API key has expired")
+
+            if not verify_api_key(secret, key_record.key_salt, key_record.key_hash):
+                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY", message="Invalid API key")
+
+            # Check if linked to a database user
+            if key_record.user_id:
+                user = db.query(User).filter(User.id == key_record.user_id).first()
+                if user:
+                    return CurrentUser(
+                        user_id=user.id,
+                        email=user.email,
+                        role="admin" if getattr(user, "is_admin", False) else "user"
                     )
-            finally:
-                db.close()
+
+            # Fallback to default API user
+            return CurrentUser(
+                user_id=0,
+                email="api_user",
+                role="api"
+            )
 
             return CurrentUser(user_id, email, role)
         except HTTPException:

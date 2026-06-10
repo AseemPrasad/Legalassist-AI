@@ -7,6 +7,10 @@ GET /api/v1/auth/me - Get current user
 from fastapi import APIRouter, HTTPException, status, Depends
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
+from passlib.context import CryptContext
+from database import get_db, db_session
+from db.models import APIKey
+from api.auth import create_access_token, create_api_key_record, CurrentUser, get_current_user, verify_password
 from api.auth import create_access_token, generate_api_key, hash_api_key, CurrentUser, get_current_user
 from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
 from api.rate_limits import check_api_key_creation_limit
@@ -40,11 +44,11 @@ async def get_token(
     
     Returns JWT token valid for 24 hours
     """
-    
-    logger.info("Token request", username=username)
-    
-    db = SessionLocal()
-    try:
+    from database import get_user_by_email
+
+    logger.info("token_request_received", username=mask_email(username))
+
+    with db_session() as db:
         user = get_user_by_email(db, username)
         if not user or not user.password_hash:
             raise HTTPException(
@@ -65,8 +69,6 @@ async def get_token(
             token_type="bearer",
             expires_in=24 * 3600  # 24 hours in seconds
         )
-    finally:
-        db.close()
 
 
 @router.post(
