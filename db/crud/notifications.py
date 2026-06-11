@@ -8,6 +8,7 @@ from db.models.notifications import NotificationLog, NotificationStatus, Notific
 from db.models.cases import CaseDeadline, Case
 from sqlalchemy.exc import IntegrityError
 from core.deadline_engine import get_deadline_first_action
+from core.log_redaction import storage_safe_recipient, sanitize_log_text
 
 
 def get_or_create_notification_log(
