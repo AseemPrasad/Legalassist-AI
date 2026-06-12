@@ -272,8 +272,8 @@ class DistributedRateLimiter:
             ttl = await client.pttl(self._block_key(identifier, endpoint))
             return max(0, int(ttl))
         except Exception as e:
-        import logging
-        logging.error(f"Limiter error: {e}")
+            import logging
+            logging.error(f"Limiter error: {e}")
             return 0
 
     async def check_rate_limit(
@@ -432,22 +432,25 @@ def is_whitelisted(identifier: str) -> bool:
     return raw_ip in WHITELIST
 
 
-def resolve_rate_limit_identifier(request: Request) -> str:
+def resolve_rate_limit_identifier(request: Request, current_user: Optional[CurrentUser] = None) -> str:
     """Return a per-identity rate-limit key.
 
     Resolution order:
-    1. Valid API key identity                    → ``api_key:<digest>``
-    2. Valid JWT ``sub`` / ``user_id`` claim     → ``user:<id>``
-    3. Direct client IP from ASGI transport      → ``ip:<addr>``
-    4. ``X-Forwarded-For`` first hop             → ``ip:<addr>``
+    1. Valid current user context                → ``user:<user_id>``
+    2. Valid API key identity                    → ``api_key:<digest>``
+    3. Valid JWT ``sub`` / ``user_id`` claim     → ``user:<id>``
+    4. Direct client IP from ASGI transport      → ``ip:<addr>``
+    5. ``X-Forwarded-For`` first hop             → ``ip:<addr>``
        (only when the direct peer is a known trusted proxy)
-    5. Unique per-request token                  → ``anon:<uuid>``
+    6. Unique per-request token                  → ``anon:<uuid>``
 
     The function NEVER returns a shared literal such as ``"anonymous"``.
     ``X-Forwarded-For`` is only trusted when the direct transport-layer
     peer is a known trusted proxy IP — accepting it unconditionally allows
     any client to spoof their IP and bypass per-IP rate limits.
     """
+    if current_user:
+        return f"user:{current_user.user_id}"
 
     api_key_identifier = limiter._api_key_identifier(request)
     if api_key_identifier:
@@ -474,7 +477,7 @@ def resolve_rate_limit_identifier(request: Request) -> str:
         # Only trust X-Forwarded-For when the direct transport-layer peer
         # is a known trusted proxy.  Accepting XFF unconditionally lets
         # any client forge their IP and bypass per-IP rate limits.
-        if direct_ip in get_trusted_proxies():
+        if direct_ip in TRUSTED_PROXIES:
             forwarded = request.headers.get("X-Forwarded-For")
             if forwarded:
                 client_ip = forwarded.split(",")[0].strip()

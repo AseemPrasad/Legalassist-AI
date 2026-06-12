@@ -227,17 +227,47 @@ def extract_case_document_metadata(text: str, *, filename: Optional[str] = None)
     except Exception:  # noqa: BLE001
         pass
 
+    case_no = None
+    filing_dt = None
+    judgment_dt = None
+    judge = None
+    court = None
+    petitioner = None
+    respondent = None
+    
+    try:
+        import document_parser
+        case_no = document_parser._extract_case_number(text)
+        filing_dt, judgment_dt = document_parser._extract_dates(text)
+        judge = document_parser._extract_judge(text)
+        court = document_parser._extract_court(text)
+        parties_info = document_parser._extract_parties(text)
+        petitioner = parties_info.get("petitioner")
+        respondent = parties_info.get("respondent")
+    except Exception:
+        pass
+
     return {
         "title_hint": title_hint,
         "parties": parties,
         "dates": dates,
         "claims": claims,
         "statutes": statutes,
+        "case_number": case_no,
+        "filing_date": filing_dt,
+        "judgment_date": judgment_dt,
+        "judge_name": judge,
+        "court_name": court,
+        "petitioner": petitioner,
+        "respondent": respondent,
         "confidence": {
             "parties": 0.6 if parties else 0.0,
             "dates": 0.7 if dates else 0.0,
             "claims": 0.5 if claims else 0.0,
             "statutes": 0.5 if statutes else 0.0,
+            "case_number": 0.8 if case_no else 0.0,
+            "judge_name": 0.7 if judge else 0.0,
+            "court_name": 0.7 if court else 0.0,
         },
     }
 

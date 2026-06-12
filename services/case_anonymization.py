@@ -65,15 +65,19 @@ def _get_case_anonymization_secret(override: Optional[str] = None) -> str:
             raise ValueError(f"Anonymization secret must be at least {_MIN_SECRET_LENGTH} characters")
         return secret
 
-    # Primary (and only) source: environment / streamlit secrets
-    secret = os.getenv("CASE_ANONYMIZATION_SECRET", "").strip()
-    if not secret:
-        # Also check via Config._get_val so Streamlit secrets are honoured
-        try:
-            from config import _get_val as _cfg_get
-            secret = str(_cfg_get("CASE_ANONYMIZATION_SECRET", "") or "").strip()
-        except Exception:
-            pass
+    # Primary (and only) source: environment / streamlit secrets via get_settings()
+    try:
+        from api.config import get_settings
+        secret = get_settings().CASE_ANONYMIZATION_SECRET
+    except Exception:
+        secret = os.getenv("CASE_ANONYMIZATION_SECRET", "").strip()
+        if not secret:
+            # Also check via Config._get_val so Streamlit secrets are honoured
+            try:
+                from config import _get_val as _cfg_get
+                secret = str(_cfg_get("CASE_ANONYMIZATION_SECRET", "") or "").strip()
+            except Exception:
+                pass
 
     if secret:
         if len(secret) < _MIN_SECRET_LENGTH:

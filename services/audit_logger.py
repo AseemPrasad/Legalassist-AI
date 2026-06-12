@@ -1,8 +1,10 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
+
+from core.clock import Clock
 
 # Ensure the logs directory exists
 LOG_DIR = Path("logs")
@@ -21,7 +23,7 @@ class JSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         # Expected to receive a dict in the `msg` field
         log_entry = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": Clock.isoformat(),
             "level": record.levelname,
             "event": record.msg
         }

@@ -112,17 +112,33 @@ class ShardedVectorStore:
         if vectors.shape[0] == 0:
             return []
 
-        query_norm = np.linalg.norm(query_vec)
-        norms = np.linalg.norm(vectors, axis=1) * query_norm
+        # 1. Coarse filtering: compute dot products (fast, O(N) operations)
         dots = vectors.dot(query_vec)
-        sims = np.zeros_like(dots)
+
+        # Select a candidate pool (e.g. 5x top_k, at least 100)
+        n_candidates = vectors.shape[0]
+        coarse_k = min(n_candidates, max(top_k * 5, 100))
+
+        # Use argpartition to find top coarse_k indices in O(N) time
+        candidate_indices = np.argpartition(-dots, coarse_k - 1)[:coarse_k]
+
+        # 2. Fine evaluation: compute exact cosine similarities only on the candidate pool
+        candidate_vectors = vectors[candidate_indices]
+        candidate_dots = dots[candidate_indices]
+
+        query_norm = np.linalg.norm(query_vec)
+        norms = np.linalg.norm(candidate_vectors, axis=1) * query_norm
+
+        sims = np.zeros_like(candidate_dots)
         nonzero = norms != 0
-        sims[nonzero] = dots[nonzero] / norms[nonzero]
+        sims[nonzero] = candidate_dots[nonzero] / norms[nonzero]
         sims = np.clip((sims + 1) / 2, 0.0, 1.0)
 
-        shard_top_k = min(top_k, len(ids))
-        idxs = np.argsort(-sims)[:shard_top_k]
-        return [(int(ids[idx]), float(sims[idx])) for idx in idxs]
+        # Sort the candidate pool
+        shard_top_k = min(top_k, len(candidate_indices))
+        sorted_candidates_idx = np.argsort(-sims)[:shard_top_k]
+
+        return [(int(ids[candidate_indices[idx]]), float(sims[idx])) for idx in sorted_candidates_idx]
 
     def _build_rebalanced_state(self, snapshot: Dict[int, Dict[str, Any]], target_num_shards: int) -> Dict[int, Dict[str, Any]]:
         target_num_shards = max(1, int(target_num_shards))
@@ -341,6 +357,33 @@ class ShardedVectorStore:
             with self._locks[shard]:
                 self._shards[shard]['metadatas'][case_id] = metadata
                 self._persist_shard(shard)
+
+    def delete(self, case_id: int) -> bool:
+        """Remove a case and its vector/metadata from its corresponding shard."""
+        shard = self.shard_for_id(case_id)
+        with self._state_lock:
+            lock = self._locks[shard]
+            with lock:
+                shard_data = self._shards[shard]
+                ids = shard_data['ids']
+                id_to_index = shard_data['id_to_index']
+                if case_id in id_to_index:
+                    idx = id_to_index[case_id]
+                    # Delete vector and id
+                    vectors = shard_data['vectors']
+                    vectors = np.delete(vectors, idx, axis=0)
+                    ids.pop(idx)
+                    # Rebuild id_to_index
+                    id_to_index = {int(cid): i for i, cid in enumerate(ids)}
+                    # Remove metadata
+                    shard_data['metadatas'].pop(case_id, None)
+                    
+                    shard_data['vectors'] = vectors
+                    shard_data['ids'] = ids
+                    shard_data['id_to_index'] = id_to_index
+                    self._persist_shard(shard)
+                    return True
+        return False
 
     def similarity_search_with_score(self, query: str, k: int = 10):
         """Search by query string using an attached embedder if available.

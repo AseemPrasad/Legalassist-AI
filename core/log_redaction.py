@@ -77,6 +77,8 @@ def mask_recipient(recipient: Optional[str]) -> str:
 
 def storage_safe_recipient(recipient: Optional[str]) -> str:
     """Return a storage-safe recipient value for persisted records."""
+    if not recipient or str(recipient).strip() == "unknown":
+        return "[redacted-recipient]"
     return mask_recipient(recipient)
 
 

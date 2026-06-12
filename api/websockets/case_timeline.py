@@ -113,7 +113,10 @@ def register_case_timeline_endpoint(app: FastAPI) -> None:
         if not origin:
             await websocket.close(code=4001, reason="Origin header required")
             return
-        allowed = settings.CORS_ORIGINS + [f"https://{h}" for h in settings.ALLOWED_HOSTS] + [f"http://{h}" for h in settings.ALLOWED_HOSTS]
+        origins = settings.CORS_ORIGINS
+        if isinstance(origins, str):
+            origins = [o.strip() for o in origins.split(",") if o.strip()]
+        allowed = origins + [f"https://{h}" for h in settings.ALLOWED_HOSTS] + [f"http://{h}" for h in settings.ALLOWED_HOSTS]
         if origin not in allowed and "*" not in settings.CORS_ORIGINS:
             await websocket.close(code=4001, reason="Origin not allowed")
             return

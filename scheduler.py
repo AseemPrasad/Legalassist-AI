@@ -282,139 +282,82 @@ def _send_deadline_reminders_safe(db, deadline, user_preference, days_left):
 
 # Reminder time logic moved to notifications.reminder_engine.build_reminder_jobs
 
-
 def check_and_send_reminders(reminder_time_checker: Optional[Callable[[str], bool]] = None):
     """
     Hourly job: Check all upcoming deadlines and send reminders at 8 AM in each user's local timezone.
     This runs every hour and evaluates if it's 8 AM for each user based on their saved timezone preference.
 
     Uses distributed locking via Redis to ensure exactly-once execution in horizontally scaled deployments.
-
-    ====================================================================================================
-    ARCHITECTURAL OVERVIEW & SCHEDULING STRATEGY
-    ====================================================================================================
-
-    This function acts as the core heartbeat for the notification system.
-    It relies on an hourly execution trigger to ensure that timezone-based
-    notifications are dispatched accurately at the start of each user's day (typically 8 AM).
-
-    PERFORMANCE OPTIMIZATION:
-    -------------------------
-    Historically, certain imports (such as `has_notification_been_sent` from `database`)
-    were placed dynamically inside the loop over `upcoming_deadlines`.
-    While localized imports can prevent circular dependencies, placing them inside
-    high-iteration loops introduces significant module resolution overhead.
-
-    To alleviate this, we've moved the import to the top of this function.
-    This ensures that the `sys.modules` dictionary is only queried once per hourly run,
-    rather than O(N) times where N is the number of upcoming deadlines.
-
-    PROCESSING WORKFLOW:
-    --------------------
-    1. Data Retrieval: Fetches all deadlines occurring within the next 31 days.
-       (We use 31 days to safely capture the 30-day threshold).
-    3. Iteration & Filtering:
-       a. Computes exact days remaining.
-       b. Filters to exact thresholds (30, 10, 3, 1).
-       c. Fetches user preferences.
-       d. Evaluates timezone match (is it 8 AM?).
-       e. Evaluates preference match (is notify_X_days enabled?).
-    4. Dispatch: Hands over to `notification_service` which handles channel-specific logic.
-    
-    SCALABILITY CONSIDERATIONS:
-    ---------------------------
-    - As the user base grows, fetching all deadlines in memory may become a bottleneck.
-    - Future iterations should consider paginating the query or pushing the 
-      timezone-filtering logic down to the database level (e.g. using Postgres TIMEZONE functions).
-      
-    ERROR HANDLING:
-    ---------------
-    - The entire job is wrapped in a broad try-except block to prevent a single failure
-      from crashing the scheduler.
-    - Errors are logged with full stack traces.
-    - The database session is guaranteed to be closed in the finally block.
-
-    MONITORING:
-    -----------
-    - The job logs the total number of reminders sent.
-    - Lock acquisition status is logged for observability.
-
     """
-    
-    # ---------------------------------------------------------
-    # PERFORMANCE FIX: Move localized import out of the loop!
-    # ---------------------------------------------------------
-    # By placing this import at the top of the function, we avoid
-    # the overhead of module resolution during every iteration of
-    # the upcoming_deadlines loop. This significantly speeds up
-    # the job when processing thousands of deadlines.
     from database import has_notification_been_sent
-    # ---------------------------------------------------------
 
+    now_utc = datetime.now(timezone.utc)
     logger.info("=" * 60)
     logger.info("Starting deadline reminder check job")
-    logger.info(f"Check time: {datetime.now(timezone.utc)} UTC")
+    logger.info(f"Check time: {now_utc.isoformat()} UTC")
 
+    # Ensure tables exist when running from a fresh DB.
+    init_db()
+
+    sent_count = 0
     db = SessionLocal()
     try:
         # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
         upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
-        logger.info(f"Found {len(upcoming_deadlines)} upcoming deadlines")
+        logger.info("scheduler_upcoming_deadlines_found", count=len(upcoming_deadlines))
 
-        sent_count = 0
+        # Prefetch user preferences for eligible deadlines to avoid N+1 queries
+        prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
+        prefs_by_user = {pref.user_id: pref for pref in prefs}
+        
+        candidates = plan_eligible_reminders(
+            upcoming_deadlines,
+            prefs_by_user,
+            now_utc=now_utc,
+            reminder_time_checker=reminder_time_checker or is_reminder_time_for_user,
+        )
 
-        logger.info("scheduler_reminder_job_started", check_time=datetime.now(timezone.utc).isoformat())
-
-        # Ensure tables exist when running from a fresh DB.
-        init_db()
-
-        db = SessionLocal()
-        try:
-            # Check for deadlines in the next 31 days to ensure we catch the 30-day mark
-            upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
-            logger.info("scheduler_upcoming_deadlines_found", count=len(upcoming_deadlines))
-
-            # Prefetch user preferences for eligible deadlines to avoid N+1 queries
-            prefs = get_prefs_by_user_ids(db, {deadline.user_id for deadline in upcoming_deadlines})
-            prefs_by_user = {pref.user_id: pref for pref in prefs}
-            candidates = plan_eligible_reminders(
-                upcoming_deadlines,
-                prefs_by_user,
-                reminder_time_checker=reminder_time_checker or is_reminder_time_for_user,
+        # Guarantee deterministic ordering when selecting/sorting concurrent reminders
+        # Sort by deadline_date (timezone-aware) first, then tie-break on deadline ID
+        candidates = sorted(
+            candidates,
+            key=lambda x: (
+                x[0].deadline_date.astimezone(timezone.utc) if x[0].deadline_date.tzinfo else x[0].deadline_date.replace(tzinfo=timezone.utc) if x[0].deadline_date else datetime.min.replace(tzinfo=timezone.utc),
+                x[0].id
             )
+        )
 
-            for candidate in candidates:
-                deadline = candidate.deadline
-                days_left = candidate.days_left
-                user_preference = candidate.user_preference
+        for candidate in candidates:
+            # candidate is (deadline, days_left, user_preference)
+            deadline, days_left, user_preference = candidate
 
-                logger.info("scheduler_processing_deadline", case_id=deadline.case_id, days_left=days_left)
+            logger.info("scheduler_processing_deadline", case_id=deadline.case_id, days_left=days_left)
 
-                # Send reminders using the notification service
-                results = _send_deadline_reminders_safe(db, deadline, user_preference, days_left)
+            # Send reminders using the notification service
+            results = _send_deadline_reminders_safe(db, deadline, user_preference, days_left)
 
-                for res in results:
-                    if res.success:
-                        sent_count += 1
-                        logger.info(
-                            "scheduler_notification_sent",
-                            channel=res.channel.value if hasattr(res.channel, "value") else str(res.channel),
-                            recipient=mask_recipient(res.recipient),
-                        )
-                    else:
-                        logger.error(
-                            "scheduler_notification_failed",
-                            channel=res.channel.value if hasattr(res.channel, "value") else str(res.channel),
-                            recipient=mask_recipient(res.recipient),
-                            error=sanitize_log_text(res.error),
-                        )
+            for res in results:
+                if res.success:
+                    sent_count += 1
+                    logger.info(
+                        "scheduler_notification_sent",
+                        channel=res.channel.value if hasattr(res.channel, "value") else str(res.channel),
+                        recipient=mask_recipient(res.recipient),
+                    )
+                else:
+                    logger.error(
+                        "scheduler_notification_failed",
+                        channel=res.channel.value if hasattr(res.channel, "value") else str(res.channel),
+                        recipient=mask_recipient(res.recipient),
+                        error=sanitize_log_text(res.error),
+                    )
 
-            logger.info("scheduler_reminder_job_completed", reminders_sent=sent_count)
+        logger.info("scheduler_reminder_job_completed", reminders_sent=sent_count)
 
-        except Exception as e:
-            logger.error("scheduler_reminder_job_failed", error=sanitize_log_text(str(e)), exc_info=True)
-        finally:
-            db.close()
+    except Exception as e:
+        logger.error("scheduler_reminder_job_failed", error=sanitize_log_text(str(e)), exc_info=True)
+    finally:
+        db.close()
 
     return sent_count
 

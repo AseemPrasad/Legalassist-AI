@@ -1,31 +1,24 @@
 repos:
 -   repo: https://github.com/psf/black
--   rev: 23.9.1
--   hooks:
--     - id: black
--
+    rev: 23.9.1
+    hooks:
+      - id: black
+
 - - repo: https://gitlab.com/pycqa/flake8
--   rev: 6.1.0
--   hooks:
--     - id: flake8
--
+    rev: 6.1.0
+    hooks:
+      - id: flake8
+
 - - repo: https://github.com/pre-commit/mirrors-mypy
--   rev: v1.8.0
--   hooks:
--     - id: mypy
-+repos:
-+  - repo: https://github.com/psf/black
-+    rev: 23.9.1
-+    hooks:
-+      - id: black
-+
-+  - repo: https://gitlab.com/pycqa/flake8
-+    rev: 6.1.0
-+    hooks:
-+      - id: flake8
-+
-+  - repo: https://github.com/pre-commit/mirrors-mypy
-+    rev: v1.12.0
-+    hooks:
-+      - id: mypy
-+        args: ["--ignore-missing-imports"]
+    rev: v1.8.0
+    hooks:
+      - id: mypy
+
+- - repo: local
+    hooks:
+      - id: ban-datetime-utcnow
+        name: Ban datetime.utcnow() and naive datetime()
+        entry: 'datetime\.utcnow\(\)|datetime\(\s*\d{4}'
+        language: pygrep
+        files: \.py$
+        types: [python]

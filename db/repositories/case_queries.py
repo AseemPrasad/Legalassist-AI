@@ -71,29 +71,34 @@ def fetch_next_deadlines_per_case(db: Session, case_ids: List[int]) -> Dict[int,
     
     now = datetime.now(timezone.utc)
     
-    # Subquery to find the minimum deadline_date per case (earliest future deadline)
-    subquery = (
+    # Rank deadlines per case in SQL so the next upcoming row can be selected without
+    # Python-side sorting or duplicate join matches on date ties. Tie-break on id.
+    ranked_deadlines = (
         db.query(
-            CaseDeadline.case_id,
-            func.min(CaseDeadline.deadline_date).label("next_deadline_date"),
+            CaseDeadline.id.label("deadline_id"),
+            CaseDeadline.case_id.label("case_id"),
+            func.row_number()
+            .over(
+                partition_by=CaseDeadline.case_id,
+                order_by=(CaseDeadline.deadline_date.asc(), CaseDeadline.id.asc()),
+            )
+            .label("row_number"),
         )
         .filter(
             CaseDeadline.case_id.in_(case_ids),
             CaseDeadline.is_completed.is_(False),
             CaseDeadline.deadline_date > now,
         )
-        .group_by(CaseDeadline.case_id)
         .subquery()
     )
     
     # Join to get the actual deadline records
-    next_deadlines = db.query(CaseDeadline).join(
-        subquery,
-        and_(
-            CaseDeadline.case_id == subquery.c.case_id,
-            CaseDeadline.deadline_date == subquery.c.next_deadline_date,
-        ),
-    ).all()
+    next_deadlines = (
+        db.query(CaseDeadline)
+        .join(ranked_deadlines, CaseDeadline.id == ranked_deadlines.c.deadline_id)
+        .filter(ranked_deadlines.c.row_number == 1)
+        .all()
+    )
     
     # Map to dict
     result: Dict[int, CaseDeadline] = {}

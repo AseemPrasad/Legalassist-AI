@@ -275,6 +275,10 @@ def get_user_cases_summary(user_id: int, include_closed: bool = True) -> List[Di
 
 
 def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
+    try:
+        case_id = int(case_id)
+    except (ValueError, TypeError):
+        return None
     db = SessionLocal()
     try:
         case = get_case_by_id(db, case_id)
@@ -936,6 +940,15 @@ def _update_case_status(user_id: int, case_id: int, status: CaseStatus) -> bool:
         if not case or case.user_id != user_id:
             return False
 
+        # Validate transition pathway before updating
+        current_status_str = case.status.value if hasattr(case.status, 'value') else str(case.status)
+        target_status_str = status.value if hasattr(status, 'value') else str(status)
+        if not validate_case_transition(current_status_str, target_status_str):
+            logger.warning(
+                f"Invalid case status transition from {current_status_str} to {target_status_str} (case_id={case_id})"
+            )
+            return False
+
         update_case_status(db, case_id, status)
 
         # Create timeline event
@@ -1152,11 +1165,11 @@ def validate_case_transition(current_status: str, target_status: str) -> bool:
     Validates if a transition from current case status to target case status 
     is permitted under standard case lifecycle rules.
     """
+    # Align status names with CaseStatus db schema values: pending, active, appealed, closed
     allowed_transitions = {
-        "pending": ["active", "dismissed"],
-        "active": ["settled", "dismissed", "appealed"],
-        "appealed": ["active", "dismissed"],
-        "settled": [],
-        "dismissed": []
+        "pending": ["active", "closed"],
+        "active": ["closed", "appealed"],
+        "appealed": ["active", "closed"],
+        "closed": ["active"]
     }
     return target_status in allowed_transitions.get(current_status, [])

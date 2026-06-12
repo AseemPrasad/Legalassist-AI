@@ -24,6 +24,12 @@ _is_postgres = _db_url.get_backend_name() == "postgresql"
 engine_kwargs: dict = {}
 if _is_sqlite:
     engine_kwargs["connect_args"] = {"check_same_thread": False}
+    from sqlalchemy import event
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 else:
     engine_kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "20"))
     engine_kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "10"))
@@ -42,13 +48,13 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=
 
 
 def _to_utc_datetime(value: dt.datetime) -> dt.datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=dt.timezone.utc)
-    return value.astimezone(dt.timezone.utc)
+    from core.clock import _utc_datetime
+    return _utc_datetime(value)
 
 
 def _datetime_for_db(value: dt.datetime) -> dt.datetime:
-    utc_value = _to_utc_datetime(value)
+    from core.clock import _utc_datetime
+    utc_value = _utc_datetime(value)
     if _is_sqlite:
         return utc_value.replace(tzinfo=None)
     return utc_value

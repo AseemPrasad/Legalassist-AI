@@ -2,7 +2,7 @@ from cmath import log
 import datetime as dt
 from typing import Optional, List, Iterable
 from sqlalchemy.orm import Session
-from core.log_redaction import storage_safe_recipient
+from core.log_redaction import storage_safe_recipient, sanitize_log_text
 import db
 from db.models.notifications import NotificationLog, NotificationStatus, NotificationChannel, NotificationTemplate, UserPreference
 from db.models.cases import CaseDeadline, Case
@@ -28,6 +28,17 @@ def get_or_create_notification_log(
     IntegrityError would only surface at the outer commit, outside this
     function's exception handler.
     """
+    if not recipient or recipient == "unknown":
+        from db.models.auth import User
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            if channel == NotificationChannel.SMS:
+                pref = db.query(UserPreference).filter(UserPreference.user_id == user_id).first()
+                recipient = (pref.phone_number if pref else None) or user.email
+            else:
+                recipient = user.email
+        if not recipient:
+            recipient = "unknown"
     try:
         with db.begin_nested():
             log = NotificationLog(
@@ -164,9 +175,9 @@ def update_notification_result(
     db: Session,
     deadline_id: int,
     user_id: int,
-    days_before: int,
     channel: NotificationChannel,
     status: NotificationStatus,
+    days_before: int,
     message_id: Optional[str] = None,
     error_message: Optional[str] = None,
     message_preview: Optional[str] = None,
@@ -174,6 +185,18 @@ def update_notification_result(
     attempted_channels: Optional[List[str]] = None,
 ) -> NotificationLog:
     """Upsert a notification log after a delivery attempt."""
+    if not recipient or recipient == "unknown":
+        from db.models.auth import User
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            if channel == NotificationChannel.SMS:
+                pref = db.query(UserPreference).filter(UserPreference.user_id == user_id).first()
+                recipient = (pref.phone_number if pref else None) or user.email
+            else:
+                recipient = user.email
+        if not recipient:
+            recipient = "unknown"
+
     existing = db.query(NotificationLog).filter(
         NotificationLog.user_id == user_id,
         NotificationLog.deadline_id == deadline_id,
@@ -202,7 +225,7 @@ def update_notification_result(
         deadline_id=deadline_id,
         user_id=user_id,
         channel=channel,
-        recipient=storage_safe_recipient(recipient or "unknown"),
+        recipient=recipient,
         days_before=days_before,
     )[0]
 

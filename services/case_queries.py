@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from functools import wraps
+import threading
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -14,6 +15,46 @@ from db.repositories.case_queries import fetch_case_summary_data_batch, fetch_ca
 from .timeline_service import timeline_service
 from db.crud.audit import record_audit_event, record_immutable_audit_event
 
+# Thread-local request caching
+_request_cache = threading.local()
+
+def get_request_cache() -> Dict[str, Any]:
+    if not hasattr(_request_cache, "cache"):
+        _request_cache.cache = {}
+    return _request_cache.cache
+
+def clear_request_cache() -> None:
+    if hasattr(_request_cache, "cache"):
+        _request_cache.cache.clear()
+
+def request_cached(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Exclude Session db objects from the key as they aren't hashable/stable keys
+        safe_args = tuple(a for a in args if not isinstance(a, Session))
+        safe_kwargs = tuple((k, v) for k, v in kwargs.items() if not isinstance(v, Session))
+        key = (func.__name__, safe_args, safe_kwargs)
+        cache = get_request_cache()
+        if key in cache:
+            return cache[key]
+        val = func(*args, **kwargs)
+        cache[key] = val
+        return val
+    return wrapper
+
+@request_cached
+def get_similar_cases_cached(
+    db: Session,
+    reference_case,
+    min_similarity: float = 50.0,
+    limit: int = 50,
+    user_id: Optional[str] = None,
+) -> List[Any]:
+    """Retrieve similar cases from CaseSimilarityCalculator using request-level caching."""
+    from analytics_engine import CaseSimilarityCalculator
+    return CaseSimilarityCalculator.find_similar_cases(
+        db, reference_case, min_similarity=min_similarity, limit=limit, user_id=user_id
+    )
 
 def _audit_case_view(func):
     @wraps(func)
@@ -41,6 +82,7 @@ def _audit_case_view(func):
     return wrapper
 
 
+@request_cached
 def get_user_cases_summary(db: Session, user_id: int, include_closed: bool = True) -> List[Dict[str, Any]]:
     """
     Get summary of all cases for a user.
@@ -75,6 +117,7 @@ def get_user_cases_summary(db: Session, user_id: int, include_closed: bool = Tru
 
 
 @_audit_case_view
+@request_cached
 def get_case_detail(db: Session, user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
     """
     Get complete case details.

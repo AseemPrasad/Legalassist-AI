@@ -159,7 +159,7 @@ def purge_expired_notifications(db: Session, cutoff_days: int, dry_run: bool = F
     from db.models.notifications import NotificationLog
 
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=cutoff_days)
-    q = db.query(NotificationLog).filter(NotificationLog.sent_at < cutoff)
+    q = db.query(NotificationLog).filter(NotificationLog.created_at < cutoff)
     records = q.all()
     ids = [r.id for r in records]
 

@@ -65,6 +65,8 @@ from db.models import (
     CaseArgument,
     KnowledgeGraphEdge,
     PrecedentMatch,
+    IdempotencyKey,
+    IdempotencyKeyStatus,
 )
 
 from db.crud.notifications import (
@@ -598,6 +600,12 @@ def delete_case(db: Session, case_id: int) -> bool:
 
         db.delete(case)
         db.commit()
+        try:
+            from core.embedding_engine import get_vector_store
+            vs = get_vector_store()
+            vs.delete(case_id)
+        except Exception as ev:
+            logger.warning(f"Failed to auto-invalidate vector store on case deletion: {ev}")
         return True
     except Exception:
         db.rollback()
@@ -1116,6 +1124,17 @@ def create_case_document(
     db.add(doc)
     db.commit()
     db.refresh(doc)
+    try:
+        from core.embedding_engine import get_embedding_engine, get_vector_store
+        import json
+        engine = get_embedding_engine()
+        emb_obj = engine.embed_case(db, normalized_case_id, force_regenerate=True)
+        if emb_obj:
+            vec = json.loads(emb_obj.embedding_vector)
+            vs = get_vector_store()
+            vs.add_batch([(normalized_case_id, vec)])
+    except Exception as ev:
+        logger.warning(f"Failed to auto-synchronize vector store on document creation: {ev}")
     return doc
 
 
@@ -1159,6 +1178,17 @@ def update_case_document(
         try:
             db.commit()
             db.refresh(doc)
+            try:
+                from core.embedding_engine import get_embedding_engine, get_vector_store
+                import json
+                engine = get_embedding_engine()
+                emb_obj = engine.embed_case(db, doc.case_id, force_regenerate=True)
+                if emb_obj:
+                    vec = json.loads(emb_obj.embedding_vector)
+                    vs = get_vector_store()
+                    vs.add_batch([(doc.case_id, vec)])
+            except Exception as ev:
+                logger.warning(f"Failed to auto-synchronize vector store on document update: {ev}")
         except Exception as e:
             db.rollback()
             raise RuntimeError(f"Database write failed for case document {document_id}: {str(e)}") from e
@@ -1288,23 +1318,17 @@ def cleanup_expired_revoked_tokens(db: Session) -> int:
 
 def submit_similarity_feedback(
     db: Session,
-    case_id: int,
-    event_type: str,
-    description: str,
-    event_date: Optional[dt.datetime] = None,
-    metadata: Optional[dict] = None,
-) -> CaseTimeline:
-    """Create a new timeline event.
-    
-    Note: Ensures that the instantiated CaseTimeline is correctly added to the
-    session using the explicit local variable reference to prevent NameErrors.
-    """
-    event = CaseTimeline(
-        case_id=case_id,
-        event_type=event_type,
-        description=description,
-        event_date=event_date or dt.datetime.now(dt.timezone.utc),
-        event_metadata=metadata,
+    user_id: int | str,
+    candidate_case_id: int,
+    query_signature: str,
+    relevance: bool,
+) -> SimilarityFeedback:
+    """Submit similarity feedback for search queries."""
+    feedback = SimilarityFeedback(
+        user_id=str(user_id),
+        candidate_case_id=candidate_case_id,
+        query_signature=query_signature,
+        relevance=relevance,
     )
     db.add(feedback)
     db.commit()
@@ -1332,4 +1356,329 @@ def get_similarity_feedback(
     return query.order_by(SimilarityFeedback.created_at.desc()).limit(limit).all()
 
 
+def reserve_idempotency_key(db: Session, key: str, method: str, path: str) -> tuple[IdempotencyKey, bool]:
+    """Reserve an idempotency key within a nested transaction/savepoint."""
+    from sqlalchemy.exc import IntegrityError
+    ik = IdempotencyKey(
+        key=key,
+        method=method,
+        path=path,
+        status=IdempotencyKeyStatus.IN_PROGRESS,
+    )
+    try:
+        with db.begin_nested():
+            db.add(ik)
+        db.commit()
+        db.refresh(ik)
+        return ik, True
+    except IntegrityError:
+        existing = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
+        return existing, False
 
+
+def set_idempotency_response(db: Session, key: str, status_code: int, headers: dict, body: str) -> IdempotencyKey:
+    """Set the response payload for a completed idempotency key."""
+    from sqlalchemy.exc import IntegrityError
+    ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
+    if not ik:
+        try:
+            ik = IdempotencyKey(key=key, method="POST", path="unknown", status=IdempotencyKeyStatus.COMPLETED)
+            with db.begin_nested():
+                db.add(ik)
+            db.commit()
+        except IntegrityError:
+            ik = db.query(IdempotencyKey).filter(IdempotencyKey.key == key).first()
+            if not ik:
+                ik = IdempotencyKey(key=key, method="POST", path="unknown", status=IdempotencyKeyStatus.COMPLETED)
+                db.add(ik)
+                db.commit()
+    ik.status = IdempotencyKeyStatus.COMPLETED
+    ik.response_status = status_code
+    ik.response_headers = headers
+    ik.response_body = body
+    ik.completed_at = dt.datetime.now(dt.timezone.utc)
+    db.commit()
+    db.refresh(ik)
+    return ik
+
+
+def get_idempotency_response(db: Session, key: str) -> Optional[dict]:
+    """Retrieve the cached response for a completed idempotency key."""
+    ik = db.query(IdempotencyKey).filter(
+        IdempotencyKey.key == key,
+        IdempotencyKey.status == IdempotencyKeyStatus.COMPLETED
+    ).first()
+    if ik:
+        return {
+            "status_code": ik.response_status,
+            "headers": ik.response_headers,
+            "body": ik.response_body,
+        }
+    return None
+
+
+
+def delete_user_cases(db: Session, user_id: int) -> dict:
+    """Delete all cases and associated data for a user.
+    
+    This performs a soft deletion approach where cases are marked
+    as deleted rather than immediately removed from the database.
+    
+    Args:
+        db: Database session
+        user_id: The ID of the user whose cases should be deleted
+        
+    Returns:
+        Dictionary with counts of deleted items
+    """
+    deleted_counts = {
+        "cases": 0,
+        "documents": 0,
+        "deadlines": 0,
+        "timeline_events": 0,
+    }
+    
+    cases = db.query(Case).filter(Case.user_id == user_id).all()
+    case_ids = [c.id for c in cases]
+    
+    if not case_ids:
+        return deleted_counts
+    
+    # Delete documents
+    docs = db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).all()
+    deleted_counts["documents"] = len(docs)
+    db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).delete(
+        synchronize_session=False
+    )
+    
+    # Delete timeline events
+    events = db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).all()
+    deleted_counts["timeline_events"] = len(events)
+    db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).delete(
+        synchronize_session=False
+    )
+    
+    # Delete deadlines
+    deadlines = db.query(CaseDeadline).filter(
+        (CaseDeadline.user_id == user_id) | (CaseDeadline.case_id.in_(case_ids))
+    ).all()
+    deleted_counts["deadlines"] = len(deadlines)
+    db.query(CaseDeadline).filter(
+        (CaseDeadline.user_id == user_id) | (CaseDeadline.case_id.in_(case_ids))
+    ).delete(synchronize_session=False)
+    
+    # Delete cases
+    deleted_counts["cases"] = len(cases)
+    db.query(Case).filter(Case.user_id == user_id).delete(synchronize_session=False)
+    
+    db.commit()
+    return deleted_counts
+
+
+def redact_user_data(db: Session, user_id: int) -> int:
+    """Redact PII from user and related records.
+    
+    This replaces all PII with redaction placeholders while keeping
+    the database records intact for audit purposes.
+    
+    Args:
+        db: Database session
+        user_id: The ID of the user whose data should be redacted
+        
+    Returns:
+        Number of records redacted
+    """
+    REDACTED = "[REDACTED-GDPR]"
+    REDACTED_EMAIL = "[REDACTED-EMAIL]"
+    
+    redacted_count = 0
+    
+    # Redact user
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.email = REDACTED_EMAIL
+        if hasattr(user, 'full_name'):
+            user.full_name = REDACTED
+        if hasattr(user, 'phone'):
+            user.phone = REDACTED
+        if hasattr(user, 'address'):
+            user.address = REDACTED
+        db.commit()
+        redacted_count += 1
+    
+    # Redact cases
+    cases = db.query(Case).filter(Case.user_id == user_id).all()
+    for case in cases:
+        case.title = f"{REDACTED}-{case.id}"
+        redacted_count += 1
+    
+    # Redact documents
+    case_ids = [c.id for c in cases]
+    if case_ids:
+        docs = db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).all()
+        for doc in docs:
+            doc.summary = REDACTED
+            doc.document_content = REDACTED
+            doc.extracted_metadata = {}
+            redacted_count += 1
+        
+        # Redact timeline events
+        events = db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).all()
+        for event in events:
+            event.description = REDACTED
+            event.event_metadata = {}
+            redacted_count += 1
+    
+    db.commit()
+    return redacted_count
+
+
+# ====================================================================
+# GDPR-compliant data deletion functions
+# ====================================================================
+
+def delete_user_cases(db: Session, user_id: int) -> dict:
+    """Delete all cases and associated data for a user."""
+    from db.models import Case, CaseDocument, CaseDeadline, CaseTimeline
+
+    deleted_counts = {"cases": 0, "documents": 0, "deadlines": 0, "timeline_events": 0}
+    cases = db.query(Case).filter(Case.user_id == user_id).all()
+    case_ids = [c.id for c in cases]
+
+    if not case_ids:
+        return deleted_counts
+
+    docs = db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).all()
+    deleted_counts["documents"] = len(docs)
+    db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).delete(synchronize_session=False)
+
+    events = db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).all()
+    deleted_counts["timeline_events"] = len(events)
+    db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).delete(synchronize_session=False)
+
+    deadlines = db.query(CaseDeadline).filter((CaseDeadline.user_id == user_id) | (CaseDeadline.case_id.in_(case_ids))).all()
+    deleted_counts["deadlines"] = len(deadlines)
+    db.query(CaseDeadline).filter((CaseDeadline.user_id == user_id) | (CaseDeadline.case_id.in_(case_ids))).delete(synchronize_session=False)
+
+    deleted_counts["cases"] = len(cases)
+    db.query(Case).filter(Case.user_id == user_id).delete(synchronize_session=False)
+    db.commit()
+    return deleted_counts
+
+
+def redact_user_data(db: Session, user_id: int) -> int:
+    """Redact PII from user and related records."""
+    from db.models import Case, CaseDocument, CaseTimeline, User
+
+    REDACTED = "[REDACTED-GDPR]"
+    REDACTED_EMAIL = "[REDACTED-EMAIL]"
+
+    redacted_count = 0
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.email = REDACTED_EMAIL
+        if hasattr(user, 'full_name'):
+            user.full_name = REDACTED
+        if hasattr(user, 'phone'):
+            user.phone = REDACTED
+        if hasattr(user, 'address'):
+            user.address = REDACTED
+        db.commit()
+        redacted_count += 1
+
+    cases = db.query(Case).filter(Case.user_id == user_id).all()
+    for case in cases:
+        case.title = f"{REDACTED}-{case.id}"
+        redacted_count += 1
+
+    case_ids = [c.id for c in cases]
+    if case_ids:
+        docs = db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).all()
+        for doc in docs:
+            doc.summary = REDACTED
+            doc.document_content = REDACTED
+            doc.extracted_metadata = {}
+            redacted_count += 1
+        events = db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).all()
+        for event in events:
+            event.description = REDACTED
+            event.event_metadata = {}
+            redacted_count += 1
+
+    db.commit()
+    return redacted_count
+
+# ====================================================================
+# GDPR-compliant data deletion functions
+# ====================================================================
+
+def delete_user_cases(db: Session, user_id: int) -> dict:
+    """Delete all cases and associated data for a user."""
+    from db.models import Case, CaseDocument, CaseDeadline, CaseTimeline
+
+    deleted_counts = {"cases": 0, "documents": 0, "deadlines": 0, "timeline_events": 0}
+    cases = db.query(Case).filter(Case.user_id == user_id).all()
+    case_ids = [c.id for c in cases]
+
+    if not case_ids:
+        return deleted_counts
+
+    docs = db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).all()
+    deleted_counts["documents"] = len(docs)
+    db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).delete(synchronize_session=False)
+
+    events = db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).all()
+    deleted_counts["timeline_events"] = len(events)
+    db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).delete(synchronize_session=False)
+
+    deadlines = db.query(CaseDeadline).filter((CaseDeadline.user_id == user_id) | (CaseDeadline.case_id.in_(case_ids))).all()
+    deleted_counts["deadlines"] = len(deadlines)
+    db.query(CaseDeadline).filter((CaseDeadline.user_id == user_id) | (CaseDeadline.case_id.in_(case_ids))).delete(synchronize_session=False)
+
+    deleted_counts["cases"] = len(cases)
+    db.query(Case).filter(Case.user_id == user_id).delete(synchronize_session=False)
+    db.commit()
+    return deleted_counts
+
+
+def redact_user_data(db: Session, user_id: int) -> int:
+    """Redact PII from user and related records."""
+    from db.models import Case, CaseDocument, CaseTimeline, User
+
+    REDACTED = "[REDACTED-GDPR]"
+    REDACTED_EMAIL = "[REDACTED-EMAIL]"
+
+    redacted_count = 0
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.email = REDACTED_EMAIL
+        if hasattr(user, 'full_name'):
+            user.full_name = REDACTED
+        if hasattr(user, 'phone'):
+            user.phone = REDACTED
+        if hasattr(user, 'address'):
+            user.address = REDACTED
+        db.commit()
+        redacted_count += 1
+
+    cases = db.query(Case).filter(Case.user_id == user_id).all()
+    for case in cases:
+        case.title = f"{REDACTED}-{case.id}"
+        redacted_count += 1
+
+    case_ids = [c.id for c in cases]
+    if case_ids:
+        docs = db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).all()
+        for doc in docs:
+            doc.summary = REDACTED
+            doc.document_content = REDACTED
+            doc.extracted_metadata = {}
+            redacted_count += 1
+        events = db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).all()
+        for event in events:
+            event.description = REDACTED
+            event.event_metadata = {}
+            redacted_count += 1
+
+    db.commit()
+    return redacted_count

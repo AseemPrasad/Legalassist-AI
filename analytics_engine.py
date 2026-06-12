@@ -1,5 +1,6 @@
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timezone, timedelta
+from core.clock import Clock
 from sqlalchemy import func, case as sql_case
 from sqlalchemy.orm import Session, joinedload
 from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback, Case, CaseDeadline
@@ -1449,7 +1450,7 @@ class PredictiveAnalyticsEngine:
             "processing_info": {
                 "memory_optimized": is_high_volume,
                 "dataset_volume": vol_count,
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": Clock.isoformat()
             }
         }
 
@@ -1584,7 +1585,7 @@ class ReminderInsightsEngine:
         deadline_type: Optional[str] = None,
         channel: Optional[NotificationChannel | str] = None,
     ) -> pd.DataFrame:
-        now = datetime.now(timezone.utc)
+        now = Clock.now()
         completion_map = ReminderInsightsEngine._completion_map(db)
 
         query = db.query(NotificationLog, CaseDeadline, Case).join(

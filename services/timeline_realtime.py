@@ -14,10 +14,18 @@ from core.timeline_payloads import TimelineEventPayload
 
 logger = structlog.get_logger(__name__)
 
-_TIMELINE_RATE_LIMIT_MAX = int(os.getenv("TIMELINE_REALTIME_RATE_LIMIT", "30"))
-_TIMELINE_RATE_LIMIT_WINDOW = int(os.getenv("TIMELINE_REALTIME_RATE_WINDOW", "60"))
-
-_REDIS_URL = os.getenv("REDIS_URL", "")
+try:
+    from api.config import get_settings
+    _settings = get_settings()
+    _TIMELINE_RATE_LIMIT_MAX = _settings.TIMELINE_REALTIME_RATE_LIMIT
+    _TIMELINE_RATE_LIMIT_WINDOW = _settings.TIMELINE_REALTIME_RATE_WINDOW
+    _REDIS_URL = _settings.REDIS_URL
+    _QUEUE_SIZE_DEFAULT = _settings.TIMELINE_REALTIME_QUEUE_SIZE
+except Exception:
+    _TIMELINE_RATE_LIMIT_MAX = int(os.getenv("TIMELINE_REALTIME_RATE_LIMIT", "30"))
+    _TIMELINE_RATE_LIMIT_WINDOW = int(os.getenv("TIMELINE_REALTIME_RATE_WINDOW", "60"))
+    _REDIS_URL = os.getenv("REDIS_URL", "")
+    _QUEUE_SIZE_DEFAULT = 100
 
 NOTIFICATION_TIMELINE_EVENT_TYPES = frozenset({
     "notification_sent",
@@ -102,7 +110,7 @@ class TimelineRealtimeBus:
       to prevent subscriber flooding in multi-worker deployments.
     """
 
-    def __init__(self, queue_maxsize: int = 100) -> None:
+    def __init__(self, queue_maxsize: int = _QUEUE_SIZE_DEFAULT) -> None:
         self._queue_maxsize = max(1, int(queue_maxsize))
         self._channels: Dict[int, _CaseChannel] = {}
         self._global_lock = asyncio.Lock()
