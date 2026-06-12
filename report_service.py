@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from core.clock import Clock
 from pathlib import Path
 from typing import Optional
 
@@ -150,7 +151,7 @@ def generate_report(
 ) -> GeneratedReport:
     """Generate a single report and persist it to disk."""
 
-    report_id = report_id or os.getenv("REPORT_ID", None) or datetime.now(timezone.utc).strftime(
+    report_id = report_id or os.getenv("REPORT_ID", None) or Clock.now().strftime(
         "%Y%m%d%H%M%S%f"
     )
 

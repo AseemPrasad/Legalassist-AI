@@ -42,13 +42,13 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=
 
 
 def _to_utc_datetime(value: dt.datetime) -> dt.datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=dt.timezone.utc)
-    return value.astimezone(dt.timezone.utc)
+    from core.clock import _utc_datetime
+    return _utc_datetime(value)
 
 
 def _datetime_for_db(value: dt.datetime) -> dt.datetime:
-    utc_value = _to_utc_datetime(value)
+    from core.clock import _utc_datetime
+    utc_value = _utc_datetime(value)
     if _is_sqlite:
         return utc_value.replace(tzinfo=None)
     return utc_value

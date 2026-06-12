@@ -99,6 +99,10 @@ class Config(metaclass=_ConfigMeta):
     # Alias for backward compatibility with legacy code.
     LLM_TIMEOUT = AI_REQUEST_TIMEOUT 
     
+    # --- Timezone Strategy ---
+    USE_CLOCK_UTILITY = _get_bool_env("USE_CLOCK_UTILITY", True)
+    DEFAULT_TIMEZONE = _get_val("DEFAULT_TIMEZONE", "UTC")
+    
     # The maximum number of retry attempts for failed AI requests (e.g., on rate limits).
     AI_MAX_RETRIES = _get_int_env("AI_MAX_RETRIES", 3)
     
