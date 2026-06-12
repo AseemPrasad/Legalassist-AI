@@ -237,7 +237,7 @@ async def get_usage_metrics(
     db: Session = Depends(get_db_rls),
     current_user: CurrentUser = Depends(get_current_user)
 ) -> dict:
-    """Get API usage metrics for last N days based on document activity.
+    """Get API usage metrics for last N days based on document activity."""
 
     logger.info(
         "Fetching usage metrics",
