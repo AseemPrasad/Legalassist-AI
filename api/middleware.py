@@ -131,6 +131,8 @@ def get_limiter() -> RateLimiter:
         _limiter = RateLimiter()
     return _limiter
 
+
+async def add_correlation_id_middleware(request: Request, call_next: Callable):
     correlation_id = (
         request.headers.get("X-Correlation-Id")
         or request.headers.get("X-Request-Id")

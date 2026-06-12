@@ -143,6 +143,22 @@ def append_audit_entry(
     IMMEDIATE transaction (SQLite) to prevent concurrent writers from
     producing a broken chain.
     """
+    # Harmonize actor attributes across background tasks and API operations
+    if actor_user_id is not None:
+        if actor_user_id < 0:
+            actor_type = "api"
+            actor_id = f"api:{abs(actor_user_id)}"
+        elif actor_user_id == 0:
+            actor_type = "system"
+            actor_id = "system:api_user"
+        else:
+            actor_type = "user"
+            actor_id = f"user:{actor_user_id}"
+    else:
+        actor_type = actor_type or "system"
+        if not actor_id:
+            actor_id = "system:worker"
+
     from db.session import _is_postgres, _is_sqlite
 
     # Use a dedicated session — never share with the application session.

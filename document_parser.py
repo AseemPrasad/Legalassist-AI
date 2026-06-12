@@ -20,6 +20,7 @@ from pathlib import Path
 from dataclasses import dataclass, asdict, field
 
 import core
+from core.exceptions import DocumentValidationError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,6 +39,9 @@ class CaseMetadata:
     petitioner: Optional[str] = None
     respondent: Optional[str] = None
     parties: List[str] = field(default_factory=list)
+    claims: List[str] = field(default_factory=list)
+    statutes: List[str] = field(default_factory=list)
+    title_hint: Optional[str] = None
     confidence_score: float = 0.0
     extraction_method: str = "pattern"  # "pattern" or "llm"
     raw_text_sample: str = ""
@@ -159,6 +163,73 @@ def _extract_with_patterns(text: str, patterns: List[str]) -> List[str]:
             continue
     
     return [m.strip() for m in matches if m and m.strip()]
+
+
+def validate_document_input(document_input: Any) -> None:
+    """
+    Unified validation contract for document input across upload, OCR, and analysis stages.
+    Validates file format, type, size, or structure depending on the input type.
+    """
+    if document_input is None:
+        raise DocumentValidationError("Document input cannot be None.")
+
+    # 1. If it's a file path or Path object
+    if isinstance(document_input, (str, Path)):
+        path_str = str(document_input)
+        if not path_str.strip():
+            raise DocumentValidationError("Document file path cannot be empty.")
+        
+        path = Path(document_input)
+        # Check size if file exists
+        if path.exists() and path.is_file():
+            size = path.stat().st_size
+            # Limit to 500 MB (matching ValidationConfig.MAX_UPLOAD_SIZE)
+            if size > 500 * 1024 * 1024:
+                raise DocumentValidationError(f"Document size ({round(size / 1024 / 1024, 2)} MB) exceeds maximum limit (500 MB)")
+            
+            # Check extension
+            ext = path.suffix.lower()
+            allowed_exts = {".pdf", ".doc", ".docx", ".txt", ".html", ".rtf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp"}
+            if ext not in allowed_exts:
+                raise DocumentValidationError(f"File extension '{ext}' is not supported. Supported: {', '.join(sorted(allowed_exts))}")
+        elif not path.exists():
+            # If path does not exist, it might be a raw string of text rather than a file path
+            # (e.g. string of judgment text). Let's check size as text.
+            text_len = len(path_str.encode("utf-8", errors="ignore"))
+            if text_len > 10 * 1024 * 1024: # 10MB limit
+                raise DocumentValidationError(f"Raw text input size ({round(text_len / 1024 / 1024, 2)} MB) exceeds limit")
+
+    # 2. If it's bytes or bytearray
+    elif isinstance(document_input, (bytes, bytearray)):
+        size = len(document_input)
+        if size > 500 * 1024 * 1024:
+            raise DocumentValidationError(f"Document bytes size ({round(size / 1024 / 1024, 2)} MB) exceeds limit")
+        if size == 0:
+            raise DocumentValidationError("Document content is empty.")
+
+    # 3. If it's a file-like object
+    elif hasattr(document_input, "read"):
+        # Check size if available
+        if hasattr(document_input, "size"):
+            size = document_input.size
+            if size and size > 500 * 1024 * 1024:
+                raise DocumentValidationError("File size exceeds maximum limit")
+        # Check filename/extension if available
+        if hasattr(document_input, "name") and document_input.name:
+            ext = Path(document_input.name).suffix.lower()
+            allowed_exts = {".pdf", ".doc", ".docx", ".txt", ".html", ".rtf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp"}
+            if ext and ext not in allowed_exts:
+                raise DocumentValidationError(f"File extension '{ext}' is not supported.")
+
+    # 4. If it's a numpy array (image for OCR)
+    elif document_input.__class__.__name__ == "ndarray":
+        if document_input.size == 0:
+            raise DocumentValidationError("Input image is empty.")
+        if len(document_input.shape) < 2:
+            raise DocumentValidationError("Input image must be at least 2-dimensional.")
+
+    else:
+        raise TypeError(f"Unsupported document input type: {type(document_input)}")
 
 
 def _calculate_confidence(metadata: Dict[str, Any], total_fields: int = 6) -> float:
@@ -382,6 +453,9 @@ def extract_metadata(
         >>> print(metadata.case_number)
         >>> print(metadata.to_json())
     """
+    # Step 0: Validate document input using unified contract
+    validate_document_input(document_input)
+
     metadata_dict = {
         'case_number': None,
         'filing_date': None,
@@ -391,6 +465,9 @@ def extract_metadata(
         'petitioner': None,
         'respondent': None,
         'parties': [],
+        'claims': [],
+        'statutes': [],
+        'title_hint': None,
     }
     
     extraction_method = "pattern"
@@ -440,6 +517,18 @@ def extract_metadata(
             
             extraction_method = "llm"
         
+        # Step 3.5: Extracted candidates from core.document_metadata to align schemas
+        try:
+            from core.document_metadata import _extract_claim_candidates, _extract_statute_candidates
+            metadata_dict['claims'] = _extract_claim_candidates(text)
+            metadata_dict['statutes'] = _extract_statute_candidates(text)
+            if metadata_dict['parties']:
+                metadata_dict['title_hint'] = " v. ".join(metadata_dict['parties'][:2]) if len(metadata_dict['parties']) >= 2 else metadata_dict['parties'][0]
+            elif isinstance(document_input, (str, Path)) and Path(document_input).exists():
+                metadata_dict['title_hint'] = Path(document_input).stem
+        except Exception as e:
+            LOGGER.warning(f"Failed to extract claims/statutes: {e}")
+
         # Step 4: Calculate confidence
         confidence = _calculate_confidence(metadata_dict)
         

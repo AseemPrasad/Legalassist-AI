@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 from config import Config
 
 from core.image_processor import ImageProcessor
+from core.exceptions import OCRDependencyError, OCRProcessingError
 
 logger = logging.getLogger(__name__)
 
@@ -118,16 +119,10 @@ class OCREngine:
             
         except Exception as e:
             logger.error(f"OCR extraction failed: {str(e)}")
-            return {
-                'text': '',
-                'confidence': {'overall': 0, 'word_level': 0},
-                'quality_metrics': ImageProcessor.assess_image_quality(image),
-                'languages_used': languages,
-                'word_count': 0,
-                'char_count': 0,
-                'success': False,
-                'error': str(e)
-            }
+            err_msg = str(e).lower()
+            if "tesseract" in err_msg and ("not found" in err_msg or "no such file" in err_msg or "not installed" in err_msg):
+                raise OCRDependencyError(f"Tesseract executable not found or not installed: {str(e)}", original_exception=e)
+            raise OCRProcessingError(f"OCR text extraction failed: {str(e)}", original_exception=e)
     
     def extract_text_with_layout(
         self,
@@ -166,12 +161,10 @@ class OCREngine:
             
         except Exception as e:
             logger.error(f"Layout extraction failed: {str(e)}")
-            return {
-                'structured_text': {'paragraphs': [], 'lines': [], 'words': []},
-                'full_text': '',
-                'success': False,
-                'error': str(e)
-            }
+            err_msg = str(e).lower()
+            if "tesseract" in err_msg and ("not found" in err_msg or "no such file" in err_msg or "not installed" in err_msg):
+                raise OCRDependencyError(f"Tesseract executable not found or not installed: {str(e)}", original_exception=e)
+            raise OCRProcessingError(f"Layout extraction failed: {str(e)}", original_exception=e)
     
     def extract_handwriting(
         self,
@@ -206,14 +199,10 @@ class OCREngine:
             
         except Exception as e:
             logger.error(f"Handwriting extraction failed: {str(e)}")
-            return {
-                'text': '',
-                'confidence': {'overall': 0},
-                'is_handwriting': True,
-                'handwriting_confidence': 0,
-                'success': False,
-                'error': str(e)
-            }
+            err_msg = str(e).lower()
+            if "tesseract" in err_msg and ("not found" in err_msg or "no such file" in err_msg or "not installed" in err_msg):
+                raise OCRDependencyError(f"Tesseract executable not found or not installed: {str(e)}", original_exception=e)
+            raise OCRProcessingError(f"Handwriting extraction failed: {str(e)}", original_exception=e)
     
     def batch_process_images(
         self,

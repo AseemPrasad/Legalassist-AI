@@ -10,13 +10,13 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer, APIKeyHeader
 import secrets
 import hashlib
-import uuid
+from passlib.context import CryptContext
+from sqlalchemy.orm import Session
 
 from api.config import get_settings
 from api.errors import StructuredAPIError
 from database import SessionLocal, db_session
 from db.models import APIKey, User
-from database import SessionLocal, revoke_token
 
 # Import canonical JWT utilities from shared module
 from api.jwt_auth import (
@@ -26,21 +26,6 @@ from api.jwt_auth import (
     create_access_token,
     verify_token,
     revoke_jwt_token,
-)
-
-
-# Canonical exceptions are imported from api.jwt_auth above
-
-# Import shared JWT exception hierarchy and utilities from the canonical module.
-# Do NOT redefine AuthError, TokenExpiredError, or InvalidTokenError here —
-# redefining them would shadow these imports and break exception handling because
-# verify_token() raises the jwt_auth classes, not any locally defined ones.
-from api.jwt_auth import (
-    AuthError,
-    TokenExpiredError,
-    InvalidTokenError,
-    create_access_token,
-    verify_token,
 )
 
 settings = get_settings()
@@ -64,107 +49,6 @@ def get_password_hash(password: str) -> str:
 
 # PBKDF2 iterations for API key hashing (OWASP 2023 minimum for SHA-256)
 API_KEY_HASH_ITERATIONS = 600000
-
-def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Create JWT access token"""
-    to_encode = data.copy()
-    
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(hours=settings.JWT_EXPIRATION_HOURS)
-    
-    to_encode.update({"exp": expire, "jti": str(uuid.uuid4())})
-    
-    encoded_jwt = jwt.encode(
-        to_encode,
-        settings.JWT_SECRET_KEY,
-        algorithm=settings.JWT_ALGORITHM
-    )
-    return encoded_jwt
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a plain password against a bcrypt hash."""
-    return pwd_context.verify(plain_password, hashed_password)
-
-def revoke_jwt_token(token: str, user_id: int) -> bool:
-    """Revoke a JWT token, validating that it belongs to the given user.
-
-    Args:
-        token: The JWT string to revoke.
-        user_id: The ID of the user requesting revocation (ownership check).
-
-    Returns:
-        True if the token was revoked, False if it was already revoked
-        or had no revocable claims.
-
-    Raises:
-        HTTPException(403) if the token's subject does not match user_id.
-        HTTPException(401) if the token is malformed.
-    """
-    try:
-        payload = jwt.decode(
-            token,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM],
-            options={"verify_exp": False},
-        )
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token"
-        )
-
-    token_sub = payload.get("sub")
-    if token_sub is None or int(token_sub) != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Token does not belong to the authenticated user"
-        )
-
-    jti = payload.get("jti")
-    exp = payload.get("exp")
-    if not jti or not exp:
-        return False
-
-    db = SessionLocal()
-    try:
-        expires_at = datetime.utcfromtimestamp(exp)
-        revoke_token(db, jti, expires_at)
-        return True
-    finally:
-        db.close()
-
-        # Persist revocation
-        with db_session() as db:
-            # db-level revoke_token is available via database shim
-            from database import revoke_token, is_token_revoked
-
-def verify_token(token: str) -> Dict:
-    """Verify JWT token and check revocation status.
-
-    Uses a context-manager-scoped database session for the revocation
-    check so the connection is released on every exit path — normal
-    return, HTTPException, or any unexpected error — preventing the
-    connection leaks that occur when raising inside a bare try/finally
-    block under certain async execution contexts.
-    """
-    try:
-        payload = jwt.decode(
-            token,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM]
-        )
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired"
-        )
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token"
-        )
 from api.models import APIKey
 
 
@@ -296,83 +180,45 @@ async def get_current_user(
 ) -> CurrentUser:
     """Get current authenticated user"""
     
-    # Try JWT token first
+    # 1. Try JWT token first
     if token and not token.startswith("key_"):
         try:
             payload = verify_token(token)
             user_id = payload.get("sub")
-            email = payload.get("email")
-            role = payload.get("role", "user")
-
             if not user_id:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid token payload"
                 )
 
-            # Validate the user exists in the database.
-            db = SessionLocal()
-            try:
-                user = get_user_by_email(db, email) if email else None
-                if not user or str(user.id) != user_id:
-                    raise HTTPException(
+            with db_session() as db:
+                user = db.query(User).filter(User.id == int(user_id)).first()
+                if not user:
+                    raise StructuredAPIError(
                         status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="User account not found"
+                        error_code="USER_NOT_FOUND",
+                        message="User not found"
                     )
-            finally:
-                db.close()
-
-        with db_session() as db:
-            user = db.query(User).filter(User.id == int(user_id)).first()
-            if not user:
-                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="USER_NOT_FOUND", message="User not found")
-            return CurrentUser(user.id, user.email, "admin" if getattr(user, "is_admin", False) else "user")
-    
-    # Try API Key from header — look up explicitly from authoritative store.
-    if http_auth:
-        api_key = http_auth.credentials
-        
-        if "." not in api_key:
-            raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY_FORMAT", message="Invalid API key format")
-
-        key_id, secret = api_key.split(".", 1)
-
-        with db_session() as db:
-            key_record = db.query(APIKey).filter(
-                APIKey.key_id == key_id
-            ).first()
-
-            if not key_record:
-                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY", message="Invalid API key")
-
-            if not key_record.is_valid():
-                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="API_KEY_EXPIRED", message="API key has expired")
-
-            if not verify_api_key(secret, key_record.key_salt, key_record.key_hash):
-                raise StructuredAPIError(status_code=status.HTTP_401_UNAUTHORIZED, error_code="INVALID_API_KEY", message="Invalid API key")
-
-            # Check if linked to a database user
-            if key_record.user_id:
-                user = db.query(User).filter(User.id == key_record.user_id).first()
-                if user:
-                    return CurrentUser(
-                        user_id=user.id,
-                        email=user.email,
-                        role="admin" if getattr(user, "is_admin", False) else "user"
-                    )
-
-            # Fallback to default API user
-            return CurrentUser(
-                user_id=0,
-                email="api_user",
-                role="api"
-            )
-
-            return CurrentUser(user_id, email, role)
+                role = "admin" if getattr(user, "is_admin", False) else (user.role.value if hasattr(user.role, 'value') else getattr(user, "role", "user"))
+                return CurrentUser(user.id, user.email, role)
         except HTTPException:
             raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Invalid token: {str(e)}"
+            )
     
-    # Try X-API-Key header
+    # 2. Try API Key from header or query param
+    api_key = None
+    if http_auth:
+        api_key = http_auth.credentials
+    elif x_api_key:
+        api_key = x_api_key
+
+    if api_key:
+        with db_session() as db:
+            return _resolve_api_key_user(api_key, db)
     
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

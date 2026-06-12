@@ -600,6 +600,12 @@ def delete_case(db: Session, case_id: int) -> bool:
 
         db.delete(case)
         db.commit()
+        try:
+            from core.embedding_engine import get_vector_store
+            vs = get_vector_store()
+            vs.delete(case_id)
+        except Exception as ev:
+            logger.warning(f"Failed to auto-invalidate vector store on case deletion: {ev}")
         return True
     except Exception:
         db.rollback()
@@ -1118,6 +1124,17 @@ def create_case_document(
     db.add(doc)
     db.commit()
     db.refresh(doc)
+    try:
+        from core.embedding_engine import get_embedding_engine, get_vector_store
+        import json
+        engine = get_embedding_engine()
+        emb_obj = engine.embed_case(db, normalized_case_id, force_regenerate=True)
+        if emb_obj:
+            vec = json.loads(emb_obj.embedding_vector)
+            vs = get_vector_store()
+            vs.add_batch([(normalized_case_id, vec)])
+    except Exception as ev:
+        logger.warning(f"Failed to auto-synchronize vector store on document creation: {ev}")
     return doc
 
 
@@ -1161,6 +1178,17 @@ def update_case_document(
         try:
             db.commit()
             db.refresh(doc)
+            try:
+                from core.embedding_engine import get_embedding_engine, get_vector_store
+                import json
+                engine = get_embedding_engine()
+                emb_obj = engine.embed_case(db, doc.case_id, force_regenerate=True)
+                if emb_obj:
+                    vec = json.loads(emb_obj.embedding_vector)
+                    vs = get_vector_store()
+                    vs.add_batch([(doc.case_id, vec)])
+            except Exception as ev:
+                logger.warning(f"Failed to auto-synchronize vector store on document update: {ev}")
         except Exception as e:
             db.rollback()
             raise RuntimeError(f"Database write failed for case document {document_id}: {str(e)}") from e

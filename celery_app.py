@@ -693,6 +693,7 @@ def analyze_document_task(
         content_parts.append(hashlib.sha256(file_bytes).hexdigest())
     if text:
         content_parts.append(hashlib.sha256(text.encode("utf-8")).hexdigest())
+    content_hash = hashlib.sha256("|".join(content_parts).encode()).hexdigest()[:16] if content_parts else ""
 
 
     idemp = IdempotencyManager()
@@ -879,13 +880,23 @@ def extract_document_text_task(
     
     try:
         extracted_text = text
+        ocr_used = False
+        ocr_confidence = None
+        extraction_method = "direct"
+        
         if extracted_text:
             if len(extracted_text.encode("utf-8")) > ValidationConfig.MAX_TEXT_LENGTH:
                 raise ValueError(f"Input text exceeds max limit of {ValidationConfig.MAX_TEXT_LENGTH} bytes.")
+        
         if not extracted_text and file_bytes:
             if len(file_bytes) > ValidationConfig.MAX_TEXT_LENGTH:
                 raise ValueError(f"File too large: {len(file_bytes)} bytes exceeds limit of {ValidationConfig.MAX_TEXT_LENGTH} bytes.")
-            extracted_text = extract_text_from_pdf(io.BytesIO(file_bytes))
+            diagnostics = core.extract_text_with_diagnostics(io.BytesIO(file_bytes), enable_ocr=True)
+            extracted_text = diagnostics.get("text", "")
+            ocr_used = diagnostics.get("ocr_used", False)
+            ocr_confidence = diagnostics.get("confidence")
+            extraction_method = diagnostics.get("method", "pdfplumber")
+        
         if not extracted_text:
             if file_url:
                 validate_file_url(file_url)
@@ -895,9 +906,14 @@ def extract_document_text_task(
                     raise ValueError(f"Downloaded file too large: {len(response.content)} bytes exceeds limit of {ValidationConfig.MAX_TEXT_LENGTH} bytes.")
                 content_type = response.headers.get("Content-Type", "")
                 if "application/pdf" in content_type or file_url.lower().endswith(".pdf"):
-                    extracted_text = extract_text_from_pdf(io.BytesIO(response.content))
+                    diagnostics = core.extract_text_with_diagnostics(io.BytesIO(response.content), enable_ocr=True)
+                    extracted_text = diagnostics.get("text", "")
+                    ocr_used = diagnostics.get("ocr_used", False)
+                    ocr_confidence = diagnostics.get("confidence")
+                    extraction_method = diagnostics.get("method", "pdfplumber")
                 else:
                     extracted_text = response.content.decode("utf-8", errors="ignore")
+                    extraction_method = "http_get"
             elif file_path:
                 # Ownership verification
                 session = SessionLocal()
@@ -914,10 +930,15 @@ def extract_document_text_task(
                     raise ValueError(f"File too large: {os.path.getsize(file_path)} bytes exceeds limit of {ValidationConfig.MAX_TEXT_LENGTH} bytes.")
                 if file_path.lower().endswith(".pdf"):
                     with open(file_path, "rb") as f:
-                        extracted_text = extract_text_from_pdf(io.BytesIO(f.read()))
+                        diagnostics = core.extract_text_with_diagnostics(io.BytesIO(f.read()), enable_ocr=True)
+                        extracted_text = diagnostics.get("text", "")
+                        ocr_used = diagnostics.get("ocr_used", False)
+                        ocr_confidence = diagnostics.get("confidence")
+                        extraction_method = diagnostics.get("method", "pdfplumber")
                 else:
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                         extracted_text = f.read()
+                        extraction_method = "file_read"
                         
         if not extracted_text:
             raise ValueError("No text provided or extracted from document.")
@@ -942,13 +963,16 @@ def extract_document_text_task(
         )
 
         result = {
-            "report_id": report_id,
-            "format": generated.format,
-            "file_path": str(generated.file_path),
-            "file_name": generated.file_name,
-            "mime_type": generated.mime_type,
-            "file_size_bytes": generated.file_size_bytes,
-            "generated_at": datetime.now(timezone.utc).isoformat()
+            "user_id": user_id,
+            "document_id": document_id,
+            "extracted_text": extracted_text,
+            "metadata": {
+                "text_length": len(extracted_text),
+                "ocr_used": ocr_used,
+                "ocr_confidence": ocr_confidence,
+                "extraction_method": extraction_method,
+            },
+            "stage": "text_extraction_complete",
         }
         _persist_pipeline_state(document_id, user_id, "text_extraction_complete", result)
         return result
@@ -1041,12 +1065,18 @@ def summarize_document_task(
             summary_text = " ".join(key_points)
         except Exception:
             summary_text = raw_summary
+        metadata = extraction_result.get("metadata", {})
+        metadata.update({
+            "summary_length": len(summary_text),
+            "key_points_count": len(key_points),
+        })
         result = {
             "user_id": user_id,
             "document_id": document_id,
             "extracted_text": extracted_text,
             "summary": summary_text,
             "key_points": key_points,
+            "metadata": metadata,
             "stage": "summarization_complete",
         }
         _persist_pipeline_state(document_id, user_id, "summarization_complete", result)
@@ -1174,6 +1204,11 @@ def extract_remedies_task(
             payload={"remedies_count": len(remedies_list)},
         )
 
+        metadata = summarization_result.get("metadata", {})
+        metadata.update({
+            "remedies_count": len(remedies_list),
+            "remedies_confidence": remedies_data.get("confidence_score", 0.0),
+        })
         result = {
             "user_id": user_id,
             "document_id": document_id,
@@ -1185,6 +1220,7 @@ def extract_remedies_task(
             "remedies_confidence_score": remedies_data.get("confidence_score", 0.0),
             "remedies_evidence_spans": remedies_data.get("evidence_spans", []),
             "remedies_data": remedies_data,
+            "metadata": metadata,
             "stage": "remedy_extraction_complete",
         }
         _persist_pipeline_state(document_id, user_id, "remedy_extraction_complete", result)
@@ -1232,6 +1268,11 @@ def finalize_analysis_task(
     )
 
     try:
+        metadata = remedy_result.get("metadata", {})
+        metadata.update({
+            "document_type": document_type,
+            "finalized_at": datetime.now(timezone.utc).isoformat(),
+        })
         result = {
             "document_id": document_id,
             "title": "Analyzed Document",
@@ -1246,6 +1287,7 @@ def finalize_analysis_task(
             "remedies_evidence_spans": remedy_result.get("remedies_evidence_spans", []),
             "analysis_time_seconds": 0,
             "processed_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": metadata,
             "stage": "finalization_complete",
         }
 
@@ -1292,166 +1334,6 @@ def finalize_analysis_task(
 # ASYNCHRONOUS TASK DEFINITIONS
 # ============================================================================
 
-
-@celery_app.task(bind=True, name="analyze_document")
-def analyze_document_task(
-    self,
-    user_id: str,
-    document_id: str,
-    text: Optional[str] = None,
-    file_bytes: Optional[bytes] = None,
-    document_type: str = "unknown",
-    file_path: Optional[str] = None,
-    file_url: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Orchestrator task for document analysis using Celery chain.
-    
-    Chain: extract_text -> summarize -> extract_remedies -> finalize
-    Halts on first error. Integrates State Machine hooks.
-    """
-    
-    # Idempotency: prevent duplicate processing for same user/document
-    content_parts = []
-    if file_bytes:
-        content_parts.append(hashlib.sha256(file_bytes).hexdigest())
-    if text:
-        content_parts.append(hashlib.sha256(text.encode("utf-8")).hexdigest())
-    content_hash = hashlib.sha256("|".join(content_parts).encode()).hexdigest()[:16] if content_parts else ""
-
-    idemp = IdempotencyManager()
-    idempotency_key = f"analyze:{user_id}:{document_id}:{content_hash}"
-    if not idemp.acquire(idempotency_key, ttl=300):
-        existing = idemp.get_result(idempotency_key)
-        logger.info(
-            "analyze_document_duplicate_skipped",
-            key=idempotency_key,
-            task_id=self.request.id,
-        )
-        return existing or {"status": "duplicate", "task_id": self.request.id}
-
-    # Acquire distributed lock for strict serial processing per document
-    doc_lock = _acquire_document_lock(document_id, self.request.id)
-    if doc_lock is None:
-        logger.error(
-            "analyze_document_lock_failed",
-            task_id=self.request.id,
-            document_id=document_id,
-        )
-        raise RuntimeError(f"Could not acquire distributed lock for document {document_id}")
-
-    start_time = datetime.utcnow()
-
-    try:
-        logger.info(
-            "Starting document analysis (chain-orchestrated)",
-            task_id=self.request.id,
-            user_id=user_id,
-            document_id=document_id,
-        )
-
-        # Auto-extend lock every 30s for long chains
-        def _lock_heartbeat():
-            while True:
-                time.sleep(25)
-                _extend_document_lock(doc_lock, document_id, self.request.id, 30000)
-
-        heartbeat_thread = threading.Thread(target=_lock_heartbeat, daemon=True)
-        heartbeat_thread.start()
-
-        # Build task chain
-        task_chain = chain(
-            extract_document_text_task.s(
-                user_id=user_id,
-                document_id=document_id,
-                text=text,
-                file_bytes=file_bytes,
-                file_path=file_path,
-                file_url=file_url,
-            ),
-            summarize_document_task.s(),
-            extract_remedies_task.s(),
-            finalize_analysis_task.s(document_type=document_type),
-        )
-
-        # Broadcast start event immediately
-        _broadcast_job_event(
-            job_id=self.request.id,
-            event="processing_started",
-            stage="analysis",
-            progress=0,
-            document_id=document_id,
-        )
-
-        # Execute chain synchronously to capture result
-        chain_result = task_chain.apply()
-        final_result = chain_result.get() if hasattr(chain_result, 'get') else chain_result
-
-        # Add timing metadata
-        analysis_time = (datetime.utcnow() - start_time).total_seconds()
-        final_result["analysis_time_seconds"] = analysis_time
-
-        logger.info(
-            "Document analysis chain completed",
-            task_id=self.request.id,
-            document_id=document_id,
-            analysis_time=analysis_time,
-        )
-
-        # Broadcast final completion (redundant safety net if chain tasks missed it)
-        _broadcast_job_event(
-            job_id=self.request.id,
-            event="completed",
-            stage="analysis",
-            progress=100,
-            document_id=document_id,
-            payload={"analysis_time_seconds": analysis_time},
-        )
-
-        # Mark idempotency complete and persist result
-        idemp.mark_completed(idempotency_key, final_result)
-        
-        # HOOK: Trigger State Machine transition
-        _trigger_state_machine_hook(
-            event="analysis_complete",
-            document_id=document_id,
-            user_id=user_id,
-            result=final_result,
-        )
-
-        return final_result
-
-    except Exception as e:
-        logger.error(
-            "Document analysis chain failed",
-            task_id=self.request.id,
-            user_id=user_id,
-            document_id=document_id,
-            error=str(e),
-            error_type=type(e).__name__,
-        )
-
-        _broadcast_job_event(
-            job_id=self.request.id,
-            event="failed",
-            stage="analysis",
-            progress=0,
-            document_id=document_id,
-            error=str(e),
-        )
-        
-        # HOOK: Trigger State Machine transition for failure
-        _trigger_state_machine_hook(
-            event="analysis_failed",
-            document_id=document_id,
-            user_id=user_id,
-            error=str(e),
-        )
-        
-        raise
-    finally:
-        _release_document_lock(doc_lock, document_id, self.request.id)
-        clear_request_context()
 
 
 @celery_app.task(bind=True, name="process_case_document_upload")

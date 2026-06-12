@@ -5,7 +5,7 @@ GET /api/v1/health/ready - Readiness probe (Kubernetes readiness)
 GET /api/v1/health/live - Liveness probe (Kubernetes liveness)
 """
 from datetime import datetime, timezone
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 import structlog
 from api.health_checks import get_health_manager
 
@@ -22,12 +22,42 @@ logger = structlog.get_logger(__name__)
     response_description="Full health check with all component details"
 )
 async def health_check() -> dict:
-    """API health status"""
-    return {
-        "status": "healthy",
-        "version": "1.0.0",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+    """API health status consolidating database, queue/workers, and scheduler metrics."""
+    manager = get_health_manager()
+    report = await manager.deep_health_check(timeout=5)
+    
+    # Consolidate scheduler metrics
+    db = SessionLocal()
+    try:
+        job_names = [name[0] for name in db.query(SchedulerRun.job_name).distinct().all()]
+        scheduler_metrics = {}
+        for job in job_names:
+            run = (
+                db.query(SchedulerRun)
+                .filter(SchedulerRun.job_name == job)
+                .order_by(desc(SchedulerRun.started_at))
+                .first()
+            )
+            if run:
+                scheduler_metrics[job] = {
+                    "last_run_started_at": run.started_at.isoformat() if run.started_at else None,
+                    "last_run_finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                    "sent_count": run.sent_count,
+                    "status": run.status.value,
+                }
+        report["scheduler"] = {
+            "status": "healthy" if all(r["status"] == "success" for r in scheduler_metrics.values()) else "degraded",
+            "jobs": scheduler_metrics
+        }
+    except Exception as e:
+        report["scheduler"] = {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+    finally:
+        db.close()
+        
+    return report
 
 
 @router.get(
