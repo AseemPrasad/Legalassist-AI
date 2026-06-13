@@ -1,17 +1,5 @@
-"""
-Settings/Preferences page - Notification preferences
-"""
-
-import streamlit as st
-
-# Import the preferences UI
-from notifications_ui import page_notification_preferences
-
-st.set_page_config(
-    page_title="Preferences",
-    page_icon="⚙️",
-    layout="wide"
-)
-
-if __name__ == "__main__":
-    page_notification_preferences()
+# Legacy settings placeholder - replaced by 3_Settings.py
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+import pages.3_Settings
