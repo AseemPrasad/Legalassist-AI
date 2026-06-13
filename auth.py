@@ -566,9 +566,9 @@ def verify_jwt_token(token: str) -> Optional[dict]:
     try:
         return verify_token(token)
     except Exception as e:
-    import logging
-    logging.error(f"Auth error: {e}")
-        return None
+      import logging
+      logging.error(f"Auth error: {e}")
+      return None
 
 
 def revoke_jwt_token(token: str) -> bool:
