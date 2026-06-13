@@ -32,12 +32,14 @@ def a11y_progress_indicator(current: int, total: int, label: str = "Progress") -
              aria-valuenow="{current}" 
              aria-valuemin="0" 
              aria-valuemax="{total}"
+             aria-valuetext="{current} of {total} items ({percentage}%)"
              aria-label="{label}">
             <span>{label}: {percentage}%</span>
         </div>
         """,
         unsafe_allow_html=True
     )
+
 
 
 def a11y_form_field(label: str, field_id: str, required: bool = False) -> str:

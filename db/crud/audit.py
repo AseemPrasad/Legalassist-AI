@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
@@ -11,6 +12,8 @@ from sqlalchemy.orm import Session
 
 from db.models import AuditEvent
 from db.immutable_audit_log import append_audit_entry
+
+logger = logging.getLogger(__name__)
 
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 PHONE_PATTERN = re.compile(r"(?:(?:\+?\d[\d\s().-]{6,}\d))")
@@ -91,6 +94,30 @@ def record_audit_event(
     db.add(event)
     db.commit()
     db.refresh(event)
+
+    # Write to the immutable audit chain for tamper-evident record.
+    # This wraps callers of the legacy mutable path so all audited
+    # actions are also cryptographically chained, even before callers
+    # are individually migrated to record_immutable_audit_event.
+    try:
+        resource_type, resource_id = resource.split(":", 1) if ":" in resource else (resource, None)
+    except (ValueError, TypeError):
+        resource_type, resource_id = resource, None
+
+    try:
+        record_immutable_audit_event(
+            event_type=f"audit.{action}",
+            action=action,
+            actor_user_id=actor_user_id,
+            resource_type=resource_type,
+            resource_id=str(resource_id) if resource_id is not None else None,
+            outcome="success",
+            case_id=case_id,
+            metadata={"legacy_actor": actor, **(metadata or {})},
+        )
+    except Exception:
+        logger.exception("immutable_audit_fallback_failed", action=action, resource=resource)
+
     return event
 
 

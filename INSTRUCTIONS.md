@@ -1,4 +1,7 @@
-# Project Instructions & Architecture 📖
+# Project Instructions & Architecture
+
+## API Reference
+Visit `/docs` for Swagger UI. 📖
 
 ## 🏛️ System Overview
 

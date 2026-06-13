@@ -8,7 +8,7 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any
 
-import routes
+from config import PAGE_HOME
 
 from auth import require_auth, redirect_to_login, get_current_user_id, get_current_user_email
 from case_manager import get_user_cases_summary, mark_deadline_completed, mark_deadline_incomplete
@@ -361,7 +361,7 @@ def main():
     if not deadlines:
         st.info("📭 No deadlines yet. Deadlines are created when you upload documents with remedies advice.")
         if st.button("📤 Upload a Judgment"):
-            st.switch_page(routes.PAGE_HOME)
+            st.switch_page(PAGE_HOME)
         return
 
     # Render summary cards

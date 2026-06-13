@@ -5,10 +5,8 @@ Handles image preprocessing, enhancement, and quality assessment
 
 import logging
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter
 import cv2
-from typing import Tuple, Optional, Dict, Any
-from pathlib import Path
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -82,16 +80,18 @@ class ImageProcessor:
         return cv2.bilateralFilter(image, 9, 75, 75)
     
     @staticmethod
-    def enhance_contrast(image: np.ndarray) -> np.ndarray:
+    def enhance_contrast(image: np.ndarray, clip_limit: float = 2.0, tile_grid_size: tuple[int, int] = (8, 8)) -> np.ndarray:
         """Enhance contrast using CLAHE (Contrast Limited Adaptive Histogram Equalization)
         
         Args:
             image: Input grayscale image
+            clip_limit: Threshold for contrast limiting
+            tile_grid_size: Size of grid for histogram equalization
             
         Returns:
             Contrast-enhanced image
         """
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
         return clahe.apply(image)
     
     @staticmethod
@@ -142,23 +142,29 @@ class ImageProcessor:
             lines = cv2.HoughLines(edges, 1, np.pi/180, 100)
             
             if lines is not None:
-                # Calculate average angle
+                # Calculate average angle filtering outliers
                 angles = []
                 for line in lines:
                     rho, theta = line[0]
-                    angle = np.degrees(theta) - 90
-                    angles.append(angle)
+                    angle = np.degrees(theta)
+                    # Normalize angles to identify the page skew offset from horizontal/vertical axes
+                    skew = (angle - 90) % 180
+                    if skew > 90:
+                        skew -= 180
+                    if abs(skew) < 45:
+                        angles.append(skew)
                 
-                median_angle = np.median(angles)
-                
-                # Rotate image
-                (h, w) = image.shape[:2]
-                center = (w // 2, h // 2)
-                M = cv2.getRotationMatrix2D(center, median_angle, 1.0)
-                rotated = cv2.warpAffine(image, M, (w, h), 
-                                       flags=cv2.INTER_CUBIC, 
-                                       borderMode=cv2.BORDER_REPLICATE)
-                return rotated
+                if angles:
+                    median_angle = np.median(angles)
+                    
+                    # Rotate image
+                    (h, w) = image.shape[:2]
+                    center = (w // 2, h // 2)
+                    M = cv2.getRotationMatrix2D(center, median_angle, 1.0)
+                    rotated = cv2.warpAffine(image, M, (w, h), 
+                                           flags=cv2.INTER_CUBIC, 
+                                           borderMode=cv2.BORDER_REPLICATE)
+                    return rotated
             
             return image
         except Exception as e:
@@ -319,7 +325,11 @@ class ImageProcessor:
                 # Try Otsu first, fallback to adaptive
                 try:
                     processed = ImageProcessor.binarize_image(processed, method='otsu')
-                except:
+                except cv2.error as e:
+                    logger.warning(f"Otsu binarization failed, falling back to adaptive thresholding: {str(e)}")
+                    processed = ImageProcessor.binarize_image(processed, method='adaptive')
+                except Exception as e:
+                    logger.warning(f"Unexpected error during Otsu binarization, falling back to adaptive: {str(e)}")
                     processed = ImageProcessor.binarize_image(processed, method='adaptive')
             
             # Sharpen if aggressive

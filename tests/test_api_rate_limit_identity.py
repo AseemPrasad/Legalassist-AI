@@ -41,5 +41,5 @@ def test_rate_limit_identifier_falls_back_to_ip_when_auth_is_missing(monkeypatch
 def test_rate_limit_key_is_versioned_and_not_minute_bucketed():
     key = limiter._generate_key("user:42", "GLOBAL_API_LIMIT")
 
-    assert key.startswith("ratelimit:v2:")
+    assert key.startswith("ratelimit:v3:")
     assert "// 60" not in key

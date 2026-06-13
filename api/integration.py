@@ -32,7 +32,9 @@ class StreamlitAPIAdapter:
         except ImportError:
             logger.warning("Celery unavailable — cannot queue document analysis")
             return None
-        except Exception:
+        except Exception as e:
+        import logging
+        logging.error(f"Integration error: {e}")
             logger.exception("Unexpected error importing analyze_document_task")
             return None
         

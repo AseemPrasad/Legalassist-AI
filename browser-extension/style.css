@@ -1,0 +1,13 @@
+/* Styles for highlighted legal precedents */
+.legalassist-highlight {
+    background-color: #fef08a; /* Yellow highlight */
+    border-bottom: 2px solid #ca8a04;
+    cursor: help;
+    border-radius: 2px;
+    padding: 0 2px;
+    transition: background-color 0.2s ease;
+}
+
+.legalassist-highlight:hover {
+    background-color: #fde047;
+}

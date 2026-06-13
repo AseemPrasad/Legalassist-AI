@@ -6,17 +6,15 @@ CHANGE: build_judgment_result_text now returns (plain_text, structured_dict).
         render_shareable_result_box accepts the tuple directly — no other changes needed.
 """
 
-import streamlit as st
-import logging
-
-import routes
 import sys
 import os
-from config import Config
-from pages.ui_components import render_header, SESSION_KEYS
-
-# Add parent directory to sys.path to resolve 'core' module
+# Add parent directory to sys.path to resolve 'core' and other top-level modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import streamlit as st
+import logging
+from config import Config, PAGE_CHAT
+from pages.ui_components import render_header, SESSION_KEYS
 
 from core.app_utils import (
     get_client,
@@ -24,26 +22,22 @@ from core.app_utils import (
     extract_text_from_pdf,
     analyze_legal_citations,
     compress_text,
-    english_leakage_detected,
     output_language_mismatch_detected,
     build_prompt,
     build_retry_prompt,
     get_remedies_advice,
-    extract_appeal_info,
     get_localized_ui_text,
-    localize_yes_no,
     RETRO_STYLING,
     LANGUAGES,
-    parse_summary_bullets,
-    validate_pdf_metadata,
     build_judgment_result_text,
     render_shareable_result_box,
     safe_llm_call,
     generate_legal_draft,
     export_draft_to_pdf,
+    parse_llm_json,
+    parse_timeline,        
+    build_timeline_prompt,
 )
-
-from core.multimodal_processor import MultiModalProcessor
 
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
 
@@ -223,151 +217,157 @@ def render_page():
                         if retry_summary and len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
                             summary = retry_summary
 
-                    if not summary:
-                        st.error(ui["empty_summary"])
-                    else:
-                        remedies = {}
+                    remedies = get_remedies_advice(raw_text, language, client)
 
-                        with st.spinner(ui["remedies_spinner"]):
-                            try:
-                                remedies = get_remedies_advice(raw_text, language, client) or {}
-                            except Exception as e:
-                                st.error(f"{ui['remedies_error']}: {str(e)}")
+                    # build_judgment_result_text now returns (plain_text, structured_dict)
+                    result = build_judgment_result_text(summary, remedies, ui)
 
-                        # build_judgment_result_text now returns (plain_text, structured_dict)
-                        result = build_judgment_result_text(summary, remedies, ui)
+                    # render_shareable_result_box accepts the tuple directly
+                    render_shareable_result_box(result, ui)
+                    st.success(ui["summary_success"])
 
-                        # render_shareable_result_box accepts the tuple directly
-                        render_shareable_result_box(result, ui)
-                        st.success(ui["summary_success"])
+                    citation_analysis = st.session_state.get("citation_analysis", {"citations": [], "summary": {}})
+                    citation_summary = citation_analysis.get("summary", {})
+                    citation_items = citation_analysis.get("citations", [])
+                    if citation_items:
+                        st.markdown("### 📚 Citation Extraction & Validation")
+                        c1, c2, c3, c4 = st.columns(4)
+                        with c1:
+                            st.metric("Citations", citation_summary.get("total_citations", 0))
+                        with c2:
+                            st.metric("Validated", citation_summary.get("validated_citations", 0))
+                        with c3:
+                            st.metric("Needs review", citation_summary.get("needs_review", 0))
+                        with c4:
+                            st.metric("Deprecated", citation_summary.get("deprecated_citations", 0))
 
-                        citation_analysis = st.session_state.get("citation_analysis", {"citations": [], "summary": {}})
-                        citation_summary = citation_analysis.get("summary", {})
-                        citation_items = citation_analysis.get("citations", [])
-                        if citation_items:
-                            st.markdown("### 📚 Citation Extraction & Validation")
-                            c1, c2, c3, c4 = st.columns(4)
-                            with c1:
-                                st.metric("Citations", citation_summary.get("total_citations", 0))
-                            with c2:
-                                st.metric("Validated", citation_summary.get("validated_citations", 0))
-                            with c3:
-                                st.metric("Needs review", citation_summary.get("needs_review", 0))
-                            with c4:
-                                st.metric("Deprecated", citation_summary.get("deprecated_citations", 0))
-
-                            with st.expander("View extracted citations", expanded=False):
-                                for item in citation_items[:10]:
-                                    st.write(
-                                        f"- {item['citation']} ({item['citation_type']}, {item['status']}, confidence {item['confidence']:.2f})"
-                                    )
-
-                        # ===== DRAFTING SECTION =====
-                        st.markdown("---")
-                        st.markdown("## 📝 One-Click Drafting Center")
-                        st.info("Based on these remedies, our AI can generate a formal legal notice or appeal draft for you.")
-                        
-                        if st.button("⚡ Generate Legal Draft", key="generate_home_draft"):
-                            with st.spinner("Drafting your document..."):
-                                # Remedies is part of the result tuple (summary, remedies, ui) or extracted
-                                # In 0_Home.py, remedies is already defined in line 188
-                                draft, error = generate_legal_draft(remedies, language, client)
-                                if error:
-                                    st.error(f"Drafting failed: {error}")
-                                else:
-                                    st.session_state.current_home_draft = draft
-                                    st.success("✅ Draft generated! You can edit it below.")
-                        
-                        if st.session_state.get("current_home_draft"):
-                            edited_draft = st.text_area(
-                                "Edit your draft", 
-                                value=st.session_state.current_home_draft,
-                                height=350,
-                                key="home_draft_area"
-                            )
-                            st.session_state.current_home_draft = edited_draft
+                        with st.expander("View extracted citations", expanded=False):
+                            for item in citation_items[:10]:
+                                st.write(
+                                    f"- {item['citation']} ({item['citation_type']}, {item['status']}, confidence {item['confidence']:.2f})"
+                                )
+                        # 1. Generate Timeline
+                        with st.spinner("Extracting timeline..."):
+                            timeline_prompt = build_timeline_prompt(safe_text)
+                            timeline_raw, error = safe_llm_call(client, model_id, [{"role": "user", "content": timeline_prompt}], 1000, 0.1)
                             
-                            pdf_bytes = export_draft_to_pdf(edited_draft)
-                            st.download_button(
-                                label="📥 Download as PDF",
-                                data=pdf_bytes,
-                                file_name="Legal_Notice_Draft.pdf",
-                                mime="application/pdf",
-                                key="download_home_draft"
-                            )
+                            if not error:
+                                timeline_events = parse_timeline(timeline_raw)
+                                
+                                # 2. Render Timeline
+                                if timeline_events:
+                                    st.markdown("### 🗓️ Case Timeline")
+                                    for item in timeline_events:
+                                        # Use a cleaner UI for dates
+                                        date_str = item['date'] if item['date'] != 'N/A' else "Date Unspecified"
+                                        st.write(f"- **{date_str}**: {item['event']}")
 
-                        # ===== VOICE ACCESSIBILITY (TTS) =====
-                        st.markdown("---")
-                        st.markdown("### 🎧 Listen to Summary")
-                        plain_text_summary = result[0] if isinstance(result, tuple) else result
-                        if st.button("🔊 Generate Audio", key="generate_audio_btn"):
-                            with st.spinner("Generating audio..."):
-                                from core.audio_utils import generate_audio
-                                audio_bytes = generate_audio(plain_text_summary, language)
-                                if audio_bytes:
-                                    st.audio(audio_bytes, format="audio/mp3")
-                                else:
-                                    st.error("Audio generation is not supported for this language or failed.")
-
-                        # ===== ANALYTICS & TRACKING SECTION =====
-                        st.markdown("---")
-                        st.markdown(f"## {ui['track_title']}")
-                        st.info(ui["track_info"])
-
-                        col1, col2, col3 = st.columns(3)
-
-                        with col1:
-                            if st.button(ui["view_analytics"], key="view_analytics_home"):
-                                st.session_state.show_analytics = True
-
-                        with col2:
-                            if st.button(ui["estimate_chances"], key="estimate_chances_home"):
-                                st.session_state.show_estimator = True
-
-                        with col3:
-                            if st.button(ui["report_outcome"], key="report_outcome_home"):
-                                st.session_state.show_feedback = True
-
-                        if st.session_state.get("show_analytics"):
-                            st.subheader(ui["quick_analytics_preview"])
-                            try:
-                                from analytics_engine import AnalyticsAggregator
-                                from database import SessionLocal
-
-                                db = SessionLocal()
-                            except Exception as e:
-                                st.info(ui["analytics_not_ready"])
+                    # ===== DRAFTING SECTION =====
+                    st.markdown("---")
+                    st.markdown("## 📝 One-Click Drafting Center")
+                    st.info("Based on these remedies, our AI can generate a formal legal notice or appeal draft for you.")
+                    
+                    if st.button("⚡ Generate Legal Draft", key="generate_home_draft"):
+                        with st.spinner("Drafting your document..."):
+                            # Remedies is part of the result tuple (summary, remedies, ui) or extracted
+                            # In 0_Home.py, remedies is already defined in line 188
+                            draft, error = generate_legal_draft(remedies, language, client)
+                            if error:
+                                st.error(f"Drafting failed: {error}")
                             else:
-                                try:
-                                    summary_data = AnalyticsAggregator.get_dashboard_summary(db)
+                                st.session_state.current_home_draft = draft
+                                st.success("✅ Draft generated! You can edit it below.")
+                    
+                    if st.session_state.get("current_home_draft"):
+                        edited_draft = st.text_area(
+                            "Edit your draft", 
+                            value=st.session_state.current_home_draft,
+                            height=350,
+                            key="home_draft_area"
+                        )
+                        st.session_state.current_home_draft = edited_draft
+                        
+                        pdf_bytes = export_draft_to_pdf(edited_draft)
+                        st.download_button(
+                            label="📥 Download as PDF",
+                            data=pdf_bytes,
+                            file_name="Legal_Notice_Draft.pdf",
+                            mime="application/pdf",
+                            key="download_home_draft"
+                        )
 
-                                    if summary_data.get("total_cases_processed", 0) > 0:
-                                        col1, col2, col3 = st.columns(3)
-                                        with col1:
-                                            st.metric(ui["total_cases_tracked"], summary_data["total_cases_processed"])
-                                        with col2:
-                                            trends = AnalyticsAggregator.get_regional_trends(db)
-                                            success_rate = trends[0]['appeal_success_rate'] if trends else 'N/A'
-                                            st.metric(ui["appeals_success_rate"], f"{success_rate}%")
-                                        with col3:
-                                            st.metric(ui["appeals_filed"], summary_data.get("appeals_filed", 0))
-                                        st.write(f"📌 **{ui['analytics_link_text']}**")
-                                    else:
-                                        st.info(ui["analytics_empty"])
-                                finally:
-                                    db.close()
+                    # ===== VOICE ACCESSIBILITY (TTS) =====
+                    st.markdown("---")
+                    st.markdown("### 🎧 Listen to Summary")
+                    plain_text_summary = result[0] if isinstance(result, tuple) else result
+                    if st.button("🔊 Generate Audio", key="generate_audio_btn"):
+                        with st.spinner("Generating audio..."):
+                            from core.audio_utils import generate_audio
+                            audio_bytes = generate_audio(plain_text_summary, language)
+                            if audio_bytes:
+                                st.audio(audio_bytes, format="audio/mp3")
+                            else:
+                                st.error("Audio generation is not supported for this language or failed.")
 
-                        # ===== FREE LEGAL HELP SECTION =====
-                        st.markdown("---")
-                        st.markdown(f"## {ui['free_legal_help']}")
-                        st.info(ui["legal_help_resources"])
+                    # ===== ANALYTICS & TRACKING SECTION =====
+                    st.markdown("---")
+                    st.markdown(f"## {ui['track_title']}")
+                    st.info(ui["track_info"])
 
-                        # ===== RAG CHAT REDIRECT =====
-                        st.markdown("---")
-                        st.markdown("## 💬 Chat with Judgment")
-                        st.info("Have specific questions about this document? You can ask our AI assistant.")
-                        if st.button("💬 Open Interactive Chat", use_container_width=True):
-                            st.switch_page(routes.PAGE_CHAT)
+                    col1, col2, col3 = st.columns(3)
+
+                    with col1:
+                        if st.button(ui["view_analytics"], key="view_analytics_home"):
+                            st.session_state.show_analytics = True
+
+                    with col2:
+                        if st.button(ui["estimate_chances"], key="estimate_chances_home"):
+                            st.session_state.show_estimator = True
+
+                    with col3:
+                        if st.button(ui["report_outcome"], key="report_outcome_home"):
+                            st.session_state.show_feedback = True
+
+                    if st.session_state.get("show_analytics"):
+                        st.subheader(ui["quick_analytics_preview"])
+                        try:
+                            from analytics_engine import AnalyticsAggregator
+                            from database import SessionLocal
+
+                            db = SessionLocal()
+                        except Exception as e:
+                            st.info(ui["analytics_not_ready"])
+                        else:
+                            try:
+                                summary_data = AnalyticsAggregator.get_dashboard_summary(db)
+
+                                if summary_data.get("total_cases_processed", 0) > 0:
+                                    col1, col2, col3 = st.columns(3)
+                                    with col1:
+                                        st.metric(ui["total_cases_tracked"], summary_data["total_cases_processed"])
+                                    with col2:
+                                        trends = AnalyticsAggregator.get_regional_trends(db)
+                                        success_rate = trends[0]['appeal_success_rate'] if trends else 'N/A'
+                                        st.metric(ui["appeals_success_rate"], f"{success_rate}%")
+                                    with col3:
+                                        st.metric(ui["appeals_filed"], summary_data.get("appeals_filed", 0))
+                                    st.write(f"📌 **{ui['analytics_link_text']}**")
+                                else:
+                                    st.info(ui["analytics_empty"])
+                            finally:
+                                db.close()
+
+                    # ===== FREE LEGAL HELP SECTION =====
+                    st.markdown("---")
+                    st.markdown(f"## {ui['free_legal_help']}")
+                    st.info(ui["legal_help_resources"])
+
+                    # ===== RAG CHAT REDIRECT =====
+                    st.markdown("---")
+                    st.markdown("## 💬 Chat with Judgment")
+                    st.info("Have specific questions about this document? You can ask our AI assistant.")
+                    if st.button("💬 Open Interactive Chat", use_container_width=True):
+                        st.switch_page(PAGE_CHAT)
 
                 except Exception as e:
                     err = str(e)

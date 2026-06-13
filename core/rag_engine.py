@@ -1,74 +1,121 @@
 import hashlib
 import logging
-import re
-from typing import Dict, List, Optional
-try:
-    import chromadb
-except Exception:
-    chromadb = None
-
-try:
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
-except Exception:
-    # Minimal fallback splitter when langchain is unavailable
-    class RecursiveCharacterTextSplitter:
-        def __init__(self, chunk_size=1400, chunk_overlap=200, separators=None):
-            self.chunk_size = chunk_size
-            self.chunk_overlap = chunk_overlap
-
-        def split_text(self, text: str):
-            chunks = []
-            i = 0
-            L = len(text)
-            while i < L:
-                chunk = text[i:i + self.chunk_size]
-                chunks.append(chunk)
-                i += self.chunk_size - self.chunk_overlap
-            return chunks
-try:
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-except Exception:
-    HuggingFaceEmbeddings = None
-
-try:
-    from langchain_community.vectorstores import Chroma
-except Exception:
-    Chroma = None
-    
-from core.vector_store import ShardedVectorStore
-from config import Config
+from typing import List, Optional, Dict
+import chromadb
 
 LOGGER = logging.getLogger(__name__)
 
 
-def get_judgment_hash(text: str) -> str:
-    """Generate an MD5 hash of judgment text to uniquely identify it."""
-    if not text:
-        return ""
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
+class _LazyImports:
+    """Deferred imports for optional embedding dependencies."""
+    HuggingFaceEmbeddings = None
+    RecursiveCharacterTextSplitter = None
+    Chroma = None
+
+    @classmethod
+    def load(cls) -> None:
+        if cls.HuggingFaceEmbeddings is not None:
+            return
+        try:
+            from langchain_community.embeddings import HuggingFaceEmbeddings as HFE
+            from langchain.text_splitter import RecursiveCharacterTextSplitter as RCTS
+            from langchain_community.vectorstores import Chroma as Ch
+        except ImportError as exc:
+            raise ImportError(
+                "The 'langchain-community' and 'langchain' packages are required for RAG. "
+                "Install them with: pip install langchain langchain-community"
+            ) from exc
+        cls.HuggingFaceEmbeddings = HFE
+        cls.RecursiveCharacterTextSplitter = RCTS
+        cls.Chroma = Ch
 
 
 class LegalRAG:
     def __init__(self, embedding_model_name: str = "all-MiniLM-L6-v2"):
         """Initialize the RAG engine with a specific embedding model."""
         LOGGER.info(f"Initializing LegalRAG with embedding model: {embedding_model_name}")
+        _LazyImports.load()
         try:
-            self.embeddings = HuggingFaceEmbeddings(model_name=embedding_model_name)
+            self.embeddings = _LazyImports.HuggingFaceEmbeddings(model_name=embedding_model_name)
         except Exception as e:
             LOGGER.error(f"Failed to load embedding model: {e}")
             raise
-            
+
         self.vector_store = None
-        self._stored_text = ""
-        self.section_header_pattern = re.compile(
-            r"^(section\s+\d+[\w().:-]*|article\s+\d+[\w().:-]*|chapter\s+\d+[\w().:-]*|clause\s+\d+[\w().:-]*)",
-            re.IGNORECASE,
-        )
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1400,
+        self.text_splitter = _LazyImports.RecursiveCharacterTextSplitter(
+            chunk_size=1000,
             chunk_overlap=200,
-            separators=["\n\n", "\n", ". ", " ", ""]
+            separators=["\n\n", "\n", ".", " ", ""]
         )
+        # Hard-cap slice width used as the final fallback when text_splitter
+        # cannot reduce a piece below MAX_CHUNK_SIZE (e.g. base64 blobs, tables
+        # with no standard separators).
+        self._HARD_CAP_SLICE = 1400
+        self._MAX_CHUNK_SIZE = 1800
+
+    def _is_section_header(self, line: str) -> bool:
+        """Return True when a line looks like a legal section / article header."""
+        stripped = line.strip()
+        if not stripped or len(stripped) > 160:
+            return False
+        return bool(self.section_header_pattern.match(stripped))
+
+    def _split_into_section_chunks(self, text: str) -> List[str]:
+        """Chunk text on section headers then enforce a strict size upper-bound.
+
+        Algorithm
+        ---------
+        1. Walk lines and collect runs between legal section headers into
+           coarse section blocks.
+        2. If no headers are found the text_splitter handles the whole doc.
+        3. For each coarse block that still exceeds MAX_CHUNK_SIZE:
+           a. Run text_splitter.split_text() as a semantic fallback.
+           b. Any piece that *still* exceeds MAX_CHUNK_SIZE (e.g. base64
+              blobs or tables without standard separators) is sliced in
+              HARD_CAP_SLICE windows.  This guarantees O(n) termination
+              and prevents infinite recursive fallback loops.
+        """
+        chunks: List[str] = []
+        current_lines: List[str] = []
+
+        for line in text.splitlines():
+            if self._is_section_header(line) and current_lines:
+                section_text = "\n".join(current_lines).strip()
+                if section_text:
+                    chunks.append(section_text)
+                current_lines = [line.strip()]
+                continue
+            current_lines.append(line)
+
+        if current_lines:
+            section_text = "\n".join(current_lines).strip()
+            if section_text:
+                chunks.append(section_text)
+
+        # No section headers found — fall back to pure size-based splitting.
+        if len(chunks) <= 1:
+            return self.text_splitter.split_text(text)
+
+        semantic_chunks: List[str] = []
+        for chunk in chunks:
+            if len(chunk) <= self._MAX_CHUNK_SIZE:
+                semantic_chunks.append(chunk)
+            else:
+                split_pieces = self.text_splitter.split_text(chunk)
+                for piece in split_pieces:
+                    if len(piece) > self._MAX_CHUNK_SIZE:
+                        # Hard-cap: linear slicing guarantees termination.
+                        # This handles unstructured blobs (base64, legal tables)
+                        # that the recursive splitter cannot reduce further.
+                        for i in range(0, len(piece), self._HARD_CAP_SLICE):
+                            sliced = piece[i:i + self._HARD_CAP_SLICE]
+                            if sliced.strip():
+                                semantic_chunks.append(sliced)
+                    else:
+                        if piece.strip():
+                            semantic_chunks.append(piece)
+
+        return semantic_chunks if semantic_chunks else self.text_splitter.split_text(text)
 
     def reset(self) -> None:
         """Reset the vector store to clear loaded document state."""
@@ -118,10 +165,21 @@ class LegalRAG:
                     if len(sub_chunk) <= max_chunk_size:
                         semantic_chunks.append(sub_chunk)
                     else:
-                        for i in range(0, len(sub_chunk), max_hard_slice_size):
-                            hard_slice = sub_chunk[i:i + max_hard_slice_size]
-                            if hard_slice.strip():
-                                semantic_chunks.append(hard_slice)
+                        # Soft-split on word boundaries to avoid cutting mid-word
+                        words = sub_chunk.split(" ")
+                        curr_chunk = []
+                        curr_size = 0
+                        for w in words:
+                            if curr_size + len(w) + 1 > max_hard_slice_size:
+                                if curr_chunk:
+                                    semantic_chunks.append(" ".join(curr_chunk))
+                                curr_chunk = [w]
+                                curr_size = len(w)
+                            else:
+                                curr_chunk.append(w)
+                                curr_size += len(w) + 1
+                        if curr_chunk:
+                            semantic_chunks.append(" ".join(curr_chunk))
 
         return [chunk for chunk in semantic_chunks if chunk.strip()]
 
@@ -135,55 +193,15 @@ class LegalRAG:
             LOGGER.info("Chunking document text...")
             chunks = self._split_into_section_chunks(text)
             LOGGER.info(f"Split document into {len(chunks)} chunks.")
-
-            self._stored_text = text
-
-            # Build per-chunk metadata for provenance (source hash, chunk index, char offsets)
-            source_hash = get_judgment_hash(text)
-            metadatas = []
-            offset = 0
-            for idx, chunk in enumerate(chunks):
-                start = text.find(chunk, offset)
-                if start == -1:
-                    start = offset
-                end = start + len(chunk)
-                offset = end
-                metadatas.append({
-                    "source_hash": source_hash,
-                    "chunk_index": idx,
-                    "start_char": start,
-                    "end_char": end,
-                    "excerpt": chunk[:240].strip(),
-                })
-
-            # Prefer Chroma if available, otherwise fallback to local sharded vector store
-            if Chroma is not None and chromadb is not None:
-                chroma_client = chromadb.EphemeralClient()
-                self.vector_store = Chroma.from_texts(
-                    texts=chunks,
-                    embedding=self.embeddings,
-                    metadatas=metadatas,
-                    client=chroma_client,
-                    collection_name="judgment_chat",
-                )
-            else:
-                # Local fallback: use ShardedVectorStore and attach the embedder for query
-                num_shards = int(getattr(Config, "VECTOR_SHARDS", 4))
-                # determine embedding dimension from produced vectors
-                vectors = self.embeddings.embed_documents(chunks)
-                emb_dim = len(vectors[0]) if vectors and len(vectors[0]) > 0 else int(getattr(Config, "EMBEDDING_DIMENSION", 1536))
-                vs = ShardedVectorStore(num_shards=num_shards, dimension=emb_dim)
-                items = []
-                for idx, vec in enumerate(vectors):
-                    # use chunk index as id for provenance; metadata carries source_hash
-                    cid = idx + 1
-                    items.append((cid, vec))
-                    vs.set_metadata(cid, metadatas[idx])
-
-                vs.add_batch(items)
-                # attach embedder for similarity queries
-                vs.embedder = self.embeddings
-                self.vector_store = vs
+            
+            # Create vector store in memory using EphemeralClient
+            chroma_client = chromadb.EphemeralClient()
+            self.vector_store = _LazyImports.Chroma.from_texts(
+                texts=chunks,
+                embedding=self.embeddings,
+                client=chroma_client,
+                collection_name="judgment_chat"
+            )
             LOGGER.info("Successfully initialized vector store.")
             return True
         except Exception as e:

@@ -34,14 +34,14 @@ ingress:
 
 postgresql:
   auth:
-    password: staging_password
+    password: ${POSTGRES_PASSWORD:-CHANGE-ME-STAGING}
   primary:
     persistence:
       size: 10Gi
 
 redis:
   auth:
-    password: staging_redis_password
+    password: ${REDIS_PASSWORD:-CHANGE-ME-STAGING}
 
 env:
   - name: ENVIRONMENT

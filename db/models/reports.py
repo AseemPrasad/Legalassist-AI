@@ -1,6 +1,6 @@
 import datetime as dt
 import enum
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey
 from db.base import Base
 
 
@@ -28,11 +28,15 @@ class Report(Base):
     report_id = Column(String(255), unique=True, index=True, nullable=False)
     job_id = Column(String(255), index=True, nullable=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
-    case_id = Column(String(255), nullable=False)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
     report_type = Column(String(50), nullable=True)
     format = Column(String(50), nullable=False)
     status = Column(String(50), default="pending", nullable=False)
+    file_path = Column(String(1024), nullable=True)
+    file_size_bytes = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
     def __repr__(self):

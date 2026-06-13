@@ -1,6 +1,16 @@
+"""
+Deadline calculation and business rules.
+
+Delegates to domain/deadline.py for core logic. This module retains
+jurisdiction-specific rules (holidays, weekends, court schedules) that are
+infrastructure concerns, not pure domain logic.
+"""
+
 from datetime import datetime, time, timedelta, date
 from zoneinfo import ZoneInfo
 from typing import List, Optional, Dict, Any
+
+from domain.deadline import DeadlineEngine
 
 
 def _parse_date(value: Any, tz: str) -> datetime:
@@ -9,20 +19,57 @@ def _parse_date(value: Any, tz: str) -> datetime:
     elif isinstance(value, date):
         dt = datetime(value.year, value.month, value.day)
     else:
-        # expect ISO string
-        dt = datetime.fromisoformat(str(value))
+        try:
+            dt = datetime.fromisoformat(str(value))
+        except ValueError:
+            dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=ZoneInfo(tz))
     else:
-        # convert to requested tz
         dt = dt.astimezone(ZoneInfo(tz))
 
     return dt
 
 
-def _is_weekend(dt: date) -> bool:
-    return dt.weekday() >= 5
+_JURISDICTION_WEEKENDS = {
+    "US": {5, 6},
+    "NY": {5, 6},
+    "CA": {5, 6},
+    "UK": {5, 6},
+    "IL": {4, 5},
+    "IN": {5, 6},
+    "BD": {4, 5},
+    "AE": {4, 5},
+    "NP": {5, 6},
+    "EG": {4, 5},
+    "SA": {4, 5},
+    "PK": {5, 6},
+}
+
+COURT_HOLIDAYS = {
+    "IN_SC": [
+        "2026-01-26",
+        "2026-03-03",
+        "2026-08-15",
+        "2026-10-02",
+        "2026-11-08",
+        "2026-12-25",
+    ],
+    "IN_DHC": [
+        "2026-01-26",
+        "2026-03-03",
+        "2026-08-15",
+        "2026-10-02",
+        "2026-11-08",
+        "2026-12-25",
+    ],
+}
+
+
+def _is_weekend(dt: date, jurisdiction: Optional[str] = None) -> bool:
+    weekend_days = _JURISDICTION_WEEKENDS.get(jurisdiction.upper() if jurisdiction else "", {5, 6})
+    return dt.weekday() in weekend_days
 
 
 def calculate_deadline(
@@ -35,46 +82,51 @@ def calculate_deadline(
     emergency_extension_days: int = 0,
     filing_time: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Calculate a deadline applying business day rules, holidays, and jurisdiction rules.
-
-    - `start`: ISO datetime string or datetime/date
-    - `business_days`: number of business days to add
-    - `timezone`: IANA tz name
-    - `holidays`: list of ISO date strings (YYYY-MM-DD)
-    - `jurisdiction`: optional key for jurisdiction-specific rules (POC)
-    - `emergency_extension_days`: extra days added for emergency relief
-    - `filing_time`: optional HH:MM to check against jurisdiction cutoff
-    """
+    """Calculate a deadline applying business day rules, holidays, and jurisdiction rules."""
     tz = timezone or "UTC"
     dt = _parse_date(start, tz)
 
-    holidays_set = set(holidays or [])
+    holidays_set = set()
+    if holidays:
+        for h in holidays:
+            try:
+                date.fromisoformat(h)
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid holiday date format: {h!r}. Expected YYYY-MM-DD.")
+        holidays_set = set(holidays)
+
+    if jurisdiction:
+        for h in COURT_HOLIDAYS.get(jurisdiction.upper(), []):
+            holidays_set.add(h)
 
     remaining = max(0, int(business_days))
     current = dt
-
-    # If business_days is zero, deadline is same day but still may be adjusted
     steps = 0
+
+    def _roll_forward(d):
+        while True:
+            if exclude_weekends and _is_weekend(d.date(), jurisdiction):
+                d += timedelta(days=1)
+                continue
+            if d.date().isoformat() in holidays_set:
+                d += timedelta(days=1)
+                continue
+            break
+        return d
+
     while remaining > 0:
-        # move to next day at same local wall clock
-        current = current + timedelta(days=1)
+        current += timedelta(days=1)
         steps += 1
-        d = current.date()
-
-        if exclude_weekends and _is_weekend(d):
-            continue
-
-        if d.isoformat() in holidays_set:
-            continue
-
+        current = _roll_forward(current)
         remaining -= 1
+
+    if int(business_days) == 0:
+        current = _roll_forward(current)
 
     adjusted_for_weekends_holidays = current
 
-    # Apply jurisdiction-specific rules (POC)
     jurisdiction_adjustment = 0
     if jurisdiction:
-        # Example rule: if filing after 17:00 local time, add 1 day in some jurisdictions
         rules = {
             "NY": {"cutoff_hour": 17, "add_days_after_cutoff": 1},
             "CA": {"cutoff_hour": 16, "add_days_after_cutoff": 1},
@@ -88,7 +140,16 @@ def calculate_deadline(
             except Exception:
                 jurisdiction_adjustment = 0
 
-    final = adjusted_for_weekends_holidays + timedelta(days=jurisdiction_adjustment + int(emergency_extension_days))
+    final = adjusted_for_weekends_holidays
+    if jurisdiction_adjustment:
+        final += timedelta(days=jurisdiction_adjustment)
+        final = _roll_forward(final)
+    if emergency_extension_days:
+        final += timedelta(days=int(emergency_extension_days))
+        final = _roll_forward(final)
+
+    while (exclude_weekends and _is_weekend(final.date(), jurisdiction)) or (final.date().isoformat() in holidays_set):
+        final = final + timedelta(days=1)
 
     return {
         "deadline": final.isoformat(),
@@ -104,3 +165,11 @@ def calculate_deadline(
 
 
 __all__ = ["calculate_deadline"]
+
+
+def get_deadline_first_action(deadline_type: Optional[str]) -> str:
+    """Return a short deterministic next-action suggestion for a deadline type."""
+    return DeadlineEngine.first_action(deadline_type)
+
+
+__all__.append("get_deadline_first_action")

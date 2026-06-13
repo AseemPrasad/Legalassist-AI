@@ -62,6 +62,13 @@ class OCRProcessingError(LegalAssistError):
     pass
 
 
+class DocumentValidationError(LegalAssistError):
+    """
+    Raised when document input validation fails.
+    """
+    pass
+
+
 class LLMResponseParsingError(LegalAssistError):
     """
     Raised when the output from an AI model does not match the expected format.
