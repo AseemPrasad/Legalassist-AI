@@ -33,7 +33,7 @@ from api.validation import (
 from database import init_db
 
 # Import routes
-from api.routes import documents, cases, reports, analytics, deadlines, auth, health, webhooks
+from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search, speech, document_verification, argument_strength, deadline_engine, efiling, hybrid_search
 
 logger = structlog.get_logger(__name__)
 
@@ -135,10 +135,24 @@ def create_app() -> FastAPI:
     app.include_router(analytics.router)
     app.include_router(deadlines.router)
     app.include_router(auth.router)
-    app.include_router(webhooks.router)
+    app.include_router(case_search.router)  # Case search and precedent matching
+    app.include_router(speech.router)
+    app.include_router(document_verification.router)
+    app.include_router(argument_strength.router)
+    app.include_router(deadline_engine.router)
+    app.include_router(efiling.router)
+    app.include_router(hybrid_search.router)  # Cross-jurisdictional hybrid search (RRF + re-ranking)
     # Model feedback & optimization
     from api.routes import models as models_router
     app.include_router(models_router.router)
+
+    # HA WebSocket endpoints (multiplexing, reconnection, Redis bridge)
+    from api.websockets.router import register_ha_websocket_endpoints
+    register_ha_websocket_endpoints(app)
+
+    # Legacy case-timeline WebSocket endpoint
+    from api.websockets.case_timeline import register_case_timeline_endpoint
+    register_case_timeline_endpoint(app)
     
     # ========================================================================
     # Global Exception Handlers

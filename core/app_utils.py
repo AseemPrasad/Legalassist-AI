@@ -1393,186 +1393,60 @@ def get_remedies_advice(judgment_text, language, client=None):
 # =============================================================================
 
 def safe_llm_call(
-    client: OpenAI,
+    client: Optional[OpenAI],
     model: str,
     messages: List[Dict[str, str]],
     max_tokens: int,
     temperature: float,
     timeout: Optional[float] = None,
-    retries: Optional[int] = None
+    retries: Optional[int] = None,
+    task: str = "general",
+    case_type: Optional[str] = None,
+    jurisdiction: Optional[str] = None
 ) -> Tuple[Optional[str], Optional[str]]:
     """
-    Safely execute a call to the LLM API with built-in retry logic and robust error handling.
-    
-    This function wraps the OpenAI client call to handle common network issues,
-    rate limits, and API errors gracefully, providing user-friendly error messages.
-
-    Args:
-        client: The initialized OpenAI-compatible client.
-        model: The model identifier to use for the request.
-        messages: A list of message dictionaries (role/content).
-        max_tokens: The maximum number of tokens to generate.
-        temperature: The sampling temperature for the request.
-        timeout: Optional override for the network timeout (defaults to Config.AI_REQUEST_TIMEOUT).
-        retries: Optional override for the number of retry attempts (defaults to Config.AI_MAX_RETRIES).
-
-    Returns:
-        Tuple[Optional[str], Optional[str]]: A tuple containing (response_text, error_message).
-            If successful, error_message is None. If failed, response_text is None.
+    Safely execute a call to the LLM API using the ModelRouter with dynamic routing,
+    fallback, and performance tracking.
     """
-    import time
-    import openai
-    from typing import Tuple
-    from core.circuit_breaker import get_llm_circuit_breaker, CircuitBreakerError
-
-    # Resolve configuration defaults if not provided explicitly
+    from core.model_router import model_router
+    
     if timeout is None:
         timeout = Config.AI_REQUEST_TIMEOUT
-        
-    if retries is None:
-        retries = Config.AI_MAX_RETRIES
 
-    breaker = get_llm_circuit_breaker()
-    if not breaker.can_execute():
-        return None, "AI Service temporarily unavailable due to high failure rate. Please try again shortly."
+    # Infer task from system prompt content if not explicitly passed
+    if task == "general" and messages:
+        system_content = next((m["content"] for m in messages if m.get("role") == "system"), "").lower()
+        if "remedies" in system_content or "legal advisor" in system_content:
+            task = "remedies"
+        elif "summary" in system_content or "simplifier" in system_content:
+            task = "summary"
+        elif "extracting arguments" in system_content:
+            task = "extraction"
+        elif "legal notice" in system_content or "appeal memo" in system_content:
+            task = "drafting"
 
-    last_error = None
-    
-    # Attempt the API call multiple times based on the retry configuration
-    for attempt in range(retries):
-        if _tracer:
-            with _tracer.start_as_current_span(
-                f"openai.chat.{model}",
-                attributes={
-                    "llm.model": model,
-                    "llm.max_tokens": max_tokens,
-                    "llm.temperature": temperature,
-                    "llm.attempt": attempt + 1,
-                },
-            ) as span:
-                try:
-                    response = client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        timeout=timeout,
-                    )
-                    if hasattr(response, 'usage') and response.usage:
-                        span.set_attribute("llm.prompt_tokens", response.usage.prompt_tokens or 0)
-                        span.set_attribute("llm.completion_tokens", response.usage.completion_tokens or 0)
-                        span.set_attribute("llm.total_tokens", response.usage.total_tokens or 0)
-                    return response.choices[0].message.content.strip(), None
-                except openai.AuthenticationError:
-                    breaker.record_success()
-                    return None, "Authentication failed. Please check your API key in the configuration."
-                except openai.RateLimitError:
-                    breaker.record_failure()
-                    if attempt < retries - 1:
-                        wait_time = Config.AI_RETRY_BACKOFF_BASE ** attempt
-                        logging.warning(f"Rate limit hit. Retrying in {wait_time}s... (Attempt {attempt + 1}/{retries})")
-                        time.sleep(wait_time)
-                        continue
-                    return None, "Rate limit exceeded. Please try again in a few minutes."
-                except openai.APITimeoutError:
-                    breaker.record_failure()
-                    if attempt < retries - 1:
-                        logging.warning(f"Request timed out. Retrying... (Attempt {attempt + 1}/{retries})")
-                        continue
-                    return None, "The request timed out. The AI server might be busy or your connection is slow."
-                except openai.APIConnectionError:
-                    breaker.record_failure()
-                    if attempt < retries - 1:
-                        time.sleep(1)
-                        logging.warning(f"Connection error. Retrying... (Attempt {attempt + 1}/{retries})")
-                        continue
-                    return None, "Could not connect to the AI server. Please check your internet connection."
-                except openai.APIStatusError as e:
-                    if e.status_code >= 500:
-                        breaker.record_failure()
-                    else:
-                        breaker.record_success()
-                    if e.status_code == 402:
-                        return None, "AI Service Error: Out of credits. Please top up your provider account."
-                    if attempt < retries - 1:
-                        time.sleep(1)
-                        continue
-                    return None, f"AI Service Error (HTTP {e.status_code}): {str(e)}"
-                except Exception as e:
-                    last_error = str(e)
-                    breaker.record_failure()
-                    span.set_attribute("error", True)
-                    span.set_attribute("error.message", last_error)
-                    if attempt < retries - 1:
-                        time.sleep(0.5)
-                        continue
-        else:
-            try:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    timeout=timeout,
-                )
-                return response.choices[0].message.content.strip(), None
-            except openai.AuthenticationError:
-                breaker.record_success()
-                return None, "Authentication failed. Please check your API key in the configuration."
-            except openai.RateLimitError:
-                breaker.record_failure()
-                if attempt < retries - 1:
-                    wait_time = Config.AI_RETRY_BACKOFF_BASE ** attempt
-                    logging.warning(f"Rate limit hit. Retrying in {wait_time}s... (Attempt {attempt + 1}/{retries})")
-                    time.sleep(wait_time)
-                    continue
-                return None, "Rate limit exceeded. Please try again in a few minutes."
-            except openai.APITimeoutError:
-                breaker.record_failure()
-                if attempt < retries - 1:
-                    logging.warning(f"Request timed out. Retrying... (Attempt {attempt + 1}/{retries})")
-                    continue
-                return None, "The request timed out. The AI server might be busy or your connection is slow."
-            except openai.APIConnectionError:
-                breaker.record_failure()
-                if attempt < retries - 1:
-                    time.sleep(1)
-                    logging.warning(f"Connection error. Retrying... (Attempt {attempt + 1}/{retries})")
-                    continue
-                return None, "Could not connect to the AI server. Please check your internet connection."
-            except openai.APIStatusError as e:
-                if e.status_code >= 500:
-                    breaker.record_failure()
-                else:
-                    breaker.record_success()
-                if e.status_code == 402:
-                    return None, "AI Service Error: Out of credits. Please top up your provider account."
-                if attempt < retries - 1:
-                    time.sleep(1)
-                    continue
-                return None, f"AI Service Error (HTTP {e.status_code}): {str(e)}"
-            except Exception as e:
-                last_error = str(e)
-                breaker.record_failure()
-                logging.error(f"Unexpected LLM API Error (Attempt {attempt + 1}): {str(e)}", exc_info=True)
-                if attempt < retries - 1:
-                    time.sleep(0.5)
-                    continue
-    
-    # If all retry attempts failed, return the last error encountered
-    if last_error:
-        breaker.record_failure()
-    return None, f"An unexpected error occurred after {retries} attempts: {last_error}"
+    return model_router.execute_call(
+        task=task,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=timeout,
+        case_type=case_type,
+        jurisdiction=jurisdiction
+    )
 
 
 async def safe_llm_call_async(
-    client: OpenAI,
+    client: Optional[OpenAI],
     model: str,
     messages: List[Dict[str, str]],
     max_tokens: int,
     temperature: float,
     timeout: Optional[float] = None,
-    retries: Optional[int] = None
+    retries: Optional[int] = None,
+    task: str = "general",
+    case_type: Optional[str] = None,
+    jurisdiction: Optional[str] = None
 ) -> Tuple[Optional[str], Optional[str]]:
     """Async wrapper around `safe_llm_call` that offloads blocking client calls to a thread.
 
@@ -1580,85 +1454,22 @@ async def safe_llm_call_async(
     retry and error-handling semantics as the synchronous helper.
     """
     import asyncio as _asyncio
-    import time as _time
-    import openai as _openai
-    from core.circuit_breaker import get_llm_circuit_breaker, CircuitBreakerError
 
-    if timeout is None:
-        timeout = Config.AI_REQUEST_TIMEOUT
-    if retries is None:
-        retries = Config.AI_MAX_RETRIES
+    def _call():
+        return safe_llm_call(
+            client=client,
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+            retries=retries,
+            task=task,
+            case_type=case_type,
+            jurisdiction=jurisdiction
+        )
 
-    breaker = get_llm_circuit_breaker()
-    if not breaker.can_execute():
-        return None, "AI Service temporarily unavailable due to high failure rate. Please try again shortly."
-
-    last_error = None
-
-    for attempt in range(retries):
-        try:
-            # Offload the blocking client call to a thread
-            def _call():
-                return client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    timeout=timeout,
-                )
-
-            response = await _asyncio.to_thread(_call)
-            if hasattr(response, 'choices') and response.choices:
-                breaker.record_success()
-                return response.choices[0].message.content.strip(), None
-            breaker.record_failure()
-            return None, "Empty response from LLM"
-        except _openai.AuthenticationError:
-            breaker.record_success()
-            return None, "Authentication failed. Please check your API key in the configuration."
-        except _openai.RateLimitError:
-            breaker.record_failure()
-            if attempt < retries - 1:
-                wait_time = Config.AI_RETRY_BACKOFF_BASE ** attempt
-                logging.warning(f"Rate limit hit. Retrying in {wait_time}s... (Attempt {attempt + 1}/{retries})")
-                await _asyncio.sleep(wait_time)
-                continue
-            return None, "Rate limit exceeded. Please try again in a few minutes."
-        except _openai.APITimeoutError:
-            breaker.record_failure()
-            if attempt < retries - 1:
-                logging.warning(f"Request timed out. Retrying... (Attempt {attempt + 1}/{retries})")
-                continue
-            return None, "The request timed out. The AI server might be busy or your connection is slow."
-        except _openai.APIConnectionError:
-            breaker.record_failure()
-            if attempt < retries - 1:
-                logging.warning(f"Connection error. Retrying... (Attempt {attempt + 1}/{retries})")
-                await _asyncio.sleep(1)
-                continue
-            return None, "Could not connect to the AI server. Please check your internet connection."
-        except _openai.APIStatusError as e:
-            if e.status_code >= 500:
-                breaker.record_failure()
-            else:
-                breaker.record_success()
-            if e.status_code == 402:
-                return None, "AI Service Error: Out of credits. Please top up your provider account."
-            if attempt < retries - 1:
-                await _asyncio.sleep(1)
-                continue
-            return None, f"AI Service Error (HTTP {e.status_code}): {str(e)}"
-        except Exception as e:
-            last_error = str(e)
-            breaker.record_failure()
-            logging.exception(f"Unexpected async LLM API Error (Attempt {attempt + 1}): {str(e)}")
-            if attempt < retries - 1:
-                await _asyncio.sleep(0.5)
-                continue
-
-    if last_error:
-        breaker.record_failure()
-    return None, f"An unexpected error occurred after {retries} attempts: {last_error}"
+    return await _asyncio.to_thread(_call)
 
 
 def build_draft_prompt(remedies, language):
