@@ -18,7 +18,7 @@ from prometheus_client import start_http_server
 import structlog
 try:
     from jaeger_client import Config
-except ModuleNotFoundError:  # pragma: no cover - optional in some environments
+except (ModuleNotFoundError, ImportError):  # pragma: no cover - optional in some environments
     Config = None
 
 try:
@@ -43,7 +43,7 @@ try:
         from opentelemetry.instrumentation.celery import CeleryInstrumentor
     except Exception:
         CeleryInstrumentor = None
-except ModuleNotFoundError:  # pragma: no cover - optional in some environments
+except (ModuleNotFoundError, ImportError):  # pragma: no cover - optional in some environments
     trace = None
     metrics = None
     otel_attach = None

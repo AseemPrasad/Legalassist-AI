@@ -74,16 +74,12 @@ async def add_correlation_id_middleware(request: Request, call_next: Callable):
             incoming_carrier["traceparent"] = f"00-{correlation_id}-0000000000000001-01"
 
     traceparent = incoming_carrier.get("traceparent", "")
-    correlation_id = traceparent.split("-")[1] if "-" in traceparent else generate_correlation_id()
-
-
-async def add_correlation_id_middleware(request: Request, call_next: Callable):
     correlation_id = (
         request.headers.get("X-Correlation-Id")
         or request.headers.get("X-Request-Id")
         or request.headers.get("x-correlation-id")
         or request.headers.get("x-request-id")
-        or generate_correlation_id()
+        or (traceparent.split("-")[1] if "-" in traceparent else generate_correlation_id())
     )
     request.state.correlation_id = correlation_id
     request.state.request_id = correlation_id
@@ -200,6 +196,7 @@ async def logging_middleware(request: Request, call_next: Callable):
 from api.middlewares.idempotency import http_idempotency_manager, idempotency_middleware, is_safe_to_cache
 from api.middlewares.rate_limit import rate_limit_middleware, settings as rate_limit_settings
 from api.middlewares.request_size import request_size_limit_middleware
+from api.middlewares.security import security_headers_middleware
 
 __all__ = [
     "add_correlation_id_middleware",
@@ -211,5 +208,6 @@ __all__ = [
     "rate_limit_middleware",
     "request_size_limit_middleware",
     "sanitize_log_text",
+    "security_headers_middleware",
     "structured_error_response",
 ]
