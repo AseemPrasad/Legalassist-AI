@@ -1627,3 +1627,125 @@ def redact_user_data(db: Session, user_id: int) -> int:
 
     db.commit()
     return redacted_count
+
+# ====================================================================
+# GDPR-compliant data deletion functions
+# ====================================================================
+
+def delete_user_cases(db: Session, user_id: int) -> dict:
+    """Delete all cases and associated data for a user.
+
+    This performs a soft deletion approach where cases are marked
+    as deleted rather than immediately removed from the database.
+
+    Args:
+        db: Database session
+        user_id: The ID of the user whose cases should be deleted
+
+    Returns:
+        Dictionary with counts of deleted items
+    """
+    from db.models import Case, CaseDocument, CaseDeadline, CaseTimeline
+
+    deleted_counts = {
+        "cases": 0,
+        "documents": 0,
+        "deadlines": 0,
+        "timeline_events": 0,
+    }
+
+    cases = db.query(Case).filter(Case.user_id == user_id).all()
+    case_ids = [c.id for c in cases]
+
+    if not case_ids:
+        return deleted_counts
+
+    # Delete documents
+    docs = db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).all()
+    deleted_counts["documents"] = len(docs)
+    db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).delete(
+        synchronize_session=False
+    )
+
+    # Delete timeline events
+    events = db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).all()
+    deleted_counts["timeline_events"] = len(events)
+    db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).delete(
+        synchronize_session=False
+    )
+
+    # Delete deadlines
+    deadlines = db.query(CaseDeadline).filter(
+        (CaseDeadline.user_id == user_id) | (CaseDeadline.case_id.in_(case_ids))
+    ).all()
+    deleted_counts["deadlines"] = len(deadlines)
+    db.query(CaseDeadline).filter(
+        (CaseDeadline.user_id == user_id) | (CaseDeadline.case_id.in_(case_ids))
+    ).delete(synchronize_session=False)
+
+    # Delete cases
+    deleted_counts["cases"] = len(cases)
+    db.query(Case).filter(Case.user_id == user_id).delete(synchronize_session=False)
+
+    db.commit()
+    return deleted_counts
+
+
+def redact_user_data(db: Session, user_id: int) -> int:
+    """Redact PII from user and related records.
+
+    This replaces all PII with redaction placeholders while keeping
+    the database records intact for audit purposes.
+
+    Args:
+        db: Database session
+        user_id: The ID of the user whose data should be redacted
+
+    Returns:
+        Number of records redacted
+    """
+    from db.models import Case, CaseDocument, CaseTimeline, User
+
+    REDACTED = "[REDACTED-GDPR]"
+    REDACTED_EMAIL = "[REDACTED-EMAIL]"
+
+    redacted_count = 0
+
+    # Redact user
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.email = REDACTED_EMAIL
+        if hasattr(user, 'full_name'):
+            user.full_name = REDACTED
+        if hasattr(user, 'phone'):
+            user.phone = REDACTED
+        if hasattr(user, 'address'):
+            user.address = REDACTED
+        db.commit()
+        redacted_count += 1
+
+    # Redact cases
+    cases = db.query(Case).filter(Case.user_id == user_id).all()
+    for case in cases:
+        case.title = f"{REDACTED}-{case.id}"
+        redacted_count += 1
+
+    # Redact documents
+    case_ids = [c.id for c in cases]
+    if case_ids:
+        docs = db.query(CaseDocument).filter(CaseDocument.case_id.in_(case_ids)).all()
+        for doc in docs:
+            doc.summary = REDACTED
+            doc.document_content = REDACTED
+            doc.extracted_metadata = {}
+            redacted_count += 1
+
+        # Redact timeline events
+        events = db.query(CaseTimeline).filter(CaseTimeline.case_id.in_(case_ids)).all()
+        for event in events:
+            event.description = REDACTED
+            event.event_metadata = {}
+            redacted_count += 1
+
+    db.commit()
+    return redacted_count
