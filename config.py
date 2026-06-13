@@ -81,6 +81,11 @@ class Config(metaclass=_ConfigMeta):
     # API Key for OpenRouter. Must be provided for the AI features to work.
     OPENROUTER_API_KEY = _get_val("OPENROUTER_API_KEY", "")
     
+    # --- Fallback/Secondary Model Settings ---
+    SECONDARY_MODEL = _get_val("SECONDARY_MODEL", "gpt-4o-mini")
+    SECONDARY_BASE_URL = _get_val("SECONDARY_BASE_URL", "https://api.openai.com/v1")
+    SECONDARY_API_KEY = _get_val("SECONDARY_API_KEY", "")
+    
     # --- AI Request Performance & Reliability ---
     # The maximum number of tokens allowed for judgment summaries.
     SUMMARY_MAX_TOKENS = _get_int_env("SUMMARY_MAX_TOKENS", 280)
