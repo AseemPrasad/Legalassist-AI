@@ -11,7 +11,8 @@ from sqlalchemy.pool import StaticPool
 
 from core.timeline_payloads import TimelineEventPayload, TimelineSubscribedPayload
 from db.base import Base
-from db.models.cases import Case, CaseStatus
+from db.models.cases import Case, CaseDeadline, CaseStatus
+from db.models.notifications import NotificationChannel, NotificationLog, NotificationStatus
 from db.session import get_db
 
 # api.main -> api.config loads settings at import-time. Ensure required env vars exist.
@@ -22,6 +23,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secure-jwt-secret-key-please-chang
 os.environ.setdefault("APP_ALLOWED_HOSTS", "localhost")
 
 from services.timeline_realtime import timeline_realtime_bus
+from services.timeline_service import timeline_service
 
 
 from api.websockets.case_timeline import register_case_timeline_endpoint
@@ -152,6 +154,63 @@ def test_case_timeline_ws_subscribed_and_forwards_event(mock_verify_token, clien
         assert validated.timestamp.isoformat() == "2023-01-01T00:00:00+00:00"
         assert validated.metadata["deadline_id"] == 999
         assert validated.event_id == 555
+    finally:
+        websocket.close()
+
+
+@patch("api.websockets.case_timeline._verify_token")
+def test_case_timeline_ws_forwards_notification_event(mock_verify_token, client, test_db):
+    mock_verify_token.return_value = {"sub": "1"}
+
+    case = _seed_case(test_db, user_id=1, case_number="2023-CV-00010")
+    deadline = CaseDeadline(
+        user_id=1,
+        case_id=case.id,
+        case_title=case.title or f"Case {case.case_number}",
+        deadline_date=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        deadline_type="appeal",
+    )
+    test_db.add(deadline)
+    test_db.commit()
+    test_db.refresh(deadline)
+
+    notification_log = NotificationLog(
+        deadline_id=deadline.id,
+        user_id=1,
+        channel=NotificationChannel.SMS,
+        recipient="+911234567890",
+        days_before=7,
+        status=NotificationStatus.SENT,
+        message_id="SM-notification-1",
+    )
+    test_db.add(notification_log)
+    test_db.commit()
+    test_db.refresh(notification_log)
+
+    websocket = client.websocket_connect(
+        f"/ws/cases/{case.id}/timeline",
+        subprotocols=["access_token", "valid_token"],
+    ).__enter__()
+    try:
+        subscribed = TimelineSubscribedPayload.model_validate(websocket.receive_json())
+        assert subscribed.case_id == case.id
+
+        timeline_service.record_notification_event(
+            db=test_db,
+            notification_log=notification_log,
+            status=NotificationStatus.DELIVERED,
+            provider="twilio",
+            metadata={"message_id": "SM-notification-1"},
+        )
+
+        msg = websocket.receive_json()
+        validated = TimelineEventPayload.model_validate(msg)
+        assert validated.event_type == "notification_delivered"
+        assert validated.case_id == case.id
+        assert validated.metadata["notification_log_id"] == notification_log.id
+        assert validated.metadata["status"] == "delivered"
+        assert validated.metadata["provider"] == "twilio"
+        assert validated.metadata["channel"] == "sms"
     finally:
         websocket.close()
 

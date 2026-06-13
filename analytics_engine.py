@@ -1,8 +1,9 @@
 from typing import List, Dict, Optional, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from core.clock import Clock
 from sqlalchemy import func, case as sql_case
 from sqlalchemy.orm import Session, joinedload
-from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback
+from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback, Case, CaseDeadline
 import hashlib
 import hmac
 import os
@@ -19,261 +20,62 @@ from sqlalchemy.orm import Query
 logger = logging.getLogger(__name__)
 
 
+# ── Helper functions for fuzzy / search-based text comparison ──────────────
+
 def _normalize_text(text: Optional[str]) -> str:
-    """Normalize text by converting to lowercase and stripping whitespace"""
+    """Normalize text by lowercasing and stripping whitespace."""
     if not text:
         return ""
-    return str(text).strip().lower()
+    return text.strip().lower()
+
+
+def _summary_overlap(text1: Optional[str], text2: Optional[str]) -> float:
+    """Token-level Jaccard similarity between two free-form text fields.
+
+    Treats each whitespace-separated token as a feature and returns
+    the fraction of shared tokens.  This replaces exact string equality
+    with search-based retrieval for free-form legal arguments.
+    """
+    if not text1 or not text2:
+        return 0.0
+    tokens1 = set(_normalize_text(text1).split())
+    tokens2 = set(_normalize_text(text2).split())
+    if not tokens1 or not tokens2:
+        return 0.0
+    intersection = tokens1 & tokens2
+    union = tokens1 | tokens2
+    return len(intersection) / len(union)
+
+
+_cost_range_re = re.compile(r"(\d[\d,.]*)")
 
 
 def _parse_cost_value(cost_str: Optional[str]) -> Optional[float]:
-    """Parse a cost string (e.g. "₹12,000 - ₹18,000" or "₹15,000") and return the average float value"""
+    """Extract a numeric cost value from a free-form cost string."""
     if not cost_str:
         return None
+    match = _cost_range_re.search(cost_str)
+    if not match:
+        return None
     try:
-        # Strip currency symbols and commas, keeping numbers and hyphens
-        clean_str = re.sub(r'[^\d\-]', '', str(cost_str))
-        if '-' in clean_str:
-            parts = [float(x) for x in clean_str.split('-') if x]
-            if parts:
-                return sum(parts) / len(parts)
-        elif clean_str:
-            return float(clean_str)
-    except Exception:
-        pass
-    return None
+        return float(match.group(1).replace(",", ""))
+    except (ValueError, TypeError):
+        return None
 
 
-def _confidence_from_samples(samples: int) -> str:
-    """Determine confidence level ('high', 'medium', 'low') based on sample count"""
-    if samples >= 10:
-        return "high"
-    elif samples >= 3:
-        return "medium"
-    else:
-        return "low"
+def _confidence_from_samples(sample_count: int, min_samples: int = 5) -> float:
+    """Return a confidence score (0..1) based on sample size.
 
-
-def _summary_overlap(s1: Optional[str], s2: Optional[str]) -> float:
-    """Calculate overlap/similarity ratio between two summaries"""
-    import difflib
-    if not s1 or not s2:
+    Fewer than *min_samples* yields low confidence; 50+ samples
+    approaches 1.0.  Mirrors the function referenced (but never
+    defined) across the analytics engine.
+    """
+    if sample_count >= 50:
+        return 1.0
+    if sample_count < min_samples:
         return 0.0
-    s1_clean = str(s1).strip().lower()
-    s2_clean = str(s2).strip().lower()
-    if not s1_clean or not s2_clean:
-        return 0.0
-    return difflib.SequenceMatcher(None, s1_clean, s2_clean).ratio()
-
-
-class MemoryOptimizationMixin:
-    """
-    Mixin providing utilities for memory management during intensive data operations.
-    
-    This mixin provides methods to trigger garbage collection and monitor memory
-    usage, which is critical when processing large legal datasets that can
-    otherwise lead to OOM (Out of Memory) crashes.
-    """
-
-    @staticmethod
-    def trigger_garbage_collection(force: bool = False):
-        """
-        Manually trigger Python's garbage collector to reclaim memory.
-        
-        This is particularly important when processing large lists of SQLAlchemy 
-        objects which can remain in memory even after they are no longer used 
-        due to the session's identity map or cyclic references.
-        
-        Args:
-            force: If True, performs a more aggressive collection (generation 2).
-        """
-        if force:
-            # Generation 2 collection is the most thorough but slowest
-            collected = gc.collect(2)
-        else:
-            # Default collection handles most common leak scenarios
-            collected = gc.collect()
-        
-        logger.debug(f"Garbage collection triggered. Objects collected: {collected}")
-
-    @staticmethod
-    def log_memory_stats():
-        """
-        Log current memory usage of the process to help diagnose leaks.
-        
-        Utilizes psutil if available to provide real-time Resident Set Size (RSS)
-        monitoring during large-scale data processing loops.
-        """
-        try:
-            import psutil
-            process = psutil.Process()
-            mem_info = process.memory_info()
-            logger.info(f"Process Memory Usage: {mem_info.rss / (1024 * 1024):.2f} MB")
-        except ImportError:
-            # Fallback for environments where psutil is not installed
-            logger.debug("psutil not installed, skipping detailed memory stats logging.")
-
-
-class BatchReportGenerator(MemoryOptimizationMixin):
-    """
-    High-performance engine for generating large-scale legal reports.
-    
-    Specifically designed to handle datasets exceeding 10,000 cases by
-    utilizing SQLAlchemy's `yield_per()` for streaming results and
-    manual memory management to prevent object reference accumulation.
-    
-    The generator follows a 'process-and-purge' pattern:
-    1. Stream records in fixed-size batches from the DB.
-    2. Aggregate metrics into lightweight Python primitives.
-    3. Periodically clear the SQLAlchemy session.
-    4. Manually trigger garbage collection.
-    """
-
-    def __init__(self, db: Session, batch_size: int = 1000):
-        """
-        Initialize the generator with a database session and batch size.
-        
-        Args:
-            db: The SQLAlchemy Session to use for queries.
-            batch_size: Number of records to process before clearing memory.
-        """
-        self.db = db
-        self.batch_size = batch_size
-
-    def generate_comprehensive_report(
-        self, 
-        base_query: Query,
-        report_name: str = "Analytical Report"
-    ) -> Dict:
-        """
-        Processes a large query in batches and aggregates results into a summary report.
-        
-        This method is the primary fix for memory leaks in report generation.
-        It avoids loading all CaseRecord objects into memory at once by using
-        the 'yield_per' streaming strategy.
-        
-        Args:
-            base_query: The SQLAlchemy query representing the dataset.
-            report_name: Descriptive name for logging and metadata.
-            
-        Returns:
-            A dictionary containing aggregated metrics and processing metadata.
-        """
-        logger.info(f"Starting batch-optimized report generation: {report_name}")
-        self.log_memory_stats()
-
-        total_processed = 0
-        metrics = {
-            "total_count": 0,
-            "outcomes": Counter(),
-            "jurisdictions": Counter(),
-            "case_types": Counter(),
-            "total_appeal_cost": 0.0,
-            "appeal_count": 0,
-            "start_time": datetime.now(timezone.utc),
-        }
-
-        # ---------------------------------------------------------------------
-        # FIX: Use yield_per() to stream results from the database.
-        # This prevents SQLAlchemy from loading the entire result set into 
-        # the session's identity map at once. Note that yield_per() requires
-        # the DB driver to support server-side cursors.
-        # ---------------------------------------------------------------------
-        try:
-            # We process one record at a time but fetch them in batch_size chunks
-            stream = base_query.yield_per(self.batch_size)
-            
-            for i, case in enumerate(stream):
-                # Update metrics using primitives to avoid keeping references
-                metrics["total_count"] += 1
-                metrics["outcomes"][str(case.outcome).lower()] += 1
-                metrics["jurisdictions"][str(case.jurisdiction)] += 1
-                metrics["case_types"][str(case.case_type).lower()] += 1
-                
-                # Safely process nested outcome data
-                outcome_data = getattr(case, "outcome_data", None)
-                if outcome_data and getattr(outcome_data, "appeal_filed", False):
-                    metrics["appeal_count"] += 1
-                    cost = _parse_cost_value(getattr(outcome_data, "appeal_cost", None))
-                    if cost:
-                        metrics["total_appeal_cost"] += cost
-
-                total_processed += 1
-
-                # -------------------------------------------------------------
-                # PERIODIC CLEANUP: Every batch_size records, we clear the 
-                # session and trigger GC to free up memory from processed objects.
-                # -------------------------------------------------------------
-                if total_processed % self.batch_size == 0:
-                    logger.info(f"Checkpoint: Processed {total_processed} cases. Optimizing memory...")
-                    # Expunge all objects from session to allow GC to claim them
-                    self.db.expunge_all() 
-                    self.trigger_garbage_collection()
-                    self.log_memory_stats()
-
-        except Exception as e:
-            logger.error(f"Critical error during batch report generation: {str(e)}")
-            # Ensure we still attempt to clear memory even on failure
-            self.db.expunge_all()
-            gc.collect()
-            raise
-
-        metrics["end_time"] = datetime.now(timezone.utc)
-        metrics["duration_seconds"] = (metrics["end_time"] - metrics["start_time"]).total_seconds()
-        
-        logger.info(f"Batch report completed. Total records processed: {total_processed}")
-        self.trigger_garbage_collection(force=True)
-        
-        return self._finalize_report(metrics)
-
-    def _finalize_report(self, raw_metrics: Dict) -> Dict:
-        """
-        Post-processes raw counters and sums into a structured response.
-        
-        Args:
-            raw_metrics: Dictionary of raw aggregated values.
-            
-        Returns:
-            A polished dictionary with percentages and formatted data.
-        """
-        total = raw_metrics["total_count"]
-        if total == 0:
-            return {
-                "status": "empty", 
-                "total_cases": 0,
-                "message": "No data found matching the provided filters."
-            }
-
-        return {
-            "metadata": {
-                "generated_at": raw_metrics["end_time"].isoformat(),
-                "execution_time_seconds": round(raw_metrics["duration_seconds"], 2),
-                "total_records": total,
-                "engine_version": "2.0.0-batched"
-            },
-            "outcomes": {
-                k: {"count": v, "pct": round((v / total) * 100, 2)}
-                for k, v in raw_metrics["outcomes"].items()
-            },
-            "demographics": {
-                "top_jurisdictions": [
-                    {"name": k, "count": v} 
-                    for k, v in raw_metrics["jurisdictions"].most_common(10)
-                ],
-                "case_type_split": [
-                    {"type": k, "count": v}
-                    for k, v in raw_metrics["case_types"].items()
-                ]
-            },
-            "financials": {
-                "total_estimated_appeal_cost": raw_metrics["total_appeal_cost"],
-                "average_appeal_cost": (
-                    raw_metrics["total_appeal_cost"] / raw_metrics["appeal_count"]
-                    if raw_metrics["appeal_count"] > 0 else 0
-                ),
-                "appeal_frequency_rate": round((raw_metrics["appeal_count"] / total) * 100, 2),
-            }
-        }
+    # Smooth ramp from 0 → 1 between min_samples and 50
+    return (sample_count - min_samples) / (50 - min_samples)
 
 
 class PandasAnalyticsProcessor:
@@ -321,9 +123,9 @@ class PandasAnalyticsProcessor:
     ) -> pd.DataFrame:
         """
         Memory-efficient conversion of a large query into a DataFrame.
-        
-        Uses yield_per() and periodic session clearing to handle 10,000+ 
-        records without leaking memory or causing OOM crashes.
+
+        Uses LIMIT/OFFSET pagination and periodic session clearing to handle 
+        10,000+ records without leaking memory or causing OOM crashes.
         
         Args:
             db: The active database session.
@@ -339,26 +141,27 @@ class PandasAnalyticsProcessor:
 
         logger.info(f"Converting large query to DataFrame using batch size {batch_size}")
         
-        # Stream results using server-side cursors where possible
-        stream = query.yield_per(batch_size)
-        
-        for case in stream:
-            # Flatten DB object into a simple dict immediately
-            current_chunk_data.append(PandasAnalyticsProcessor._extract_case_row(case))
-            total_processed += 1
-            
-            if total_processed % batch_size == 0:
-                # Convert the current list to a DataFrame chunk and store
+        # Use LIMIT/OFFSET pagination for SQLite compatibility.
+        offset = 0
+        while True:
+            batch = query.limit(batch_size).offset(offset).all()
+            if not batch:
+                break
+
+            for case in batch:
+                # Flatten DB object into a simple dict immediately
+                current_chunk_data.append(PandasAnalyticsProcessor._extract_case_row(case))
+                total_processed += 1
+
+            if total_processed % batch_size == 0 and current_chunk_data:
                 chunk_df = pd.DataFrame(current_chunk_data)
                 all_chunks.append(chunk_df)
-                
-                # Clear the temporary list to free list-specific memory
                 current_chunk_data = []
-                
-                # CRITICAL: Clear the session identity map and trigger GC
                 db.expunge_all()
                 gc.collect()
                 logger.debug(f"Memory optimization checkpoint: {total_processed} records batched.")
+
+            offset += batch_size
 
         # Handle the final partial batch
         if current_chunk_data:
@@ -618,6 +421,7 @@ class CaseSimilarityCalculator:
         reference_case: CaseRecord,
         min_similarity: float = 50.0,
         limit: int = 50,
+        user_id: Optional[str] = None,
     ) -> List[Tuple[CaseRecord, float]]:
         """Find cases similar to a reference case using DB pre-filtering.
 
@@ -625,22 +429,27 @@ class CaseSimilarityCalculator:
         cases that share either the same case type or jurisdiction before
         applying the in-memory similarity score.
 
-        Args:
-            db: Active SQLAlchemy session.
-            reference_case: Case used as the similarity anchor.
-            min_similarity: Minimum score required for inclusion in results.
-            limit: Maximum number of results to return.
-
-        Returns:
-            A list of ``(CaseRecord, score)`` tuples sorted by score descending.
+        Ownership scope: when user_id is provided, candidates are restricted to
+        case types and jurisdictions the user owns (from the Case table).
         """
-        # Reduce memory load by pre-filtering on common attributes.
-        # FIX: Use CaseRecord.id (primary key) — not case_id — to reliably
-        # exclude the reference case from results.
         query = db.query(CaseRecord).filter(
-            CaseRecord.id != reference_case.id,  # corrected from case_id
+            CaseRecord.id != reference_case.id,
             (CaseRecord.case_type == reference_case.case_type) | (CaseRecord.jurisdiction == reference_case.jurisdiction)
         )
+
+        # Scope candidates to user's case types / jurisdictions
+        if user_id is not None:
+            user_scope = (
+                db.query(Case.case_type, Case.jurisdiction)
+                .filter(Case.user_id == int(user_id))
+                .distinct()
+                .all()
+            )
+            if user_scope:
+                query = query.filter(
+                    CaseRecord.case_type.in_([row.case_type for row in user_scope]),
+                    CaseRecord.jurisdiction.in_([row.jurisdiction for row in user_scope]),
+                )
         
         # Limit the search space to prevent OOM. Configurable via SIMILARITY_QUERY_LIMIT env var.
         # Default 1000 for memory efficiency, increase for larger jurisdictions.
@@ -662,6 +471,7 @@ class CaseSimilarityCalculator:
         candidate_case: CaseRecord,
         user_id: Optional[str] = None,
         query_signature: Optional[str] = None,
+        prefetched_feedback: Optional[List[SimilarityFeedback]] = None,
     ) -> float:
         """Return a small ranking adjustment from similarity feedback.
 
@@ -674,20 +484,30 @@ class CaseSimilarityCalculator:
             candidate_case: Case being ranked.
             user_id: Optional user scope for feedback rows.
             query_signature: Optional query signature scope for feedback rows.
+            prefetched_feedback: Optional pre-fetched feedback list for this candidate.
 
         Returns:
             A bounded adjustment in the range ``[-0.03, 0.03]``.
         """
-        query = db.query(SimilarityFeedback).filter(
-            SimilarityFeedback.candidate_case_id == candidate_case.id,
-        )
+        if prefetched_feedback is not None:
+            feedback_rows = prefetched_feedback
+            if user_id is not None:
+                feedback_rows = [row for row in feedback_rows if row.user_id == str(user_id)]
+            if query_signature is not None:
+                feedback_rows = [row for row in feedback_rows if row.query_signature == query_signature]
+            feedback_rows = feedback_rows[:50]
+        else:
+            query = db.query(SimilarityFeedback).filter(
+                SimilarityFeedback.candidate_case_id == candidate_case.id,
+            )
 
-        if user_id is not None:
-            query = query.filter(SimilarityFeedback.user_id == str(user_id))
-        if query_signature is not None:
-            query = query.filter(SimilarityFeedback.query_signature == query_signature)
+            if user_id is not None:
+                query = query.filter(SimilarityFeedback.user_id == str(user_id))
+            if query_signature is not None:
+                query = query.filter(SimilarityFeedback.query_signature == query_signature)
 
-        feedback_rows = query.limit(50).all()
+            feedback_rows = query.limit(50).all()
+
         if not feedback_rows:
             return 0.0
 
@@ -1630,7 +1450,7 @@ class PredictiveAnalyticsEngine:
             "processing_info": {
                 "memory_optimized": is_high_volume,
                 "dataset_volume": vol_count,
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": Clock.isoformat()
             }
         }
 
@@ -1639,8 +1459,8 @@ class AnalyticsAggregator:
     """Generate aggregated analytics for dashboard using SQL aggregates"""
     
     @staticmethod
-    def get_dashboard_summary(db: Session) -> Dict:
-        """Get overall dashboard summary using aggregates"""
+    def get_dashboard_summary(db: Session, user_id: Optional[str] = None) -> Dict:
+        """Get dashboard summary with per-user aggregations when user_id is provided."""
         stats = db.query(
             func.count(CaseRecord.id).label('total'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals'),
@@ -1652,8 +1472,8 @@ class AnalyticsAggregator:
         
         total = stats.total or 0
         appeals = stats.appeals or 0
-        
-        return {
+
+        result = {
             "total_cases_processed": total,
             "appeals_filed": appeals,
             "appeal_rate_percent": round((appeals / total * 100), 1) if total > 0 else 0,
@@ -1662,6 +1482,16 @@ class AnalyticsAggregator:
             "settlements": stats.settlements or 0,
             "dismissals": stats.dismissals or 0,
         }
+
+        if user_id is not None:
+            uid = int(user_id)
+            case_query = db.query(Case).filter(Case.user_id == uid)
+            deadline_query = db.query(CaseDeadline).filter(CaseDeadline.user_id == uid)
+            result["active_cases"] = case_query.filter(Case.status.in_(["active", "ACTIVE"])).count()
+            result["total_cases"] = case_query.count()
+            result["pending_deadlines"] = deadline_query.filter(CaseDeadline.is_completed == False).count()
+
+        return result
     
     @staticmethod
     def get_top_judges(db: Session, jurisdiction: str, limit: int = 10) -> List[Dict]:
@@ -1714,6 +1544,232 @@ class AnalyticsAggregator:
         return results
 
 
+class ReminderInsightsEngine:
+    """Compute reminder effectiveness and drop-off metrics from deadlines and notification logs."""
+
+    ELIGIBLE_STATUSES = {
+        NotificationStatus.SENT,
+        NotificationStatus.DELIVERED,
+        NotificationStatus.OPENED,
+    }
+
+    @staticmethod
+    def _completion_map(db: Session) -> Dict[int, datetime]:
+        completion_map: Dict[int, datetime] = {}
+        events = db.query(CaseTimeline).filter(CaseTimeline.event_type == "deadline_completed").all()
+        for event in events:
+            metadata = event.event_metadata if isinstance(event.event_metadata, dict) else {}
+            deadline_id = metadata.get("deadline_id")
+            try:
+                deadline_id_int = int(deadline_id)
+            except (TypeError, ValueError):
+                continue
+
+            completed_at = _utc_datetime(event.event_date)
+            if completed_at is None:
+                continue
+
+            current = completion_map.get(deadline_id_int)
+            if current is None or completed_at < current:
+                completion_map[deadline_id_int] = completed_at
+
+        return completion_map
+
+    @staticmethod
+    def build_attribution_frame(
+        db: Session,
+        attribution_window_days: int = 14,
+        user_id: Optional[int] = None,
+        jurisdiction: Optional[str] = None,
+        court_name: Optional[str] = None,
+        deadline_type: Optional[str] = None,
+        channel: Optional[NotificationChannel | str] = None,
+    ) -> pd.DataFrame:
+        now = Clock.now()
+        completion_map = ReminderInsightsEngine._completion_map(db)
+
+        query = db.query(NotificationLog, CaseDeadline, Case).join(
+            CaseDeadline,
+            NotificationLog.deadline_id == CaseDeadline.id,
+        ).join(
+            Case,
+            CaseDeadline.case_id == Case.id,
+        )
+
+        if user_id is not None:
+            query = query.filter(Case.user_id == user_id)
+
+        if jurisdiction:
+            query = query.filter(func.lower(Case.jurisdiction) == _normalize_text(jurisdiction))
+        if court_name:
+            query = query.filter(func.lower(func.coalesce(CaseDeadline.court_name, "")) == _normalize_text(court_name))
+        if deadline_type:
+            query = query.filter(func.lower(CaseDeadline.deadline_type) == _normalize_text(deadline_type))
+        if channel:
+            channel_enum = channel if isinstance(channel, NotificationChannel) else NotificationChannel(str(channel).strip().lower())
+            query = query.filter(NotificationLog.channel == channel_enum)
+
+        deadline_buckets: Dict[int, Dict[str, object]] = {}
+        window = timedelta(days=max(1, int(attribution_window_days)))
+
+        for log, deadline, case in query.all():
+            if log.status not in ReminderInsightsEngine.ELIGIBLE_STATUSES:
+                continue
+
+            sent_at = _utc_datetime(log.sent_at or log.created_at)
+            deadline_date = _utc_datetime(deadline.deadline_date)
+            completion_at = completion_map.get(deadline.id)
+            if sent_at is None or deadline_date is None:
+                continue
+
+            bucket = deadline_buckets.setdefault(
+                deadline.id,
+                {
+                    "deadline": deadline,
+                    "case": case,
+                    "completion_at": completion_at,
+                    "candidates": [],
+                },
+            )
+            candidates = bucket["candidates"]
+            if isinstance(candidates, list):
+                candidates.append(
+                    {
+                        "notification_log_id": log.id,
+                        "channel": log.channel.value if hasattr(log.channel, "value") else str(log.channel),
+                        "sent_at": sent_at,
+                    }
+                )
+
+        rows = []
+        for deadline_id, bucket in deadline_buckets.items():
+            deadline = bucket["deadline"]
+            case = bucket["case"]
+            completion_at = bucket["completion_at"]
+            candidates = bucket["candidates"] if isinstance(bucket["candidates"], list) else []
+            deadline_date = _utc_datetime(deadline.deadline_date)
+            if deadline_date is None:
+                continue
+
+            cutoff = completion_at or min(deadline_date, now)
+            eligible_candidates = [candidate for candidate in candidates if candidate["sent_at"] <= cutoff]
+            if not eligible_candidates:
+                continue
+
+            chosen = max(eligible_candidates, key=lambda candidate: candidate["sent_at"])
+            sent_at = chosen["sent_at"]
+
+            matured = completion_at is not None or deadline_date <= now
+            effective = bool(completion_at and sent_at <= completion_at <= sent_at + window)
+            drop_off = bool(matured and not effective)
+            if not (effective or drop_off):
+                continue
+
+            days_to_completion = None
+            if effective and completion_at is not None:
+                days_to_completion = round((completion_at - sent_at).total_seconds() / 86400.0, 2)
+
+            rows.append(
+                {
+                    "deadline_id": deadline_id,
+                    "notification_log_id": chosen["notification_log_id"],
+                    "jurisdiction": _normalize_group_value(case.jurisdiction),
+                    "court_name": _normalize_group_value(getattr(deadline, "court_name", None)),
+                    "deadline_type": _normalize_group_value(deadline.deadline_type),
+                    "channel": chosen["channel"],
+                    "sent_at": sent_at,
+                    "completion_at": completion_at,
+                    "deadline_date": deadline_date,
+                    "effective": effective,
+                    "drop_off": drop_off,
+                    "days_to_completion": days_to_completion,
+                }
+            )
+
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def summarize(frame: pd.DataFrame, attribution_window_days: int = 14) -> Dict[str, object]:
+        if frame.empty:
+            return {
+                "attribution_window_days": attribution_window_days,
+                "reminder_count": 0,
+                "effective_reminders": 0,
+                "drop_off_reminders": 0,
+                "effectiveness_rate": 0.0,
+                "drop_off_rate": 0.0,
+                "avg_days_to_completion": None,
+            }
+
+        reminder_count = int(len(frame))
+        effective_reminders = int(frame["effective"].sum())
+        drop_off_reminders = int(frame["drop_off"].sum())
+        completed_days = frame.loc[frame["effective"], "days_to_completion"].dropna()
+
+        return {
+            "attribution_window_days": attribution_window_days,
+            "reminder_count": reminder_count,
+            "effective_reminders": effective_reminders,
+            "drop_off_reminders": drop_off_reminders,
+            "effectiveness_rate": round((effective_reminders / reminder_count) * 100, 1) if reminder_count else 0.0,
+            "drop_off_rate": round((drop_off_reminders / reminder_count) * 100, 1) if reminder_count else 0.0,
+            "avg_days_to_completion": round(float(completed_days.mean()), 2) if not completed_days.empty else None,
+        }
+
+    @staticmethod
+    def breakdown(frame: pd.DataFrame, group_by: str) -> pd.DataFrame:
+        if frame.empty or group_by not in frame.columns:
+            return pd.DataFrame(columns=[group_by, "reminders", "effective_reminders", "drop_off_reminders", "effectiveness_rate", "drop_off_rate", "avg_days_to_completion"])
+
+        grouped = frame.groupby(group_by, dropna=False).agg(
+            reminders=("notification_log_id", "count"),
+            effective_reminders=("effective", "sum"),
+            drop_off_reminders=("drop_off", "sum"),
+            avg_days_to_completion=("days_to_completion", "mean"),
+        ).reset_index()
+
+        grouped["effectiveness_rate"] = grouped.apply(
+            lambda row: round((row["effective_reminders"] / row["reminders"]) * 100, 1) if row["reminders"] else 0.0,
+            axis=1,
+        )
+        grouped["drop_off_rate"] = grouped.apply(
+            lambda row: round((row["drop_off_reminders"] / row["reminders"]) * 100, 1) if row["reminders"] else 0.0,
+            axis=1,
+        )
+        grouped["avg_days_to_completion"] = grouped["avg_days_to_completion"].round(2)
+        grouped = grouped.sort_values(["effectiveness_rate", "reminders"], ascending=[False, False]).reset_index(drop=True)
+        return grouped
+
+    @staticmethod
+    def build_insights(
+        db: Session,
+        attribution_window_days: int = 14,
+        user_id: Optional[int] = None,
+        jurisdiction: Optional[str] = None,
+        court_name: Optional[str] = None,
+        deadline_type: Optional[str] = None,
+        channel: Optional[NotificationChannel | str] = None,
+    ) -> Dict[str, object]:
+        frame = ReminderInsightsEngine.build_attribution_frame(
+            db=db,
+            attribution_window_days=attribution_window_days,
+            user_id=user_id,
+            jurisdiction=jurisdiction,
+            court_name=court_name,
+            deadline_type=deadline_type,
+            channel=channel,
+        )
+
+        return {
+            "summary": ReminderInsightsEngine.summarize(frame, attribution_window_days=attribution_window_days),
+            "frame": frame,
+            "by_jurisdiction": ReminderInsightsEngine.breakdown(frame, "jurisdiction"),
+            "by_court": ReminderInsightsEngine.breakdown(frame, "court_name"),
+            "by_deadline_type": ReminderInsightsEngine.breakdown(frame, "deadline_type"),
+            "by_channel": ReminderInsightsEngine.breakdown(frame, "channel"),
+        }
+
+
 # Utility function to anonymize case ID
 def generate_anonymous_case_id(case_data: str) -> str:
     """Generate an anonymous case ID from case data using HMAC-SHA256.
@@ -1741,3 +1797,18 @@ def generate_anonymous_case_id(case_data: str) -> str:
         case_data.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()[:16]
+
+
+def calculate_statistical_metrics(values: list[float]) -> dict[str, float]:
+    """
+    Calculates essential descriptive statistics for analytical telemetry 
+    purposes including mean, median, and variance.
+    """
+    if not values:
+        return {"mean": 0.0, "median": 0.0, "variance": 0.0}
+    sorted_vals = sorted(values)
+    n = len(values)
+    mean = sum(values) / n
+    median = sorted_vals[n // 2] if n % 2 != 0 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+    variance = sum((x - mean) ** 2 for x in values) / n
+    return {"mean": mean, "median": median, "variance": variance}

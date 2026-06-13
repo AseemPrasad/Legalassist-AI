@@ -1,4 +1,6 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:system",
-    "git.ignoreLimitWarning": true
+    "git.ignoreLimitWarning": true,
+    "python.analysis.diagnosticMode": "off",
+    "python.analysis.typeCheckingMode": "off"
 }

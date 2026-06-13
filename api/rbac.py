@@ -87,8 +87,6 @@ def has_all_permissions(role: str, permissions: list[str]) -> bool:
 
 
 def get_user_role(user) -> str:
-    if hasattr(user, "role"):
-        return user.role
     if hasattr(user, "is_admin") and user.is_admin:
         return "admin"
     if hasattr(user, "role"):

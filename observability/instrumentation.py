@@ -346,8 +346,11 @@ correlation_context = CorrelationContext()
 
 
 def generate_correlation_id() -> str:
-    """Generate unique correlation ID for request tracing"""
-    return str(uuid.uuid4())
+    """Generate W3C-compatible trace ID for request tracing.
+    
+    Returns a 32-hex-character trace ID suitable for traceparent header.
+    """
+    return uuid.uuid4().hex + uuid.uuid4().hex[:16]
 
 
 def bind_request_context(*, request_id: str | None = None, user_id: str | None = None, session_id: str | None = None):

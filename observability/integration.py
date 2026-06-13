@@ -121,6 +121,61 @@ def create_flask_middleware(app):
     return app
 
 
+# ==================== FastAPI Middleware ====================
+
+def create_fastapi_middleware(app):
+    """FastAPI middleware for observability request correlation"""
+    from fastapi import Request
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from observability.instrumentation import (
+        correlation_context,
+        generate_correlation_id,
+        use_extracted_trace_context,
+        get_current_trace_headers,
+    )
+
+    class FastAPICorrelationMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            correlation_id = (
+                request.headers.get("X-Correlation-ID")
+                or request.headers.get("X-Request-ID")
+                or request.headers.get("x-correlation-id")
+                or request.headers.get("x-request-id")
+                or generate_correlation_id()
+            )
+            # Bind in context thread-local
+            correlation_context.correlation_id = correlation_id
+            
+            # Set request state attributes expected by background workers
+            request.state.correlation_id = correlation_id
+            request.state.request_id = correlation_id
+            
+            user_id = request.headers.get("X-User-ID")
+            if user_id:
+                correlation_context.user_id = user_id
+                request.state.user_id = user_id
+
+            incoming_trace_headers = {
+                key.lower(): value
+                for key, value in request.headers.items()
+                if key.lower() in {"traceparent", "tracestate", "baggage"}
+            }
+            request.state.trace_headers = incoming_trace_headers
+
+            with use_extracted_trace_context(incoming_trace_headers):
+                response = await call_next(request)
+
+            trace_headers = get_current_trace_headers()
+            for header_name, header_value in trace_headers.items():
+                response.headers[header_name] = header_value
+            response.headers["X-Correlation-ID"] = correlation_id
+            response.headers["X-Request-ID"] = correlation_id
+            return response
+
+    app.add_middleware(FastAPICorrelationMiddleware)
+    return app
+
+
 # ==================== Initialization Helper ====================
 
 def initialize_observability_for_environment():

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Case Timeline Visualization</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; color: #1e293b; padding: 2rem; }
+        .timeline { position: relative; max-width: 800px; margin: 0 auto; }
+        .timeline::after { content: ''; position: absolute; width: 4px; background-color: #cbd5e1; top: 0; bottom: 0; left: 50%; margin-left: -2px; }
+        .event { padding: 10px 40px; position: relative; background-color: inherit; width: 50%; box-sizing: border-box; }
+        .event::after { content: ''; position: absolute; width: 20px; height: 20px; right: -10px; background-color: white; border: 4px solid #3b82f6; top: 15px; border-radius: 50%; z-index: 1; }
+        .left { left: 0; }
+        .right { left: 50%; }
+        .right::after { left: -10px; }
+        .content { padding: 20px 30px; background-color: white; position: relative; border-radius: 6px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        h2 { margin-top: 0; color: #3b82f6; font-size: 1.2rem; }
+        p { margin: 0; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <h1 style="text-align: center; color: #0f172a; margin-bottom: 2rem;">Extracted Case Timeline</h1>
+    
+    <div class="timeline" id="timeline-container">
+        <!-- Events will be populated here by JS or Backend -->
+        <div class="event left">
+            <div class="content">
+                <h2>January 15, 2020</h2>
+                <p>The contract was originally signed on January 15, 2020.</p>
+            </div>
+        </div>
+        <div class="event right">
+            <div class="content">
+                <h2>2021-03-12</h2>
+                <p>However, the defendant breached the agreement on 2021-03-12 by failing to deliver the goods.</p>
+            </div>
+        </div>
+        <div class="event left">
+            <div class="content">
+                <h2>April 5, 2021</h2>
+                <p>A formal notice was sent on April 5, 2021.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

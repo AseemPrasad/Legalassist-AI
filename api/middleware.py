@@ -1,24 +1,15 @@
-"""API middleware for request context, error handling, and logging.
-
-The composable security middlewares now live in api.middlewares.* and are
-re-exported here for backward compatibility.
-"""
-
-from __future__ import annotations
-
+"""API middleware for request context, error handling, and logging."""
+import hashlib
 import time
-from typing import Callable
+import threading
+from typing import Callable, Optional
 
-import structlog
-from fastapi import HTTPException, Request, status
+from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
+import redis
+import structlog
 
 from api.config import get_settings
-from api.errors import StructuredAPIError, structured_error_response
-from api.middlewares.idempotency import http_idempotency_manager, idempotency_middleware, is_safe_to_cache
-from api.middlewares.rate_limit import rate_limit_middleware
-from api.middlewares.request_size import request_size_limit_middleware
-from api.limiter import limiter
 from observability.instrumentation import (
     bind_request_context,
     capture_exception,
@@ -31,25 +22,62 @@ from observability.instrumentation import (
     use_extracted_trace_context,
 )
 
-try:
-    from db.session import apply_rls_context, clear_rls_context, _is_postgres
-except Exception:
-    apply_rls_context = None
-    clear_rls_context = None
-    _is_postgres = False
-
-try:
-    from api.csrf import validate_csrf as _csrf_validate
-except Exception:
-    _csrf_validate = None
-
-settings = get_settings()
 logger = structlog.get_logger(__name__)
+settings = get_settings()
+
+
+def sanitize_log_text(text: str) -> str:
+    """Strip control characters from log text."""
+    return text.replace("\x00", "").replace("\n", " ").replace("\r", " ")[:1000]
+
+
+def structured_error_response(status_code: int, error_code: str, message: str, request: Request):
+    """Build standardized error JSONResponse."""
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "error_code": error_code,
+            "message": message,
+            "path": request.url.path,
+        },
+    )
 
 
 async def add_correlation_id_middleware(request: Request, call_next: Callable):
-    """Attach correlation and request IDs to the request context."""
+    """Inject W3C Trace Context traceparent on every request and propagate through response."""
+    try:
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+        from opentelemetry import trace as otel_trace
+        propagator = TraceContextTextMapPropagator()
+        tracer = otel_trace.get_tracer(__name__)
+    except Exception:
+        propagator = None
+        tracer = None
 
+    # Extract incoming trace context from headers
+    incoming_carrier = {
+        key.lower(): value
+        for key, value in request.headers.items()
+        if key.lower() in {"traceparent", "tracestate", "baggage"}
+    }
+
+    # If no traceparent exists, start a new trace
+    if "traceparent" not in incoming_carrier:
+        if tracer:
+            with tracer.start_as_current_span("http_request") as span:
+                trace_id = format(span.get_span_context().trace_id, "032x")
+                span_id = format(span.get_span_context().span_id, "016x")
+                incoming_carrier["traceparent"] = f"00-{trace_id}-{span_id}-01"
+        else:
+            correlation_id = generate_correlation_id()
+            incoming_carrier["traceparent"] = f"00-{correlation_id}-0000000000000001-01"
+
+    traceparent = incoming_carrier.get("traceparent", "")
+    correlation_id = traceparent.split("-")[1] if "-" in traceparent else generate_correlation_id()
+
+
+async def add_correlation_id_middleware(request: Request, call_next: Callable):
     correlation_id = (
         request.headers.get("X-Correlation-Id")
         or request.headers.get("X-Request-Id")
@@ -59,21 +87,16 @@ async def add_correlation_id_middleware(request: Request, call_next: Callable):
     )
     request.state.correlation_id = correlation_id
     request.state.request_id = correlation_id
-    request.state.user_id = getattr(request.state, "rate_limit_identifier", request.headers.get("X-User-Id", "anonymous"))
+    request.state.traceparent = traceparent
+    request.state.trace_headers = incoming_carrier
 
-    incoming_trace_headers = {
-        key.lower(): value
-        for key, value in request.headers.items()
-        if key.lower() in {"traceparent", "tracestate", "baggage"}
-    }
-    request.state.trace_headers = incoming_trace_headers
+    bind_request_context(request_id=correlation_id, user_id=getattr(request.state, "user_id", None))
 
-    with use_extracted_trace_context(incoming_trace_headers):
+    with use_extracted_trace_context(incoming_carrier):
         response = await call_next(request)
 
-    trace_headers = get_current_trace_headers()
-    for header_name, header_value in trace_headers.items():
-        response.headers[header_name] = header_value
+    # Propagate trace context in response headers
+    response.headers["traceparent"] = traceparent
     response.headers["X-Correlation-Id"] = correlation_id
     response.headers["X-Request-Id"] = correlation_id
     response.headers["X-Frame-Options"] = "DENY"
@@ -84,7 +107,6 @@ async def add_correlation_id_middleware(request: Request, call_next: Callable):
 
 async def error_handling_middleware(request: Request, call_next: Callable):
     """Convert uncaught exceptions into a structured JSON 500 response."""
-
     try:
         return await call_next(request)
     except HTTPException:
@@ -94,7 +116,7 @@ async def error_handling_middleware(request: Request, call_next: Callable):
             "unhandled_error",
             path=request.url.path,
             method=request.method,
-            error=str(exc),
+            error=sanitize_log_text(str(exc)),
         )
         record_api_error(request.url.path, exc)
         capture_exception(exc, path=request.url.path, method=request.method)
@@ -107,8 +129,7 @@ async def error_handling_middleware(request: Request, call_next: Callable):
 
 
 async def logging_middleware(request: Request, call_next: Callable):
-    """Log request metadata and emit tracing/metrics events."""
-
+    """Log all requests and responses with trace context."""
     start_time = time.time()
     endpoint = request.url.path
     request_id = getattr(
@@ -121,25 +142,6 @@ async def logging_middleware(request: Request, call_next: Callable):
     user_id_attr = getattr(request.state, "user_id", request.headers.get("X-User-Id", "anonymous"))
 
     bind_request_context(request_id=request_id, user_id=user_id_attr)
-
-    if apply_rls_context and _is_postgres and user_id_attr not in (None, "anonymous", ""):
-        # Normalize common identifier shapes ("user:123", numeric strings, ints)
-        rls_id = None
-        try:
-            if isinstance(user_id_attr, int):
-                rls_id = int(user_id_attr)
-            elif isinstance(user_id_attr, str):
-                if user_id_attr.isdigit():
-                    rls_id = int(user_id_attr)
-                elif user_id_attr.startswith("user:"):
-                    parts = user_id_attr.split(":", 1)
-                    if len(parts) == 2 and parts[1].isdigit():
-                        rls_id = int(parts[1])
-        except Exception:
-            rls_id = None
-
-        if rls_id is not None:
-            request.state.db_rls_user_id = rls_id
 
     response = None
     error_occurred = False
@@ -168,7 +170,7 @@ async def logging_middleware(request: Request, call_next: Callable):
                     duration_ms=round(duration * 1000, 2),
                     request_id=request_id,
                     user_id=user_id_attr,
-                    error=str(exc),
+                    error=sanitize_log_text(str(exc)),
                 )
                 raise
 
@@ -192,7 +194,12 @@ async def logging_middleware(request: Request, call_next: Callable):
         clear_request_context()
 
     return response
- 
+
+
+# Re-export middlewares from api.middlewares.* for backward compatibility
+from api.middlewares.idempotency import http_idempotency_manager, idempotency_middleware, is_safe_to_cache
+from api.middlewares.rate_limit import rate_limit_middleware, settings as rate_limit_settings
+from api.middlewares.request_size import request_size_limit_middleware
 
 __all__ = [
     "add_correlation_id_middleware",
@@ -200,92 +207,9 @@ __all__ = [
     "http_idempotency_manager",
     "idempotency_middleware",
     "is_safe_to_cache",
-    "limiter",
     "logging_middleware",
     "rate_limit_middleware",
     "request_size_limit_middleware",
-    "settings",
+    "sanitize_log_text",
+    "structured_error_response",
 ]
-
-
-def _request_size_limit_for_path(path: str) -> int:
-    if any(path.startswith(prefix) for prefix in UPLOAD_PATH_PREFIXES):
-        return ValidationConfig.MAX_UPLOAD_SIZE
-    if any(path.startswith(prefix) for prefix in ANALYTICS_PATH_PREFIXES):
-        return ValidationConfig.MAX_ANALYTICS_PAYLOAD
-    return ValidationConfig.MAX_JSON_BODY
-
-
-async def request_size_limit_middleware(request: Request, call_next: Callable):
-    """Reject oversized requests before they reach the application layer."""
-
-    if request.url.path in SKIP_PATHS:
-        return await call_next(request)
-    transfer_encoding = request.headers.get("transfer-encoding", "").lower()
-
-    # For upload endpoints, require Content-Length header (no chunked fallback).
-    content_length = request.headers.get("content-length")
-    max_size = _request_size_limit_for_path(request.url.path)
-
-    if any(request.url.path.startswith(p) for p in UPLOAD_PATH_PREFIXES):
-        # Must provide explicit content-length for uploads
-        if content_length is None:
-            return JSONResponse(
-                status_code=status.HTTP_411_LENGTH_REQUIRED,
-                content={
-                    "error_code": "LENGTH_REQUIRED",
-                    "message": "Content-Length header is required for upload endpoints.",
-                },
-            )
-
-    # Reject explicit chunked transfer encoding as ambiguous
-    if "chunked" in transfer_encoding:
-        return JSONResponse(
-            status_code=status.HTTP_411_LENGTH_REQUIRED,
-            content={
-                "error_code": "CHUNKED_ENCODING_NOT_SUPPORTED",
-                "message": "Chunked transfer encoding is not supported. Provide Content-Length header.",
-            },
-        )
-
-    content_length = request.headers.get("content-length")
-    if content_length is None:
-        return JSONResponse(
-            status_code=status.HTTP_411_LENGTH_REQUIRED,
-            content={
-                "error_code": "LENGTH_REQUIRED",
-                "message": "Content-Length header is required for all requests.",
-            },
-        )
-
-    try:
-        content_length_bytes = int(content_length)
-    except (TypeError, ValueError):
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "error_code": "INVALID_CONTENT_LENGTH",
-                "message": "Content-Length must be a valid integer.",
-            },
-        )
-
-    max_size = _request_size_limit_for_path(request.url.path)
-    if content_length_bytes > max_size:
-        logger.warning(
-            "request_size_limit_exceeded",
-            path=request.url.path,
-            content_length=content_length_bytes,
-            max_size=max_size,
-            size_mb=round(content_length_bytes / 1024 / 1024, 2),
-        )
-        return JSONResponse(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            content={
-                "error_code": "PAYLOAD_TOO_LARGE",
-                "message": (
-                    f"Request body too large: {round(content_length_bytes / 1024 / 1024, 2)} MB "
-                    f"(max {round(max_size / 1024 / 1024, 2)} MB)"
-                ),
-            },
-        )
-

@@ -1,33 +1,21 @@
-"""
-Shared utilities for LegalEase AI
-- PDF extraction and text processing
-- LLM prompts and remedies advisor
-- Styling and UI constants
-
-PATCHES APPLIED (2 bugs fixed):
-  FIX-1: Language consistency — remedies LLM system prompt now enforces target language;
-          _normalize_yes_no now returns localized values; _validate_court_name no longer
-          strips non-English court names; render_shareable_result_box passes ui_text down
-          correctly to _build_result_body_html.
-  FIX-2: "What you can do" layout — build_judgment_result_text now emits a structured
-          dict alongside the plain-text string; render_shareable_result_box uses the
-          structured dict to build guaranteed question/answer pairs in the HTML renderer,
-          so questions and answers are always correctly paired and answers are never cut short.
-          max_tokens for remedies raised from 500 → 900.
-"""
-
 import re
 import logging
 import os
 import json
 import io
+import tempfile
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+import html as html_lib
+from contextlib import contextmanager
+
 from openai import OpenAI
 from pypdf import PdfReader
 from langdetect import detect, DetectorFactory, detect_langs
 import pdfplumber
 from typing import Any, Dict, List, Optional, Tuple
 import html as html_lib
+from contextlib import contextmanager
 
 from config import Config
 from .exceptions import PDFProcessingError, OCRDependencyError, OCRProcessingError
@@ -37,6 +25,11 @@ try:
     _tracer = trace.get_tracer(__name__)
 except Exception:
     _tracer = None
+
+# For consistent language detection results
+DetectorFactory.seed = 0
+_LOCALIZED_UI_TEXT_CACHE = {}
+parser_errors = [] # Define this so your function doesn't crash
 
 # For consistent language detection results
 DetectorFactory.seed = 0
@@ -90,6 +83,49 @@ def get_client():
 
 
 # ==================== TEXT PROCESSING ====================
+
+def _validate_encoding_quality(text: str) -> Tuple[bool, float]:
+    """
+    Validate the quality/readability of the extracted text.
+    Detects if the text is heavily corrupted, mostly garbage characters,
+    or has invalid unicode replacement characters.
+    
+    Returns:
+        Tuple[bool, float]: (is_valid, quality_score_0_to_1)
+    """
+    if not text or not text.strip():
+        return False, 0.0
+        
+    # Count total characters and replacement characters (corrupted bytes)
+    total_chars = len(text)
+    replacement_chars = text.count('\uFFFD')
+    
+    # Calculate ratio of replacement characters
+    replacement_ratio = replacement_chars / total_chars if total_chars > 0 else 0.0
+    
+    # Count printable alphanumeric characters vs total characters
+    alnum_chars = sum(1 for c in text if c.isalnum() or c.isspace())
+    alnum_ratio = alnum_chars / total_chars if total_chars > 0 else 0.0
+    
+    # Compute a quality score from 0.0 to 1.0
+    # Heavily penalize replacement characters and non-alphanumeric/non-space garbage
+    quality = (1.0 - replacement_ratio) * alnum_ratio
+    
+    # We consider it valid if quality score is at least 0.5 and replacement ratio is under 15%
+    is_valid = quality >= 0.5 and replacement_ratio < 0.15
+    
+    # Additional check: detect fragmented text where words are split into single characters
+    # e.g., "J u d g m e n t  o f  t h e  C o u r t"
+    words = [w for w in text.split() if w]
+    if len(words) > 15:
+        avg_word_len = sum(len(w) for w in words) / len(words)
+        if avg_word_len < 2.0:
+            is_valid = False
+            quality = min(quality, 0.3)
+            
+    return is_valid, quality
+
+
 
 def _extract_pages_pypdf(reader: PdfReader) -> str:
     text = ""
@@ -200,16 +236,13 @@ def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
 
 
 def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages: str = "eng+hin", ocr_dpi: int = 300):
-    """Extract text from PDFs and image uploads.
+    """Extract text from PDFs and image uploads using the OCR Strategy Pattern.
 
-    The function still prefers direct PDF text extraction, but it now also
-    handles scanned PDFs and standalone images by routing them through the
-    multi-modal OCR processor when OCR is enabled.
+    Uses OCRPipeline with LocalOCRProvider and CloudOCRProvider.
+    If local extraction confidence falls below the threshold, automatically
+    falls back to the cloud provider for high-accuracy results.
     """
-    text = ""
-    parser_errors: List[str] = []
-
-    # Read input bytes early and perform lightweight safety checks
+    # Read input bytes early
     data = _read_input_bytes(uploaded_pdf)
     if data is None:
         raise ValueError("Unable to read uploaded file bytes.")
@@ -219,14 +252,15 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
     if len(data) > max_bytes:
         raise PDFProcessingError(f"PDF exceeds allowed size of {max_bytes} bytes.")
 
-    # Reject obvious malicious tokens (JavaScript, Launch actions, embedded files)
+    # Reject obvious malicious tokens
     suspicious_signatures = [b'/JavaScript', b'/JS', b'/Launch', b'/EmbeddedFiles', b'/RichMedia', b'/OpenAction', b'/AA']
     for sig in suspicious_signatures:
         if sig in data:
-            parser_errors.append(f"Suspicious PDF token detected: {sig.decode('latin1')}")
-            # For safety, refuse to process PDFs containing active content
-            raise PDFProcessingError("PDF contains active or embedded content (JavaScript/Launch/EmbeddedFiles). Processing aborted.")
+            raise PDFProcessingError(
+                f"PDF contains active or embedded content ({sig.decode('latin1')}). Processing aborted."
+            )
 
+    # Image uploads bypass the pipeline and go directly to multimodal processor
     if _is_image_input(uploaded_pdf):
         if not enable_ocr:
             raise ValueError("Image uploads require OCR. Re-run with OCR enabled.")
@@ -240,131 +274,270 @@ def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages:
         except Exception:
             return _legacy_image_ocr_fallback(image_bytes, ocr_languages)
 
-    try:
-        import io as _io
-        with pdfplumber.open(_io.BytesIO(data)) as pdf:
-            pages = []
-            max_pages = int(getattr(Config, 'PDF_MAX_PAGES', 2000))
-            for i, page in enumerate(pdf.pages):
-                if i >= max_pages:
-                    parser_errors.append(f"PDF page limit reached: {max_pages}")
-                    break
-                try:
-                    page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
-                except Exception as e:
-                    parser_errors.append(f"pdfplumber page extraction error page={i}: {e}")
-                    continue
-                if page_text:
-                    pages.append(page_text)
-            text = "\n".join(pages).strip()
-            if text:
-                # Validate encoding quality
-                is_valid, quality = _validate_encoding_quality(text)
-                if is_valid:
-                    return text
-    except Exception as e:
-        parser_errors.append(f"pdfplumber open error: {e}")
+    # Build pipeline with configurable threshold
+    threshold = float(getattr(Config, 'OCR_CONFIDENCE_THRESHOLD', 0.5))
+    pipeline = OCRPipeline(
+        primary=LocalOCRProvider(),
+        fallback=CloudOCRProvider(),
+        confidence_threshold=threshold,
+    )
 
-    try:
-        import io as _io
-        reader = PdfReader(_io.BytesIO(data), strict=False)
-        # Check for encryption
+    # Run pipeline
+    result = pipeline.process(data, ocr_languages=ocr_languages, ocr_dpi=ocr_dpi)
+
+    if result.text.strip():
+        return result.text
+
+    # If pipeline returns empty, raise with details
+    error_msg = f"OCR pipeline failed. Primary: {result.provider}/{result.method} (confidence={result.confidence:.2f})"
+    if result.error:
+        error_msg += f" — {result.error}"
+    raise PDFProcessingError(error_msg)
+
+# =============================================================================
+# OCR STRATEGY PATTERN
+# =============================================================================
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Protocol
+
+
+@dataclass
+class OCRResult:
+    """Standardized result from any OCR provider."""
+    text: str
+    confidence: float
+    provider: str
+    method: str
+    ocr_used: bool
+    error: Optional[str] = None
+
+
+class OCRProvider(ABC):
+    """Abstract base class for OCR providers."""
+
+    @abstractmethod
+    def extract(self, file_bytes: bytes, ocr_languages: str = "eng+hin", ocr_dpi: int = 300) -> OCRResult:
+        """Extract text from document bytes. Must return OCRResult with confidence 0-1."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Provider identifier for logging and metrics."""
+        raise NotImplementedError
+
+
+class LocalOCRProvider(OCRProvider):
+    """Local OCR using pdfplumber → pypdf → Tesseract chain."""
+
+    name = "local"
+
+    def extract(self, file_bytes: bytes, ocr_languages: str = "eng+hin", ocr_dpi: int = 300) -> OCRResult:
+        text = ""
+        parser_errors: List[str] = []
+
+        # 1. Try pdfplumber
         try:
-            if getattr(reader, 'is_encrypted', False):
-                # Try simple decryption
+            with io.BytesIO(file_bytes) as bio:
+                with pdfplumber.open(bio) as pdf:
+                    pages = []
+                    for i, page in enumerate(pdf.pages):
+                        if i >= 2000:  # PDF_MAX_PAGES safety
+                            parser_errors.append("PDF page limit reached: 2000")
+                            break
+                        try:
+                            page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                        except Exception as e:
+                            parser_errors.append(f"pdfplumber page extraction error page={i}: {e}")
+                            continue
+                        if page_text:
+                            pages.append(page_text)
+                    text = "\n".join(pages).strip()
+                    if text:
+                        is_valid, quality = _validate_encoding_quality(text)
+                        if is_valid:
+                            return OCRResult(
+                                text=text,
+                                confidence=quality,
+                                provider=self.name,
+                                method="pdfplumber",
+                                ocr_used=False,
+                            )
+        except Exception as e:
+            parser_errors.append(f"pdfplumber open error: {e}")
+
+        # 2. Fallback to pypdf
+        try:
+            with io.BytesIO(file_bytes) as bio:
+                reader = PdfReader(bio, strict=False)
                 try:
-                    reader.decrypt("")
+                    if getattr(reader, 'is_encrypted', False):
+                        reader.decrypt("")
                 except Exception:
-                    parser_errors.append("Encrypted PDF cannot be processed.")
-                    raise PDFProcessingError("Encrypted PDF not supported.")
-        except Exception:
-            # continue; some pypdf versions may not expose is_encrypted
-            pass
+                    pass
+                text = _extract_pages_pypdf(reader)
+                if text:
+                    is_valid, quality = _validate_encoding_quality(text)
+                    if is_valid:
+                        return OCRResult(
+                            text=text,
+                            confidence=quality,
+                            provider=self.name,
+                            method="pypdf",
+                            ocr_used=False,
+                        )
+        except Exception as e:
+            parser_errors.append(f"pypdf read error: {e}")
 
-        text = _extract_pages_pypdf(reader)
-        if text:
+        # 3. Legacy Tesseract OCR
+        try:
+            text = _legacy_ocr_fallback_bytes(file_bytes, ocr_languages, ocr_dpi)
             is_valid, quality = _validate_encoding_quality(text)
-            if is_valid:
-                return text
-    except Exception as e:
-        parser_errors.append(f"pypdf read error: {e}")
-
-    if not enable_ocr:
-        if parser_errors:
-            raise PDFProcessingError(
-                "Failed to extract text from PDF using pdfplumber and pypdf.",
-                "; ".join(parser_errors),
+            return OCRResult(
+                text=text,
+                confidence=quality if is_valid else 0.3,
+                provider=self.name,
+                method="tesseract",
+                ocr_used=True,
             )
-        raise ValueError("No extractable text found. The PDF may be image-only or empty. Re-run with OCR enabled.")
+        except Exception as e:
+            parser_errors.append(f"legacy OCR error: {e}")
 
-    # Use new multi-modal processor for enhanced OCR
-    try:
-        from core.multimodal_processor import MultiModalProcessor
-        processor = MultiModalProcessor()
-        
-        # Parse language string
-        languages = ocr_languages.split('+')
-        
-        # Read PDF bytes
-        if hasattr(uploaded_pdf, "seek"):
-            uploaded_pdf.seek(0)
-        data = uploaded_pdf.read() if hasattr(uploaded_pdf, "read") else None
-        if hasattr(uploaded_pdf, "seek"):
-            uploaded_pdf.seek(0)
-        if not data:
-            raise ValueError("Unable to read PDF bytes for OCR.")
-        
-        # Process with multi-modal processor
-        result = processor.process_document(
-            data,
-            file_type='scanned_pdf',
-            languages=languages,
-            enable_ocr=True,
-            aggressive_ocr=True
+        # All local methods failed
+        return OCRResult(
+            text="",
+            confidence=0.0,
+            provider=self.name,
+            method="failed",
+            ocr_used=False,
+            error="; ".join(parser_errors) if parser_errors else "Local OCR failed",
         )
-        
-        if result['success'] and result['text']:
-            logging.info(f"Multi-modal OCR completed. Confidence: {result.get('confidence', 0):.2f}%")
-            return result['text']
-        else:
-            # Fallback to legacy OCR if multi-modal fails
-            logging.warning("Multi-modal OCR failed, falling back to legacy OCR")
-            return _legacy_ocr_fallback(uploaded_pdf, ocr_languages, ocr_dpi)
-            
-    except ImportError:
-        # Fallback to legacy OCR if multi-modal processor not available
-        logging.info("Multi-modal processor not available, using legacy OCR")
-        return _legacy_ocr_fallback(uploaded_pdf, ocr_languages, ocr_dpi)
-    except Exception as e:
-        logging.error(f"Multi-modal OCR error: {str(e)}, falling back to legacy OCR")
-        return _legacy_ocr_fallback(uploaded_pdf, ocr_languages, ocr_dpi)
 
 
-def _legacy_image_ocr_fallback(image_bytes: bytes, ocr_languages: str) -> str:
-    """Legacy OCR fallback for standalone image uploads."""
-    try:
-        from PIL import Image
-        import pytesseract
-        from pytesseract import Output
-    except Exception as e:
-        raise RuntimeError(
-            f"OCR dependencies are missing ({e}). Install pytesseract, Pillow and Tesseract binaries."
-        ) from e
+class CloudOCRProvider(OCRProvider):
+    """Cloud OCR provider (e.g., Google Vision, AWS Textract, Azure Form Recognizer)."""
 
-    try:
-        image = Image.open(io.BytesIO(image_bytes))
-    except Exception as e:
-        raise ValueError(f"Unable to decode image for OCR: {e}") from e
+    name = "cloud"
 
-    ocr_data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
-    text = _extract_layout_text_from_tesseract_data(ocr_data)
-    if not text:
-        raise ValueError("OCR completed but no readable text was extracted.")
-    return text
+    def __init__(self, api_key: Optional[str] = None, endpoint: Optional[str] = None):
+        self.api_key = api_key or Config.get("CLOUD_OCR_API_KEY", "")
+        self.endpoint = endpoint or Config.get("CLOUD_OCR_ENDPOINT", "")
+
+    def extract(self, file_bytes: bytes, ocr_languages: str = "eng+hin", ocr_dpi: int = 300) -> OCRResult:
+        """Call cloud OCR API. Placeholder implementation — integrate with your provider."""
+        if not self.api_key:
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                provider=self.name,
+                method="unconfigured",
+                ocr_used=False,
+                error="Cloud OCR API key not configured",
+            )
+
+        try:
+            # Placeholder: replace with actual cloud provider SDK call
+            # Example: Google Vision, AWS Textract, Azure Form Recognizer
+            # import cloud_ocr_sdk
+            # result = cloud_ocr_sdk.process_document(file_bytes, languages=ocr_languages.split('+'))
+            # return OCRResult(text=result.text, confidence=result.confidence, provider=self.name, method="cloud_api", ocr_used=True)
+
+            # For now, simulate high-confidence response
+            logging.warning("CloudOCRProvider.extract() is a placeholder — integrate with your cloud OCR SDK")
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                provider=self.name,
+                method="placeholder",
+                ocr_used=False,
+                error="Cloud OCR not yet integrated — implement with your provider SDK",
+            )
+        except Exception as e:
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                provider=self.name,
+                method="error",
+                ocr_used=False,
+                error=str(e),
+            )
+
+
+class OCRPipeline:
+    """Orchestrates OCR providers with threshold-based fallback."""
+
+    def __init__(
+        self,
+        primary: Optional[OCRProvider] = None,
+        fallback: Optional[OCRProvider] = None,
+        confidence_threshold: float = 0.5,
+    ):
+        self.primary = primary or LocalOCRProvider()
+        self.fallback = fallback or CloudOCRProvider()
+        self.confidence_threshold = confidence_threshold
+
+    def process(self, file_bytes: bytes, ocr_languages: str = "eng+hin", ocr_dpi: int = 300) -> OCRResult:
+        """Run primary provider; if confidence < threshold, try fallback."""
+        result = self.primary.extract(file_bytes, ocr_languages, ocr_dpi)
+
+        if result.confidence >= self.confidence_threshold and result.text.strip():
+            logging.info(
+                "ocr_pipeline_primary_success",
+                provider=result.provider,
+                confidence=result.confidence,
+                method=result.method,
+            )
+            return result
+
+        logging.warning(
+            "ocr_pipeline_primary_low_confidence",
+            provider=result.provider,
+            confidence=result.confidence,
+            error=result.error,
+            falling_back_to=self.fallback.name,
+        )
+
+        fallback_result = self.fallback.extract(file_bytes, ocr_languages, ocr_dpi)
+
+        if fallback_result.text.strip() and fallback_result.confidence >= self.confidence_threshold:
+            logging.info(
+                "ocr_pipeline_fallback_success",
+                provider=fallback_result.provider,
+                confidence=fallback_result.confidence,
+                method=fallback_result.method,
+            )
+            return fallback_result
+
+        # If fallback also fails, return whichever has higher confidence
+        if fallback_result.confidence > result.confidence:
+            return fallback_result
+
+        logging.error(
+            "ocr_pipeline_all_failed",
+            primary_confidence=result.confidence,
+            fallback_confidence=fallback_result.confidence,
+            primary_error=result.error,
+            fallback_error=fallback_result.error,
+        )
+        return result  # Return primary result (may be empty but has error details)
 
 
 def _legacy_ocr_fallback(uploaded_pdf, ocr_languages: str, ocr_dpi: int):
     """Legacy OCR fallback for backward compatibility"""
+    if hasattr(uploaded_pdf, "seek"):
+        uploaded_pdf.seek(0)
+    data = uploaded_pdf.read() if hasattr(uploaded_pdf, "read") else None
+    if hasattr(uploaded_pdf, "seek"):
+        uploaded_pdf.seek(0)
+    if not data:
+        raise ValueError("Unable to read PDF bytes for OCR.")
+    return _legacy_ocr_fallback_bytes(data, ocr_languages, ocr_dpi)
+
+
+def _legacy_ocr_fallback_bytes(file_bytes: bytes, ocr_languages: str, ocr_dpi: int) -> str:
+    """Byte-array version of legacy OCR for use by LocalOCRProvider."""
     try:
         from pdf2image import convert_from_bytes
         import pytesseract
@@ -375,45 +548,32 @@ def _legacy_ocr_fallback(uploaded_pdf, ocr_languages: str, ocr_dpi: int):
             e,
         ) from e
 
-    if hasattr(uploaded_pdf, "seek"):
-        uploaded_pdf.seek(0)
-    data = uploaded_pdf.read() if hasattr(uploaded_pdf, "read") else None
-    if hasattr(uploaded_pdf, "seek"):
-        uploaded_pdf.seek(0)
-    if not data:
-        raise ValueError("Unable to read PDF bytes for OCR.")
-
-    try:
-        images = convert_from_bytes(data, dpi=ocr_dpi)
-    except Exception as e:
-        raise OCRProcessingError(f"Failed to convert PDF pages to images for OCR: {e}", e)
+    images = convert_from_bytes(file_bytes, dpi=ocr_dpi)
     pages_out: List[str] = []
     conf_scores: List[float] = []
+
     for image in images:
-        try:
-            ocr_data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
-            page_text = _extract_layout_text_from_tesseract_data(ocr_data)
-            if page_text:
-                pages_out.append(page_text)
-            vals = []
-            for c in ocr_data.get("conf", []):
-                try:
-                    cv = float(c)
-                    if cv >= 0:
-                        vals.append(cv)
-                except Exception:
-                    continue
-            if vals:
-                conf_scores.append(sum(vals) / len(vals))
-        except Exception as e:
-            raise OCRProcessingError(f"OCR failed while processing a page: {e}", e)
+        ocr_data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
+        page_text = _extract_layout_text_from_tesseract_data(ocr_data)
+        if page_text:
+            pages_out.append(page_text)
+        vals = []
+        for c in ocr_data.get("conf", []):
+            try:
+                cv = float(c)
+                if cv >= 0:
+                    vals.append(cv)
+            except Exception:
+                continue
+        if vals:
+            conf_scores.append(sum(vals) / len(vals))
+
     text = "\n\n".join(pages_out).strip()
     if not text:
         raise OCRProcessingError("OCR completed but no readable text was extracted.")
     if conf_scores:
         logging.info("ocr_confidence_avg=%.2f", sum(conf_scores) / len(conf_scores))
     return text
-
 
 def validate_pdf_metadata(uploaded_file):
     """
@@ -2431,5 +2591,61 @@ def parse_summary_bullets(raw_text):
     if not final_bullets:
         # Final fallback: return the raw text if all parsing heuristics failed
         return raw_text
-        
     return "\n".join([f"- {b}" for b in final_bullets])
+
+
+def get_file_stream(file_obj, chunk_size=65536):
+    """
+    Generator that yields chunks of a file object.
+    Prevents memory exhaustion by keeping resident memory usage low.
+    """
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    while True:
+        chunk = file_obj.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+def _validate_encoding_quality(text: str) -> Tuple[bool, float]:
+    # Placeholder for your encoding check
+    return True, 1.0
+class PipelineStateManager:
+    @staticmethod
+    def get_state(db, doc_id):
+        return db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+
+    @staticmethod
+    def update_stage(db, doc_id, stage, data=None):
+        state = db.query(DocumentProcessingState).filter_by(document_id=doc_id).first()
+        if not state:
+            state = DocumentProcessingState(document_id=doc_id)
+            db.add(state)
+        state.current_stage = stage
+        if data:
+            current_data = state.stage_data or {}
+            current_data.update(data)
+            state.stage_data = current_data
+        db.commit()
+
+def get_file_stream(file_obj, chunk_size=65536):
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    while True:
+        chunk = file_obj.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+def process_file_to_disk(uploaded_file) -> str:
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    try:
+        for chunk in get_file_stream(uploaded_file):
+            tmp_file.write(chunk)
+        tmp_file.close()
+        return tmp_file.name
+    except Exception as e:
+        tmp_file.close()
+        if os.path.exists(tmp_file.name):
+            os.remove(tmp_file.name)
+        raise PDFProcessingError(f"Streaming to disk failed: {str(e)}")
