@@ -5,6 +5,7 @@ Uses OpenRouter API for semantic extraction, falls back to keyword matching.
 
 import json
 import logging
+import openai
 from typing import List, Optional, Dict, Any
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -43,19 +44,13 @@ class ArgumentExtractionEngine:
         except Exception as e:
             logger.warning(f"Failed to initialize OpenRouter client: {e}")
             return None
-    
-    @retry(
-        stop=stop_after_attempt(Config.AI_MAX_RETRIES),
-        wait=wait_exponential(multiplier=Config.AI_RETRY_BACKOFF_BASE),
-    )
     def _call_llm_for_extraction(
         self,
         text: str,
         issue_name: str
     ) -> Optional[List[Dict[str, Any]]]:
         """Call LLM to extract structured arguments"""
-        if not self.client:
-            return None
+        from core.app_utils import safe_llm_call
         
         system_prompt = """You are a legal expert extracting arguments from cases.
 Return ONLY a valid JSON array of extracted arguments."""
@@ -81,18 +76,22 @@ Return JSON array with structure:
 Extract 3-6 most significant arguments only. confidence_score based on evidence quality."""
         
         try:
-            response = self.client.chat.completions.create(
+            response_text, error = safe_llm_call(
+                client=self.client,
                 model=Config.DEFAULT_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.1,
                 max_tokens=1500,
+                temperature=0.1,
                 timeout=Config.AI_REQUEST_TIMEOUT,
+                task="extraction"
             )
             
-            response_text = response.choices[0].message.content
+            if error or not response_text:
+                logger.error(f"LLM extraction failed: {error}")
+                return None
             
             # Try direct JSON parsing
             try:
@@ -221,14 +220,14 @@ Extract 3-6 most significant arguments only. confidence_score based on evidence 
         """Classify argument type by keywords"""
         sentence_lower = sentence.lower()
         
-        if any(w in sentence_lower for w in ["statute", "section", "act", "law"]):
+        if any(w in sentence_lower for w in ["precedent", "case", "decided", "held"]):
+            return ArgumentType.PRECEDENT_CITATION
+        elif any(w in sentence_lower for w in ["statute", "section", "act", "law"]):
             return ArgumentType.STATUTORY_INTERPRETATION
         elif any(w in sentence_lower for w in ["court", "procedure", "rule", "jurisdiction"]):
             return ArgumentType.PROCEDURAL_ARGUMENT
         elif any(w in sentence_lower for w in ["testimony", "witness", "deposed"]):
             return ArgumentType.WITNESS_TESTIMONY
-        elif any(w in sentence_lower for w in ["precedent", "case", "decided", "held"]):
-            return ArgumentType.PRECEDENT_CITATION
         elif any(w in sentence_lower for w in ["principle", "doctrine", "established"]):
             return ArgumentType.LEGAL_PRINCIPLE
         else:

@@ -27,7 +27,7 @@ def _reserve_otp_rate_limit_slot(
     requester_ip: Optional[str] = None,
 ) -> None:
     """Reserve a slot in the per-identifier OTP rate limiter.
-    
+
     Raises ValueError if the rate limit has been exceeded.
     """
     key = _otp_rate_limit_key(identifier)
@@ -123,23 +123,6 @@ def is_email_locked_out(db: Session, email: str) -> Optional[dt.datetime]:
     return lockout.locked_until if lockout else None
 
 
-def record_otp_failed_attempt(db: Session, email: str) -> None:
-    """Record a failed OTP attempt for rate limiting."""
-    key = _otp_rate_limit_key(email)
-    now = dt.datetime.now(dt.timezone.utc)
-    with _OTP_RATE_LIMIT_LOCK:
-        if key not in _OTP_RATE_LIMIT_EVENTS:
-            _OTP_RATE_LIMIT_EVENTS[key] = []
-        _OTP_RATE_LIMIT_EVENTS[key].append(now)
-
-
-def reset_otp_failed_attempts(db: Session, email: str) -> None:
-    """Reset failed OTP attempts for an email."""
-    key = _otp_rate_limit_key(email)
-    with _OTP_RATE_LIMIT_LOCK:
-        _OTP_RATE_LIMIT_EVENTS.pop(key, None)
-
-
 def cleanup_expired_otps(db: Session) -> int:
     """Remove expired OTP records."""
     now = dt.datetime.now(dt.timezone.utc)
@@ -149,26 +132,3 @@ def cleanup_expired_otps(db: Session) -> int:
     ).delete(synchronize_session=False)
     db.commit()
     return deleted
-
-
-def create_or_update_user_preference(
-    db: Session,
-    user_id: int,
-    key: str,
-    value: str,
-) -> None:
-    """Create or update a user preference."""
-    from db.models import UserPreference
-    
-    pref = db.query(UserPreference).filter(
-        UserPreference.user_id == user_id,
-        UserPreference.pref_key == key,
-    ).first()
-    
-    if pref:
-        pref.pref_value = value
-    else:
-        pref = UserPreference(user_id=user_id, pref_key=key, pref_value=value)
-        db.add(pref)
-    
-    db.commit()
