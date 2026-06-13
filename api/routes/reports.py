@@ -181,6 +181,7 @@ def _sync_report_statuses(user_id: int) -> List[Dict[str, Any]]:
 @router.post(
     "/generate",
     response_model=ReportGenerationResponse,
+    status_code=status.HTTP_201_CREATED,
     summary="Generate report asynchronously"
 )
 async def generate_report(
