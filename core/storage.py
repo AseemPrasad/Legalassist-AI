@@ -126,3 +126,5 @@ def bulk_delete_attachments(stored_paths: list) -> dict:
 
     logger.info("Bulk deletion completed: %d deleted, %d failed", results["deleted"], results["failed"])
     return results
+
+
