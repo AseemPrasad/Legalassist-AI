@@ -139,6 +139,14 @@ def create_app() -> FastAPI:
     # Model feedback & optimization
     from api.routes import models as models_router
     app.include_router(models_router.router)
+
+    # HA WebSocket endpoints (multiplexing, reconnection, Redis bridge)
+    from api.websockets.router import register_ha_websocket_endpoints
+    register_ha_websocket_endpoints(app)
+
+    # Legacy case-timeline WebSocket endpoint
+    from api.websockets.case_timeline import register_case_timeline_endpoint
+    register_case_timeline_endpoint(app)
     
     # ========================================================================
     # Global Exception Handlers
