@@ -75,8 +75,12 @@ class APIKey(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
 
     def is_valid(self) -> bool:
+        if not self.is_active:
+            return False
         if not self.expires_at:
             return True
         expires_at = self.expires_at

@@ -2,24 +2,23 @@
 Closes #
 
 # Summary
-Please include a summary of the changes and which issue is fixed.
+<!-- Please include a summary of the changes and which issue is fixed. -->
 
 # Changes Made
-- Added a Pull Request template for GitHub.
-- Configured structured sections for testing, screenshots, and checklist.
+<!-- List the specific changes made. -->
 
 # Testing
-- [x] Verified file syntax and rendering locally on GitHub.
+<!-- Describe the tests you ran to verify your changes. -->
 
 # Screenshots
 <!-- If applicable, add screenshots to help explain your changes. -->
 
 # Impact
-Improves developer workflow by providing a standard checklist and template for pull requests.
+<!-- Explain why this improves the project and what parts are affected. -->
 
 # Checklist
-- [x] Code follows project standards
-- [x] Tested locally
-- [x] No unrelated changes included
-- [x] Responsive design verified
-- [x] Accessibility considered
+- [ ] Code follows project standards
+- [ ] Tested locally
+- [ ] No unrelated changes included
+- [ ] Responsive design verified
+- [ ] Accessibility considered

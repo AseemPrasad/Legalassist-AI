@@ -556,6 +556,21 @@ def create_jwt_token(user_id: int, email: str) -> str:
     data = {"sub": str(user_id), "user_id": user_id, "email": email}
     return create_access_token(data)
 
+def validate_user_id(user_id: Any) -> int:
+    """
+    Validate and normalize user identifiers coming from
+    authentication payloads.
+    """
+    try:
+        normalized = int(user_id)
+
+        if normalized <= 0:
+            raise ValueError()
+
+        return normalized
+
+    except (TypeError, ValueError):
+        raise ValueError("Invalid user identifier")
 
 def verify_jwt_token(token: str) -> Optional[dict]:
     """Delegate verification to the canonical API auth implementation.
@@ -566,9 +581,9 @@ def verify_jwt_token(token: str) -> Optional[dict]:
     try:
         return verify_token(token)
     except Exception as e:
-      import logging
-      logging.error(f"Auth error: {e}")
-      return None
+        import logging
+        logging.error(f"Auth error: {e}")
+        return None
 
 
 def revoke_jwt_token(token: str) -> bool:
@@ -780,8 +795,17 @@ def verify_login(otp: str) -> bool:
 
         # Get user ID from token payload
         payload = verify_jwt_token(token)
+
         if payload:
-            st.session_state.user_id = payload.get("sub", payload.get("user_id"))
+            try:
+                st.session_state.user_id = validate_user_id(
+                  payload.get("sub", payload.get("user_id"))
+             )
+            except ValueError:
+                 logger.warning(
+                      "invalid_user_id_in_token"
+             )
+            return False
 
         st.session_state.is_authenticated = True
         st.session_state.session_nonce = secrets.token_hex(16)

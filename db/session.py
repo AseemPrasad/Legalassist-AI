@@ -24,12 +24,6 @@ _is_postgres = _db_url.get_backend_name() == "postgresql"
 engine_kwargs: dict = {}
 if _is_sqlite:
     engine_kwargs["connect_args"] = {"check_same_thread": False}
-    from sqlalchemy import event
-    @event.listens_for(engine, "connect")
-    def set_sqlite_pragma(dbapi_connection, connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
 else:
     engine_kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "20"))
     engine_kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "10"))

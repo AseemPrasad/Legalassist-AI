@@ -15,6 +15,8 @@ from enum import Enum
 import html
 import tenacity
 from config import Config
+from domain.deadline import DeadlineEngine
+from domain.notification import NotificationEligibility
 
 # Celery integration for asynchronous task execution
 # We import the celery_app instance defined in the project's central 
@@ -160,7 +162,7 @@ def _derive_first_action(deadline: CaseDeadline) -> str:
     if stored_action:
         return stored_action
 
-    return get_deadline_first_action(getattr(deadline, "deadline_type", None))
+    return DeadlineEngine.first_action(getattr(deadline, "deadline_type", None))
 
 
 def _build_notification_template_values(
@@ -625,16 +627,10 @@ class NotificationService:
         escaped_desc = html.escape(deadline.description) if deadline.description else "No additional details provided."
         escaped_action = html.escape((first_action or _derive_first_action(deadline)).strip())
         
-        # Urgency color coding
-        if days_left <= 3:
-            accent_color = "#ff5252" # Critical Red
-            urgency_label = "URGENT"
-        elif days_left <= 10:
-            accent_color = "#ff9100" # Warning Orange
-            urgency_label = "SOON"
-        else:
-            accent_color = "#1a5490" # Info Blue
-            urgency_label = "REMINDER"
+        # Urgency color coding via domain layer
+        priority = DeadlineEngine.priority(days_left)
+        accent_color = priority.color
+        urgency_label = priority.urgency_label
 
         subject = f"⚖️ {urgency_label}: {_sanitize_subject(deadline.case_title)} - {_sanitize_subject(deadline.deadline_type.title())} Deadline"
         
@@ -1131,8 +1127,8 @@ class NotificationService:
                     days_left=days_left, 
                     user_id=deadline.user_id)
 
-        # Only process at specific thresholds
-        if days_left not in [30, 10, 3, 1]:
+        # Only process at specific thresholds via domain layer
+        if not NotificationEligibility.is_eligible(days_left):
             return results
 
         # Send based on user's notification channel preference

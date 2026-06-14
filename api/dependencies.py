@@ -1,14 +1,14 @@
 """
 Dependency injection and common dependencies
 """
-from typing import Optional
-from typing import Generator, Optional
+from typing import Any, Generator, Optional
 
 import structlog
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from api.auth import get_current_user, get_current_user_optional, CurrentUser
+from core.policy_engine import PolicyDecision, UserContext, evaluate, PolicyEngine
 
 logger = structlog.get_logger(__name__)
 
@@ -20,9 +20,13 @@ async def get_rate_limit_key(
     """Return a per-identity rate-limit key.
 
     Resolution order:
-    1. Authenticated user  → ``user:<user_id>``
-    2. API key / JWT token / Source IP resolver.
+    1. Authenticated user  → ``user:<user_id>``   (unchanged)
+    2. Unauthenticated     → ``ip:<client_ip>``   (was: ``"anonymous"``)
+    3. No IP available     → unique per-request token so no shared bucket
     """
+    if current_user:
+        return f"user:{current_user.user_id}"
+
     from api.limiter import resolve_rate_limit_identifier
     return resolve_rate_limit_identifier(request, current_user=current_user)
 
@@ -43,31 +47,7 @@ def get_db_rls(
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
 ) -> Generator[Session, None, None]:
-    """Request-scoped DB session with PostgreSQL RLS applied for the authenticated user."""
-    """Request-scoped database session with PostgreSQL Row-Level Security applied.
-
-    For every authenticated API request this dependency:
-    1. Opens a new SQLAlchemy session.
-    2. Sets the ``app.current_user_id`` PostgreSQL session variable so that
-       all RLS policies defined by ``scripts/setup_rls.py`` are enforced for
-       the duration of the request.
-    3. Clears the variable and closes the session in the ``finally`` block,
-       ensuring no user context leaks across connection-pool reuse.
-
-    On SQLite (local development) the RLS calls are no-ops, so behaviour is
-    unchanged for developers who do not run PostgreSQL locally.
-
-    Usage::
-
-        @router.get("/resource")
-        async def my_endpoint(db: Session = Depends(get_db_rls)):
-            ...
-
-    Note: ``scripts/setup_rls.py`` must be run against the PostgreSQL database
-    **after** ``Base.metadata.create_all`` (i.e. after migrations) for the
-    policies to exist.  Without that step this dependency still works correctly
-    — it simply sets a session variable that no policy reads yet.
-    """
+    """Request-scoped database session with PostgreSQL RLS applied."""
     from db.session import SessionLocal, apply_rls_context, clear_rls_context, _is_postgres
 
     db: Session = SessionLocal()
@@ -97,12 +77,7 @@ def get_db_rls_optional(
     request: Request,
     current_user: Optional[CurrentUser] = Depends(get_current_user_optional),
 ) -> Generator[Session, None, None]:
-    """Like ``get_db_rls`` but for endpoints that allow unauthenticated access.
-
-    When no authenticated user is present the session is opened without setting
-    the RLS context variable, which means PostgreSQL RLS policies that require
-    ``app.current_user_id`` will block all rows — providing a safe default.
-    """
+    """Like ``get_db_rls`` but for endpoints that allow unauthenticated access."""
     from db.session import SessionLocal, apply_rls_context, clear_rls_context, _is_postgres
 
     db: Session = SessionLocal()
@@ -122,20 +97,7 @@ def get_db_rls_optional(
 
 
 def get_db_no_rls() -> Generator[Session, None, None]:
-    """DB session with NO RLS context set — for public endpoints.
-
-    This dependency must only be used on endpoints that are intentionally
-    public and whose queries are already scoped by a non-user-owned token
-    (e.g. an anonymized_id capability token).
-
-    Security contract:
-    - ``app.current_user_id`` is never set, so PostgreSQL RLS policies that
-      filter by the current user will not apply.
-    - The caller is responsible for ensuring the query cannot leak data
-      across ownership boundaries through other means (e.g. the
-      anonymized_id is the only lookup key and it is not guessable).
-    - This dependency must NEVER be used on authenticated endpoints.
-    """
+    """DB session with NO RLS context set — for public endpoints."""
     from db.session import SessionLocal
 
     db: Session = SessionLocal()
@@ -149,6 +111,75 @@ def get_db_no_rls() -> Generator[Session, None, None]:
         db.close()
 
 
+# ============================================================================
+# POLICY ENGINE DEPENDENCIES
+# ============================================================================
+
+def _current_user_to_context(current_user: CurrentUser) -> UserContext:
+    """Convert FastAPI CurrentUser to policy engine UserContext."""
+    return UserContext(
+        user_id=current_user.user_id,
+        email=current_user.email,
+        role=current_user.role,
+    )
+
+
+async def require_policy(
+    resource_type: str,
+    action: str,
+    resource: Optional[Any] = None,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db_rls),
+) -> None:
+    """FastAPI dependency that enforces a policy decision.
+
+    Usage in route definitions::
+
+        @router.get("/{case_id}")
+        async def get_case(
+            case_id: str,
+            _authorized: None = Depends(require_policy("case", "view")),
+            ...
+        ):
+            ...
+
+    For resource-level checks (e.g., ownership), fetch the resource first
+    and use the lower-level ``evaluate_policy`` function inside the handler.
+    """
+    user_ctx = _current_user_to_context(current_user)
+    decision = evaluate(user_ctx, resource_type, action, resource, db)
+
+    if decision == PolicyDecision.DENY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: {action} on {resource_type}",
+        )
+    if decision == PolicyDecision.ABSTAIN:
+        logger.warning(
+            "policy_abstain_fallback_deny",
+            resource_type=resource_type,
+            action=action,
+            user_id=current_user.user_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: no policy defined for {action} on {resource_type}",
+        )
+
+
+def evaluate_policy(
+    current_user: CurrentUser,
+    resource_type: str,
+    action: str,
+    resource: Any,
+    db: Session,
+) -> PolicyDecision:
+    """Evaluate policy for a specific resource instance.
+
+    Use this inside route handlers after fetching the resource from the DB.
+    """
+    user_ctx = _current_user_to_context(current_user)
+    return evaluate(user_ctx, resource_type, action, resource, db)
 def check_permission(permission: str):
     """Dependency that enforces a specific permission on the current user."""
     from api.rbac import has_permission

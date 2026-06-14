@@ -21,7 +21,7 @@ filetype>=1.2.0
 
 # --- Database & Persistence ---
 # SQLAlchemy pinned to exact tested version
-sqlalchemy==2.0.21
+sqlalchemy>=2.0.50
 alembic>=1.12.0
 sqlalchemy-utils>=0.41.0
 psycopg2-binary>=2.9.0
@@ -51,7 +51,6 @@ seaborn>=0.12.0
 networkx>=3.1
 nltk>=3.8.1
 spacy>=3.6.0
-gensim>=4.3.0
 pyarrow>=12.0.0
 
 # --- Authentication & Security ---
@@ -222,7 +221,6 @@ pytest-mock-resources>=2.4.0
 pytest-fixture-config>=1.7.0
 pytest-shutil>=1.7.0
 pytest-virtualenv>=1.7.0
-pytest-pytester>=1.2.3
 pytest-rerunfailures>=14.0
 
 # ==============================================================================

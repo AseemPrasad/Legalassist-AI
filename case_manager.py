@@ -75,8 +75,22 @@ from services.case_queries import (
     generate_case_summary_text as generate_case_summary_text_service,
 )
 from db.crud.audit import record_immutable_audit_event
+from core.policy_engine import evaluate, UserContext, PolicyDecision
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# POLICY ENGINE HELPER
+# ============================================================================
+
+def _check_case_access(user_id: int, case, action: str = "view") -> bool:
+    """Check if user has access to case via policy engine."""
+    if case is None:
+        return False
+    user_ctx = UserContext(user_id=user_id, email="", role="user")
+    decision = evaluate(user_ctx, "case", action, case)
+    return decision == PolicyDecision.ALLOW
 
 
 # ==================== Case Management ====================
@@ -173,7 +187,7 @@ def update_case_details(
     db = SessionLocal()
     try:
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
+        if not case or not _check_case_access(user_id, case, "update"):
             return None, "Case not found or unauthorized."
         
         if case.version != expected_version:
@@ -239,7 +253,7 @@ def get_or_create_case_for_document(
     try:
         if existing_case_id:
             case = get_case_by_id(db, existing_case_id)
-            if case and case.user_id == user_id:
+            if case and _check_case_access(user_id, case, "view"):
                 db.expunge(case)
                 return case
 
@@ -283,7 +297,7 @@ def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
     try:
         case = get_case_by_id(db, case_id)
 
-        if not case or case.user_id != user_id:
+        if not case or not _check_case_access(user_id, case, "view"):
             return None
 
         # Get all documents
@@ -418,9 +432,9 @@ def upload_case_document(
     """
     db = SessionLocal()
     try:
-        # Verify case ownership
+        # Verify case access via policy engine
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
+        if not case or not _check_case_access(user_id, case, "upload_document"):
             logger.error(f"Case {case_id} not found or not owned by user {user_id}")
             return None
 
@@ -531,7 +545,7 @@ def upload_case_attachment(
     db = SessionLocal()
     try:
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
+        if not case or not _check_case_access(user_id, case, "upload_document"):
             logger.error(f"Case {case_id} not found or not owned by user {user_id}")
             return None
 
@@ -591,7 +605,7 @@ def upload_case_document_file(
     db = SessionLocal()
     try:
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
+        if not case or not _check_case_access(user_id, case, "upload_document"):
             logger.error(f"Case {case_id} not found or not owned by user {user_id}")
             return None
 
@@ -686,13 +700,13 @@ def _auto_create_deadlines_from_remedies(
 
 
 def get_document_content(document_id: int, user_id: int) -> Optional[str]:
-    """Get full document content by ID, verifying user ownership."""
+    """Get full document content by ID, verifying user access via policy engine."""
     db = SessionLocal()
     try:
         doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
         if doc is None:
             return None
-        if doc.case.user_id != user_id:
+        if not _check_case_access(user_id, doc.case, "view"):
             logger.warning("idor_document_access_denied", document_id=document_id, user_id=user_id, owner_id=doc.case.user_id)
             return None
         return doc.document_content
@@ -708,7 +722,7 @@ def get_case_timeline_events(user_id: int, case_id: int) -> List[Dict[str, Any]]
     db = SessionLocal()
     try:
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
+        if not case or not _check_case_access(user_id, case, "view"):
             return []
 
         return _timeline_service.get_case_timeline_events(db, case_id)
@@ -725,12 +739,12 @@ def get_case_full_timeline(user_id: int, case_id: int) -> List[Dict[str, Any]]:
     - CaseDeadline entries (created)
     - NotificationLog entries (reminders sent)
 
-    Ensures user owns the case and performs batched queries to avoid N+1.
+    Ensures user has access to the case and performs batched queries to avoid N+1.
     """
     db = SessionLocal()
     try:
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
+        if not case or not _check_case_access(user_id, case, "view"):
             return []
 
         return _timeline_service.get_case_full_timeline(db, case_id)
@@ -742,7 +756,7 @@ def get_case_note_state(user_id: int, case_id: int):
     db = SessionLocal()
     try:
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
+        if not case or not _check_case_access(user_id, case, "view"):
             return None
         return get_case_note(db, case_id, user_id)
     finally:
@@ -785,10 +799,9 @@ def mark_deadline_completed(user_id: int, deadline_id: int) -> bool:
     try:
         deadline = db.query(CaseDeadline).filter(
             CaseDeadline.id == deadline_id,
-            CaseDeadline.user_id == user_id,
         ).first()
 
-        if not deadline:
+        if not deadline or not _check_case_access(user_id, deadline, "mark_complete"):
             return False
 
         deadline.is_completed = True
@@ -833,10 +846,9 @@ def mark_deadline_incomplete(user_id: int, deadline_id: int) -> bool:
     try:
         deadline = db.query(CaseDeadline).filter(
             CaseDeadline.id == deadline_id,
-            CaseDeadline.user_id == user_id,
         ).first()
 
-        if not deadline:
+        if not deadline or not _check_case_access(user_id, deadline, "update"):
             return False
 
         deadline.is_completed = False
@@ -868,15 +880,13 @@ def add_manual_deadline(
     
     db = SessionLocal()
     try:
-        # Validate deadline date is not in the past
-        if deadline_date.tzinfo is None:
-            deadline_date = deadline_date.replace(tzinfo=timezone.utc)
-        if deadline_date < datetime.now(timezone.utc):
+        # Validate deadline date is not in the past via domain layer
+        if not DeadlineEngine.validate_not_past(deadline_date):
             return None
 
-        # Verify case ownership
+        # Verify case access via policy engine
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
+        if not case or not _check_case_access(user_id, case, "add_deadline"):
             return None
 
         deadline = CaseDeadline(
@@ -886,7 +896,7 @@ def add_manual_deadline(
             court_name=court_name,
             deadline_date=deadline_date,
             deadline_type=deadline_type,
-            first_action=get_deadline_first_action(deadline_type),
+            first_action=DeadlineEngine.first_action(deadline_type),
             description=description,
         )
         db.add(deadline)
@@ -937,7 +947,7 @@ def _update_case_status(user_id: int, case_id: int, status: CaseStatus) -> bool:
     db = SessionLocal()
     try:
         case = get_case_by_id(db, case_id)
-        if not case or case.user_id != user_id:
+        if not case or not _check_case_access(user_id, case, "update"):
             return False
 
         # Validate transition pathway before updating
@@ -1092,8 +1102,10 @@ def delete_user_cases(user_id: int, case_ids: List[int], confirm: bool = False) 
         
         targets = db.query(Case.id, Case.case_number, Case.title).filter(
             Case.id.in_(case_ids),
-            Case.user_id == user_id
         ).all()
+        
+        # Filter by policy engine
+        targets = [t for t in targets if _check_case_access(user_id, t, "delete")]
         
         if not targets:
             logger.warning(f"No matching cases found for user {user_id} with IDs {case_ids}")
@@ -1110,9 +1122,9 @@ def delete_user_cases(user_id: int, case_ids: List[int], confirm: bool = False) 
         # Bulk Deletion Execution
         # ---------------------------------------------------------------------
         
+        target_ids = [t.id for t in targets]
         query = db.query(Case).filter(
-            Case.id.in_(case_ids),
-            Case.user_id == user_id
+            Case.id.in_(target_ids),
         )
         
         # Execute the delete operation with synchronize_session='fetch' to 

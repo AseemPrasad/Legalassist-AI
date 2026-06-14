@@ -14,8 +14,8 @@ from __future__ import annotations
 import datetime as dt
 import threading
 from typing import Optional, List
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy import func, Column, Integer, String, DateTime, Boolean, ForeignKey
+from sqlalchemy.orm import Session, relationship
 
 from db.base import Base
 from db.session import engine, SessionLocal, init_db, db_session, get_db, _to_utc_datetime, _datetime_for_db
@@ -34,6 +34,7 @@ def _otp_rate_limit_key(identifier: str) -> str:
 from db.models import (
     User,
     OTPVerification,
+    APIKey,
     NotificationStatus,
     NotificationChannel,
     NotificationLog,
@@ -65,9 +66,17 @@ from db.models import (
     CaseArgument,
     KnowledgeGraphEdge,
     PrecedentMatch,
-    IdempotencyKey,
-    IdempotencyKeyStatus,
+    CaseNote,
+    CaseComment,
+    CasePresence,
 )
+from db.crud.comments import (
+    get_case_comments,
+    get_case_presence,
+    create_case_comment,
+    upsert_case_presence,
+)
+from db.case_service import save_case_note_draft
 
 from db.crud.notifications import (
     create_case_deadline,
@@ -118,11 +127,7 @@ from db.crud.cases import (
     get_similarity_feedback,
 )
 
-from db.crud.tokens import (
-    revoke_token,
-    cleanup_expired_revoked_tokens,
-    is_token_revoked,
-)
+
 
 from db.case_service import (
     save_case_note_draft,
@@ -416,24 +421,6 @@ def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken
     db.commit()
     db.refresh(token)
     return token
-
-class APIKey(Base):
-    """Stored API key for programmatic access"""
-    __tablename__ = "api_keys"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    name = Column(String(100), nullable=False)
-    key_hash = Column(String(255), nullable=False, unique=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    expires_at = Column(DateTime(timezone=True), nullable=True)
-    last_used_at = Column(DateTime(timezone=True), nullable=True)
-    is_active = Column(Boolean, default=True, nullable=False)
-
-    user = relationship("User", backref="api_keys")
-
-    def __repr__(self):
-        return f"<APIKey(id={self.id}, name='{self.name}', active={self.is_active})>"
 
 
 # Database initialization

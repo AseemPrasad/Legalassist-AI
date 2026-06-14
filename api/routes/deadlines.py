@@ -9,6 +9,9 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from sqlalchemy.orm import Session
 from api.models import DeadlineResponse, UpcomingDeadlinesResponse
 from api.auth import get_current_user, CurrentUser
+from api.dependencies import get_db_rls, evaluate_policy
+from core.policy_engine import PolicyDecision
+from db.models.cases import Case, CaseDeadline
 import structlog
 from datetime import datetime, timedelta, timezone
 from core.clock import Clock
@@ -18,8 +21,19 @@ router = APIRouter(prefix="/api/v1/deadlines", tags=["deadlines"])
 logger = structlog.get_logger(__name__)
 
 
+def _deadline_priority(days_until: int) -> str:
+    if days_until <= 3:
+        return "critical"
+    if days_until <= 10:
+        return "high"
+    if days_until <= 30:
+        return "medium"
+    return "low"
+
+
 def _load_reminder_settings(user_id: str) -> tuple:
     """Load reminder settings from user preferences. Returns (enabled, days)."""
+    from database import get_db, UserPreference
     db = None
     try:
         db = get_db()
@@ -111,67 +125,42 @@ def _deadline_to_response(deadline) -> DeadlineResponse:
 )
 async def get_upcoming_deadlines(
     days: int = Query(30, ge=1, le=365, description="Look-ahead window in days (max 365)"),
-    current_user: CurrentUser = Depends(get_current_user)
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db_rls),
 ) -> UpcomingDeadlinesResponse:
     logger.info(
         "Fetching upcoming deadlines",
         user_id=current_user.user_id,
         days=days,
     )
-    
-    reminder_enabled, reminder_days = _load_reminder_settings(current_user.user_id)
 
-    now = Clock.now()
-    deadlines = [
-        DeadlineResponse(
-            deadline_id="dl_001",
-            user_id=current_user.user_id,
-            case_id="case_001",
-            title="Motion Response Due",
-            description="Response to plaintiff's motion for summary judgment",
-            due_date=now + timedelta(days=3),
-            days_until_due=3,
-            priority="critical",
-            status="pending",
-            reminder_enabled=reminder_enabled,
-            reminder_days=reminder_days,
-            created_at=now
-        ),
-        DeadlineResponse(
-            deadline_id="dl_002",
-            user_id=current_user.user_id,
-            case_id="case_002",
-            title="Filing Deadline",
-            description="Appeal filing deadline",
-            due_date=now + timedelta(days=10),
-            days_until_due=10,
-            priority="high",
-            status="pending",
-            reminder_enabled=reminder_enabled,
-            reminder_days=reminder_days,
-            created_at=now
-        ),
-        DeadlineResponse(
-            deadline_id="dl_003",
-            user_id=current_user.user_id,
-            case_id="case_003",
-            title="Document Production",
-            description="Produce documents per discovery order",
-            due_date=now + timedelta(days=21),
-            days_until_due=21,
-            priority="medium",
-            status="pending",
-            reminder_enabled=reminder_enabled,
-            reminder_days=reminder_days,
-            created_at=now
-        ),
-    ]
-    
+    reminder_enabled, reminder_days = _load_reminder_settings(current_user.user_id)
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(days=days)
+
+    deadline_rows = (
+        db.query(CaseDeadline)
+        .filter(
+            CaseDeadline.user_id == int(current_user.user_id),
+            CaseDeadline.deadline_date >= now,
+            CaseDeadline.deadline_date <= cutoff,
+            CaseDeadline.is_completed == False,
+        )
+        .order_by(CaseDeadline.deadline_date.asc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    deadlines = [_deadline_to_response(d) for d in deadline_rows]
+
     critical = sum(1 for d in deadlines if d.priority == "critical")
     high = sum(1 for d in deadlines if d.priority == "high")
     medium = sum(1 for d in deadlines if d.priority == "medium")
     low = sum(1 for d in deadlines if d.priority == "low")
-    
+
     return UpcomingDeadlinesResponse(
         user_id=current_user.user_id,
         total_deadlines=len(deadlines),
@@ -205,17 +194,31 @@ async def get_deadline_details(
     return DeadlineResponse(
         deadline_id=deadline_id,
         user_id=current_user.user_id,
-        case_id="case_001",
-        title="Example Deadline",
-        description="Example deadline description",
-        due_date=now + timedelta(days=5),
-        days_until_due=5,
-        priority="high",
-        status="pending",
-        reminder_enabled=reminder_enabled,
-        reminder_days=reminder_days,
-        created_at=now
     )
+
+    try:
+        deadline_id_int = int(deadline_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid deadline ID format",
+        )
+
+    deadline = db.query(CaseDeadline).filter(CaseDeadline.id == deadline_id_int).first()
+    if not deadline:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deadline not found",
+        )
+
+    decision = evaluate_policy(current_user, "deadline", "view", deadline, db)
+    if decision != PolicyDecision.ALLOW:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to view this deadline",
+        )
+
+    return _deadline_to_response(deadline)
 
 
 @router.post(
@@ -231,7 +234,7 @@ async def create_deadline(
     description: str = "",
     reminder_days: int = 7,
     current_user: CurrentUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db_rls),
 ) -> DeadlineResponse:
     """Create a new deadline and persist it to the database."""
 
@@ -244,6 +247,25 @@ async def create_deadline(
     logger.info(
         "Creating deadline",
         user_id=current_user.user_id,
+        title=title,
+    )
+
+    # Verify case access via policy engine
+    case = db.query(Case).filter(Case.id == int(case_id)).first()
+    if not case:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Case not found",
+        )
+
+    decision = evaluate_policy(current_user, "case", "add_deadline", case, db)
+    if decision != PolicyDecision.ALLOW:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to add deadlines to this case",
+        )
+
+    now = datetime.now(timezone.utc)
         title=title
     )
     
@@ -270,20 +292,7 @@ async def create_deadline(
         user_id=current_user.user_id,
     )
 
-    return DeadlineResponse(
-        deadline_id=str(deadline.id),
-        user_id=current_user.user_id,
-        case_id=str(deadline.case_id),
-        title=deadline.case_title,
-        description=deadline.description or "",
-        due_date=deadline.deadline_date,
-        days_until_due=deadline.days_until_deadline(),
-        priority=_deadline_priority(deadline.days_until_deadline()),
-        status="pending",
-        reminder_enabled=True,
-        reminder_days=reminder_days,
-        created_at=deadline.created_at
-    )
+    return _deadline_to_response(deadline)
 
 
 @router.put(
@@ -295,11 +304,38 @@ async def update_deadline(
     deadline_id: int,
     title: str = None,
     due_date: datetime = None,
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db_rls),
 ) -> DeadlineResponse:
     logger.info(
         "Updating deadline",
         deadline_id=deadline_id,
+        user_id=current_user.user_id,
+    )
+
+    deadline = db.query(CaseDeadline).filter(CaseDeadline.id == deadline_id).first()
+    if not deadline:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deadline not found",
+        )
+
+    decision = evaluate_policy(current_user, "deadline", "update", deadline, db)
+    if decision != PolicyDecision.ALLOW:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to update this deadline",
+        )
+
+    if title is not None:
+        deadline.case_title = title
+    if due_date is not None:
+        deadline.deadline_date = due_date
+    deadline.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(deadline)
+
+    return _deadline_to_response(deadline)
         user_id=current_user.user_id
     )
     
@@ -319,11 +355,19 @@ async def update_deadline(
             CaseDeadline.user_id == int(current_user.user_id)
         ).first()
 
-        if not deadline:
+    if title is not None:
+        deadline.case_title = title
+    if due_date is not None:
+        # Validate via domain layer
+        if not DeadlineEngine.validate_not_past(due_date):
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Deadline not found"
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Deadline date cannot be in the past",
             )
+        deadline.deadline_date = due_date
+    deadline.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(deadline)
 
         if title is not None:
             deadline.case_title = title

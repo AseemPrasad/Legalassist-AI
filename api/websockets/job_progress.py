@@ -132,9 +132,18 @@ def register_job_progress_endpoint(app: FastAPI) -> None:
             except (TypeError, ValueError):
                 pass
 
+        # Extract and propagate trace context from WebSocket headers
+        from observability.instrumentation import use_extracted_trace_context, get_current_trace_headers
+        incoming_trace = {
+            key.lower(): value
+            for key, value in websocket.headers.items()
+            if key.lower() in {"traceparent", "tracestate", "baggage"}
+        }
+        
         # Forward events until job completes or client disconnects
         try:
-            await forward_job_events(websocket, job_id, job_realtime_bus)
+            with use_extracted_trace_context(incoming_trace):
+                await forward_job_events(websocket, job_id, job_realtime_bus)
         except Exception as e:
             logger.warning("websocket_job_progress_error", job_id=job_id, error=str(e))
         finally:

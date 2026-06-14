@@ -1,36 +1,13 @@
-"""API middleware for request context, error handling, and logging.
-
-The composable security middlewares now live in api.middlewares.* and are
-re-exported here for backward compatibility.
-"""
-API Rate Limiting and Middleware
-"""
+"""API middleware for request context, error handling, and logging."""
 import hashlib
 import time
 import threading
-from typing import Callable
+from typing import Callable, Optional
+
 from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
 import redis
-
-# ---------------------------------------------------------------------------
-# Request size enforcement configuration
-# ---------------------------------------------------------------------------
-
-# Maximum allowed request body in bytes (50 MB).
-MAX_BODY_SIZE: int = 50 * 1024 * 1024
-
-# URL path prefixes whose endpoints accept uploaded/streamed bodies and must
-# therefore have strict size enforcement even when Content-Length is absent.
-UPLOAD_PATH_PREFIXES: tuple = (
-    "/api/v1/analyze",
-    "/api/v1/documents",
-    "/api/v1/cases",
-    "/api/v1/reports",
-)
 import structlog
-from fastapi import HTTPException, Request, status
-from fastapi.responses import JSONResponse
 
 from api.config import get_settings
 from observability.instrumentation import (
@@ -49,114 +26,73 @@ logger = structlog.get_logger(__name__)
 settings = get_settings()
 
 
-class RateLimiter:
-    """Token bucket rate limiter using Redis with application-level locking.
-
-    Thread safety:
-    - Redis-side:  the INCR + EXPIRE Lua script runs atomically in Redis.
-    - App-side:    a module-level ``_lock`` serialises local state access so
-                   that concurrent ASGI workers see consistent bucket values.
-    """
-
-    _instance = None
-    _lock = threading.Lock()
-
-    # Lua script: atomically increment the counter and set TTL on first write.
-    # Redis executes Lua scripts as a single atomic operation, so there is no
-    # window between INCR and EXPIRE where the key can be left without a TTL.
-    _INCR_EXPIRE_SCRIPT = """
-local current = redis.call('INCR', KEYS[1])
-if current == 1 then
-    redis.call('EXPIRE', KEYS[1], ARGV[1])
-end
-
-redis.call('ZADD', key, now, now .. ':' .. ARGV[4])
-redis.call('PEXPIRE', key, window * 1000 + 1000)
-return {1, 0}
-"""
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def __init__(self, redis_url: str = "redis://localhost:6379/0"):
-        if not hasattr(self, "_initialised"):
-            self.redis = redis.from_url(redis_url, decode_responses=True)
-            self.requests = 100  # requests
-            self.window = 60  # seconds
-            self._script = self.redis.register_script(self._INCR_EXPIRE_SCRIPT)
-            self._initialised = True
-
-    def is_allowed(self, key: str) -> bool:
-        """Check if request is allowed under the rate limit."""
-        try:
-            with self._lock:
-                current = int(self._script(keys=[key], args=[self.window]))
-            return current <= self.requests
-        except Exception as e:
-            logger.error("Rate limiter error", error=str(e))
-            return True
-    
-    def get_retry_after(self, key: str) -> int:
-        try:
-            client = self._get_client()
-            now_ms = int(time.time() * 1000)
-            oldest = client.zrange(key, 0, 0, withscores=True)
-            if oldest:
-                return max(1, int((oldest[0][1] + 60000 - now_ms) / 1000))
-        except Exception:
-            pass
-        return 60
-
-    def current_count(self, key: str) -> int:
-        try:
-            client = self._get_client()
-            now_ms = int(time.time() * 1000)
-            cutoff = now_ms - 60000
-            client.zremrangebyscore(key, 0, cutoff)
-            return int(client.zcard(key) or 0)
-        except Exception:
-            return 0
+def sanitize_log_text(text: str) -> str:
+    """Strip control characters from log text."""
+    return text.replace("\x00", "").replace("\n", " ").replace("\r", " ")[:1000]
 
 
-_limiter: Optional[RateLimiter] = None
-
-
-def get_limiter() -> RateLimiter:
-    global _limiter
-    if _limiter is None:
-        _limiter = RateLimiter()
-    return _limiter
+def structured_error_response(status_code: int, error_code: str, message: str, request: Request):
+    """Build standardized error JSONResponse."""
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "error_code": error_code,
+            "message": message,
+            "path": request.url.path,
+        },
+    )
 
 
 async def add_correlation_id_middleware(request: Request, call_next: Callable):
+    """Inject W3C Trace Context traceparent on every request and propagate through response."""
+    try:
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+        from opentelemetry import trace as otel_trace
+        propagator = TraceContextTextMapPropagator()
+        tracer = otel_trace.get_tracer(__name__)
+    except Exception:
+        propagator = None
+        tracer = None
+
+    # Extract incoming trace context from headers
+    incoming_carrier = {
+        key.lower(): value
+        for key, value in request.headers.items()
+        if key.lower() in {"traceparent", "tracestate", "baggage"}
+    }
+
+    # If no traceparent exists, start a new trace
+    if "traceparent" not in incoming_carrier:
+        if tracer:
+            with tracer.start_as_current_span("http_request") as span:
+                trace_id = format(span.get_span_context().trace_id, "032x")
+                span_id = format(span.get_span_context().span_id, "016x")
+                incoming_carrier["traceparent"] = f"00-{trace_id}-{span_id}-01"
+        else:
+            correlation_id = generate_correlation_id()
+            incoming_carrier["traceparent"] = f"00-{correlation_id}-0000000000000001-01"
+
+    traceparent = incoming_carrier.get("traceparent", "")
     correlation_id = (
         request.headers.get("X-Correlation-Id")
         or request.headers.get("X-Request-Id")
         or request.headers.get("x-correlation-id")
         or request.headers.get("x-request-id")
-        or generate_correlation_id()
+        or (traceparent.split("-")[1] if "-" in traceparent else generate_correlation_id())
     )
     request.state.correlation_id = correlation_id
     request.state.request_id = correlation_id
-    request.state.user_id = getattr(request.state, "rate_limit_identifier", request.headers.get("X-User-Id", "anonymous"))
+    request.state.traceparent = traceparent
+    request.state.trace_headers = incoming_carrier
 
-    incoming_trace_headers = {
-        key.lower(): value
-        for key, value in request.headers.items()
-        if key.lower() in {"traceparent", "tracestate", "baggage"}
-    }
-    request.state.trace_headers = incoming_trace_headers
+    bind_request_context(request_id=correlation_id, user_id=getattr(request.state, "user_id", None))
 
-    with use_extracted_trace_context(incoming_trace_headers):
+    with use_extracted_trace_context(incoming_carrier):
         response = await call_next(request)
 
-    trace_headers = get_current_trace_headers()
-    for header_name, header_value in trace_headers.items():
-        response.headers[header_name] = header_value
+    # Propagate trace context in response headers
+    response.headers["traceparent"] = traceparent
     response.headers["X-Correlation-Id"] = correlation_id
     response.headers["X-Request-Id"] = correlation_id
     response.headers["X-Frame-Options"] = "DENY"
@@ -167,7 +103,6 @@ async def add_correlation_id_middleware(request: Request, call_next: Callable):
 
 async def error_handling_middleware(request: Request, call_next: Callable):
     """Convert uncaught exceptions into a structured JSON 500 response."""
-
     try:
         return await call_next(request)
     except HTTPException:
@@ -190,12 +125,7 @@ async def error_handling_middleware(request: Request, call_next: Callable):
 
 
 async def logging_middleware(request: Request, call_next: Callable):
-    """Log all requests and responses
-    
-    Note: Error handling and tracing blocks are strictly enclosed inside this
-    async function scope to prevent global scope exception masking.
-    """
-    
+    """Log all requests and responses with trace context."""
     start_time = time.time()
     endpoint = request.url.path
     request_id = getattr(
@@ -208,25 +138,6 @@ async def logging_middleware(request: Request, call_next: Callable):
     user_id_attr = getattr(request.state, "user_id", request.headers.get("X-User-Id", "anonymous"))
 
     bind_request_context(request_id=request_id, user_id=user_id_attr)
-
-    if apply_rls_context and _is_postgres and user_id_attr not in (None, "anonymous", ""):
-        # Normalize common identifier shapes ("user:123", numeric strings, ints)
-        rls_id = None
-        try:
-            if isinstance(user_id_attr, int):
-                rls_id = int(user_id_attr)
-            elif isinstance(user_id_attr, str):
-                if user_id_attr.isdigit():
-                    rls_id = int(user_id_attr)
-                elif user_id_attr.startswith("user:"):
-                    parts = user_id_attr.split(":", 1)
-                    if len(parts) == 2 and parts[1].isdigit():
-                        rls_id = int(parts[1])
-        except Exception:
-            rls_id = None
-
-        if rls_id is not None:
-            request.state.db_rls_user_id = rls_id
 
     response = None
     error_occurred = False
@@ -279,7 +190,13 @@ async def logging_middleware(request: Request, call_next: Callable):
         clear_request_context()
 
     return response
- 
+
+
+# Re-export middlewares from api.middlewares.* for backward compatibility
+from api.middlewares.idempotency import http_idempotency_manager, idempotency_middleware, is_safe_to_cache
+from api.middlewares.rate_limit import rate_limit_middleware, settings as rate_limit_settings
+from api.middlewares.request_size import request_size_limit_middleware
+from api.middlewares.security import security_headers_middleware
 
 __all__ = [
     "add_correlation_id_middleware",
@@ -287,10 +204,10 @@ __all__ = [
     "http_idempotency_manager",
     "idempotency_middleware",
     "is_safe_to_cache",
-    "limiter",
     "logging_middleware",
     "rate_limit_middleware",
     "request_size_limit_middleware",
-    "settings",
+    "sanitize_log_text",
+    "security_headers_middleware",
+    "structured_error_response",
 ]
-

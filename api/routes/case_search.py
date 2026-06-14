@@ -4,7 +4,8 @@ Endpoints for finding similar cases, precedents, comparisons, and knowledge grap
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from typing import List, Optional
-
+from core.policy_engine import PolicyDecision
+from api.dependencies import evaluate_policy
 from api.auth import get_current_user, CurrentUser
 from database import CaseRecord, CaseOutcome, Case, get_db
 from analytics_engine import CaseSimilarityCalculator
@@ -25,9 +26,13 @@ def search_similar_cases(
     """Find similar cases based on attribute similarity"""
     db = get_db()
     try:
-        case = db.query(Case).filter(Case.id == case_id, Case.user_id == int(current_user.user_id)).first()
+        case = db.query(Case).filter(Case.id == case_id).first()
         if not case:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+
+        decision = evaluate_policy(current_user, "case", "view", case, db)
+        if decision != PolicyDecision.ALLOW:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to view this case")
 
         query = db.query(CaseRecord)
         if case_type:

@@ -5,17 +5,17 @@ GET /api/v1/analyze/{job_id} - Check analysis job status
 """
 from datetime import datetime, timezone
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 from api.models import DocumentAnalysisRequest, DocumentAnalysisSummary, AnalysisJobResponse
 from api.auth import get_current_user, CurrentUser
-from api.dependencies import get_db_rls
+from api.dependencies import get_db_rls, evaluate_policy
 from api.limiter import RateLimit
 from db.models.cases import Attachment
+from core.policy_engine import PolicyDecision
 
 try:
     from celery_app import analyze_document_task, TaskStatus, enqueue_task_from_http_request
@@ -33,6 +33,7 @@ from api.validation import (
 from api.job_registry import register_job_owner, get_job_owner
 from config import Config
 import structlog
+import os
 
 router = APIRouter(prefix="/api/v1/analyze", tags=["document-analysis"])
 logger = structlog.get_logger(__name__)
@@ -127,17 +128,23 @@ async def analyze_document(
     # Validate file_path is within the upload jail before passing to the worker.
     # This is defence-in-depth: the worker also validates, but catching it here
     # returns a clean 400 to the caller rather than a task failure.
+    safe_path = None
     if request.file_path:
         from api.validation import validate_upload_file_path
-        request.file_path = validate_upload_file_path(request.file_path)
+        safe_path = validate_upload_file_path(request.file_path)
     
-    # Ownership verification: the user must own an Attachment record for this path
+    # Ownership verification via policy engine
     if safe_path:
         attachment = db.query(Attachment).filter(
             Attachment.stored_path == safe_path,
-            Attachment.user_id == int(current_user.user_id),
         ).first()
         if not attachment:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to access this file",
+            )
+        decision = evaluate_policy(current_user, "attachment", "view", attachment, db)
+        if decision != PolicyDecision.ALLOW:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You do not have permission to access this file",

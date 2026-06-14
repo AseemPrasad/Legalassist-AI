@@ -26,6 +26,7 @@ from typing import Dict, Any, Optional
 import io
 import requests
 from types import SimpleNamespace
+from core.policy_engine import evaluate, UserContext, PolicyDecision
 
 from api.validation import validate_file_url, fetch_url_safe
 
@@ -348,18 +349,19 @@ def build_task_context_headers(
     context_user_id: Optional[str] = None,
     trace_headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
-    """Build Celery task headers used to propagate request context."""
+    """Build Celery task headers used to propagate W3C Trace Context."""
     resolved_request_id = request_id or generate_correlation_id()
-    headers = {
-        "x-request-id": resolved_request_id,
-        "x-correlation-id": resolved_request_id,
-    }
+    headers = {}
     if context_user_id:
         headers["x-user-id"] = str(context_user_id)
-    for key in (trace_headers or {}).keys():
-        lower_key = key.lower()
-        if lower_key in {"traceparent", "tracestate", "baggage"}:
-            headers[lower_key] = trace_headers[key]
+    # Prefer W3C traceparent over legacy x-request-id
+    if trace_headers and "traceparent" in trace_headers:
+        headers["traceparent"] = trace_headers["traceparent"]
+        if "tracestate" in trace_headers:
+            headers["tracestate"] = trace_headers["tracestate"]
+    else:
+        # Fallback: generate traceparent from correlation ID
+        headers["traceparent"] = f"00-{resolved_request_id.replace('-', '')}-0000000000000001-01"
     return headers
 
 
@@ -431,8 +433,10 @@ def enqueue_task_from_http_request(
 @before_task_publish.connect
 def _inject_tracing_headers(sender=None, headers=None, **kwargs):
     """Inject OpenTelemetry trace context into every task message."""
-    if propagate is not None:
-        propagate.inject(headers)
+    if _propagator is not None:
+        carrier = {}
+        _propagator.inject(carrier)
+        headers.update(carrier)
 
 
 # ============================================================================
@@ -458,14 +462,22 @@ class ContextTask(Task):
     @staticmethod
     def _extract_task_request_context(task_request) -> Dict[str, Optional[str]]:
         headers = getattr(task_request, "headers", None) or {}
-        request_id = (
-            headers.get("x-request-id")
-            or headers.get("X-Request-Id")
-            or headers.get("x-correlation-id")
-            or headers.get("X-Correlation-Id")
-            or getattr(task_request, "root_id", None)
-            or getattr(task_request, "id", None)
+        # Prefer W3C traceparent for correlation ID
+        traceparent = (
+            headers.get("traceparent")
+            or headers.get("Traceparent")
         )
+        if traceparent and "-" in traceparent:
+            request_id = traceparent.split("-")[1]
+        else:
+            request_id = (
+                headers.get("x-request-id")
+                or headers.get("X-Request-Id")
+                or headers.get("x-correlation-id")
+                or headers.get("X-Correlation-Id")
+                or getattr(task_request, "root_id", None)
+                or getattr(task_request, "id", None)
+            )
         user_id = headers.get("x-user-id") or headers.get("X-User-Id")
         trace_headers = {
             key.lower(): value
@@ -1355,17 +1367,18 @@ def process_case_document_upload_task(
     try:
         case = get_case_by_id(session, int(case_id))
 
-        # Ownership check: compare as integers to prevent string-based bypass.
-        # The task receives user_id as a string from the Celery JSON queue.
-        # Using str(case.user_id) != str(user_id) allows values like "007" or
-        # " 7" to bypass the check for user 7, or equal a different integer
-        # through locale-specific string coercion.
+        # Policy engine ownership check with integer coercion defence
         try:
             task_user_id_int = int(user_id)
         except (TypeError, ValueError):
             raise ValueError(f"Invalid user_id value: {user_id!r}")
 
-        if not case or case.user_id != task_user_id_int:
+        if not case:
+            raise ValueError("Case not found")
+
+        user_ctx = UserContext(user_id=task_user_id_int, email="", role="user")
+        decision = evaluate(user_ctx, "case", "view", case)
+        if decision != PolicyDecision.ALLOW:
             raise ValueError("Case not found or not owned by the provided user")
 
         doc = get_case_document_by_id(session, int(document_id))

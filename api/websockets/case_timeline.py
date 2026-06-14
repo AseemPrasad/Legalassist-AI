@@ -171,5 +171,14 @@ def register_case_timeline_endpoint(app: FastAPI) -> None:
         subprotocol = "access_token" if "access_token" in requested_protocols else None
         await websocket.accept(subprotocol=subprotocol)
 
+        # Extract and propagate trace context from WebSocket headers
+        from observability.instrumentation import use_extracted_trace_context
+        incoming_trace = {
+            key.lower(): value
+            for key, value in websocket.headers.items()
+            if key.lower() in {"traceparent", "tracestate", "baggage"}
+        }
+        
         # Forward events with periodic authorization revalidation
-        await forward_timeline_events(websocket, case_id, user_id, timeline_realtime_bus, db)
+        with use_extracted_trace_context(incoming_trace):
+            await forward_timeline_events(websocket, case_id, user_id, timeline_realtime_bus, db)

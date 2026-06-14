@@ -39,6 +39,12 @@ class JobRealtimeBus:
 
     async def publish(self, job_id: str, payload: dict) -> None:
         """Publish an event to all subscribers of a job_id."""
+        # Inject current trace context into payload for end-to-end correlation
+        from observability.instrumentation import get_current_trace_headers
+        trace_headers = get_current_trace_headers()
+        if trace_headers:
+            payload.setdefault("trace_context", {}).update(trace_headers)
+        
         async with self._lock:
             queue = self._queues.get(job_id)
         if queue is None:

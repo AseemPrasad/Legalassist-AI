@@ -104,8 +104,8 @@ def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
         try:
             conf = float(confs[i])
         except Exception as e:
-        import logging
-        logging.error(f"Core error: {e}")
+            import logging
+            logging.error(f"Core error: {e}")
             conf = -1.0
         if conf < 0:
             continue
@@ -404,8 +404,7 @@ def compress_text(text: str, limit: int = 6000) -> str:
 def parse_llm_json(raw_text: str) -> Dict[str, Any]:
     try:
         # Strip markdown code blocks if the AI adds them
-        clean_json = raw_text.replace("```json", "").replace("
-```", "").strip()
+        clean_json = raw_text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean_json)
     except:
         return {
@@ -709,7 +708,7 @@ def parse_timeline(raw_text: str) -> List[Dict[str, str]]:
                     try: return datetime.strptime(date_str, fmt)
                     except: continue
                 return datetime(9999, 12, 31)
-    except Exception:
+            except Exception:
                 return datetime(9999, 12, 31)
 
         return sorted(events, key=lambda x: parse_date(x.get('date')))

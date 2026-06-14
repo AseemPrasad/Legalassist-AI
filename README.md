@@ -1,3 +1,12 @@
+﻿## Live Demo
+
+**Try it out:** [View Project on GitHub](https://github.com/AseemPrasad/Legalassist-AI) *(Live deployment coming soon)*
+
+
+> The live deployment URL will be updated once the production hosting is configured. In the meantime, please follow the [installation instructions](#developer-setup--running-tests) below to run the project locally.
+
+
+
 **Legalassist AI (Unified Legal Information Platform)**
 
 The challenge is the Information Barrier in the Judiciary that prevents citizens from understanding their own legal outcomes. 
@@ -40,6 +49,13 @@ intermediaries for basic updates. The judiciary is stuck with manual records and
  
  Accessibility (Digital Divide Bridge): By instantly converting legal jargon into local language summaries, the solution bridges the Digital Divide and promotes inclusive justice for ordinary people who cannot navigate the courts due to language
 
+
+
+## Live Demo
+
+**Try it out:** [LegalAssist AI Live App](https://legalassist-ai.example.com)
+
+> The live deployment URL will be updated once the production hosting is configured. In the meantime, please follow the [installation instructions](#developer-setup--running-tests) below to run the project locally.
 ## Developer Setup & Running Tests
 
 ### Local Setup

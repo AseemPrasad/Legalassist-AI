@@ -181,6 +181,7 @@ def _sync_report_statuses(user_id: int) -> List[Dict[str, Any]]:
 @router.post(
     "/generate",
     response_model=ReportGenerationResponse,
+    status_code=status.HTTP_201_CREATED,
     summary="Generate report asynchronously"
 )
 async def generate_report(
@@ -210,10 +211,14 @@ async def generate_report(
         report_type=request.report_type
     )
 
-    # Queue async task
+    # Queue async task via Celery
+    # ``case_id`` is validated and converted to int to match the
+    # downstream worker contract (avoids stringly-typed IDs).
+    case_id_int = int(request.case_id)
     task = generate_report_task.delay(
         user_id=current_user.user_id,
         case_id=case_id_int,
+
         celery_task_id="pending",  # Will be updated after task enqueue
         report_type=request.report_type,
         format=request.format,
