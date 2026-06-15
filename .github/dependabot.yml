@@ -1,0 +1,120 @@
+version: 2
+updates:
+  # Python pip dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "automated"
+    reviewers:
+      - "AseemPrasad"
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+    groups:
+      test-dependencies:
+        patterns:
+          - "pytest*"
+          - "coverage*"
+        update-types:
+          - "minor"
+          - "patch"
+      linting-dependencies:
+        patterns:
+          - "black*"
+          - "flake8*"
+          - "mypy*"
+          - "ruff*"
+          - "isort*"
+          - "pylint*"
+          - "bandit*"
+          - "pre-commit*"
+
+  # Python API dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "automated"
+      - "api"
+    allow:
+      - dependency-name: "fastapi*"
+      - dependency-name: "uvicorn*"
+      - dependency-name: "sqlalchemy*"
+      - dependency-name: "celery*"
+      - dependency-name: "redis*"
+      - dependency-name: "httpx*"
+      - dependency-name: "prometheus*"
+      - dependency-name: "opentelemetry*"
+      - dependency-name: "strawberry-graphql*"
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+
+  # Docker dependencies
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "automated"
+      - "docker"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # Docker API service
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "automated"
+      - "docker"
+    ignore:
+      - dependency-name: "python"
+        versions: [">=3.13"]
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "thursday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "automated"
+      - "github_actions"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
