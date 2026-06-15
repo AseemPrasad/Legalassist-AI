@@ -95,6 +95,7 @@ async def add_correlation_id_middleware(request: Request, call_next: Callable):
     response.headers["traceparent"] = traceparent
     response.headers["X-Correlation-Id"] = correlation_id
     response.headers["X-Request-Id"] = correlation_id
+    response.headers["X-Request-Id"] = correlation_id
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
