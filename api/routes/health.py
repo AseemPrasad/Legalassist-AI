@@ -9,12 +9,16 @@ from fastapi import APIRouter, Response, Depends, HTTPException, status
 import structlog
 from api.health_checks import get_health_manager
 from api.auth import get_current_user, CurrentUser
+from api.config import get_settings
 
 from db.models import SchedulerRun
 from db.session import SessionLocal
 from sqlalchemy import desc
 router = APIRouter(prefix="/api/v1", tags=["health"])
 logger = structlog.get_logger(__name__)
+
+APP_STARTUP_TIME = datetime.now(timezone.utc)
+API_VERSION = get_settings().API_VERSION
 
 
 async def get_current_admin_user(
@@ -38,6 +42,12 @@ async def health_check() -> dict:
     """API health status consolidating database, queue/workers, and scheduler metrics."""
     manager = get_health_manager()
     report = await manager.deep_health_check(timeout=5)
+    
+    # Add version and uptime metadata
+    uptime_seconds = (datetime.now(timezone.utc) - APP_STARTUP_TIME).total_seconds()
+    report["version"] = API_VERSION
+    report["uptime_seconds"] = uptime_seconds
+    report["started_at"] = APP_STARTUP_TIME.isoformat()
     
     # Consolidate scheduler metrics
     db = SessionLocal()
