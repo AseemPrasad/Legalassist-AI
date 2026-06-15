@@ -1,0 +1,48 @@
+name: "Issue-PR Link Validation"
+
+on:
+  pull_request_target:
+    types: [opened, edited]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for issue reference
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request.body || '';
+            const pattern = /(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved|ref|refs|references)\s+#(\d+)/gi;
+            const match = body.match(pattern);
+            return match ? match.length : 0;
+          result-encoding: string
+
+      - name: Add label if missing issue reference
+        if: steps.check.outputs.result == '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['needs-issue-link']
+            });
+
+      - name: Comment if missing issue reference
+        if: steps.check.outputs.result == '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: 'Thank you for your contribution! Could you please link this PR to a related issue by adding "Closes #ISSUE_NUMBER" to the PR description?'
+            });
