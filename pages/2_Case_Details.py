@@ -39,6 +39,34 @@ import html
 from config import Config
 from pypdf import PdfReader
 
+# Allowed MIME types for file upload validation
+ALLOWED_MIME_TYPES = {
+    "pdf": "application/pdf",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+}
+
+
+def validate_file_mime_type(uploaded_file) -> bool:
+    """Validate uploaded file MIME type matches its declared extension."""
+    try:
+        import magic
+        header = uploaded_file.read(2048)
+        uploaded_file.seek(0)
+        detected_mime = magic.from_buffer(header, mime=True)
+        ext = uploaded_file.name.rsplit(".", 1)[-1].lower() if "." in uploaded_file.name else ""
+        expected_mime = ALLOWED_MIME_TYPES.get(ext)
+        if expected_mime and detected_mime != expected_mime:
+            st.error(f"File type mismatch: detected '{detected_mime}' but expected '{expected_mime}' for .{ext} files.")
+            return False
+        return True
+    except ImportError:
+        return True
+    except Exception:
+        return True
+
+
 # Page config
 st.set_page_config(
     page_title="Case Details - LegalAssist AI",
@@ -292,6 +320,12 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
             uploaded_pdf = st.file_uploader("Upload Judgment PDF", type=["pdf"])
             document_text = None
             if uploaded_pdf:
+                # Validate MIME type before processing
+                mime_valid = validate_file_mime_type(uploaded_pdf)
+                if not mime_valid:
+                    uploaded_pdf = None
+
+            if uploaded_pdf:
                 # Validate file size
                 file_size_mb = uploaded_pdf.size / (1024 * 1024)
                 is_valid = True
@@ -374,6 +408,8 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
             if st.button("Upload Attachment", use_container_width=True, key="upload_attachment_btn"):
                 if not uploaded:
                     st.error("Please select a file to upload.")
+                elif not validate_file_mime_type(uploaded):
+                    st.error("Upload rejected: file content type does not match its extension.")
                 else:
                     try:
                         bytes_data = uploaded.read()
