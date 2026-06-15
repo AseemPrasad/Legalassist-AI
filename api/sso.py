@@ -238,7 +238,7 @@ def _configure_google():
         client_id=SSOConfig.GOOGLE_CLIENT_ID,
         client_secret=SSOConfig.GOOGLE_CLIENT_SECRET,
         server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-        client_kwargs={"scope": "openid email profile"},
+        client_kwargs={"scope": "openid email profile", "timeout": 10},
     )
     return _oauth.google
 
@@ -252,7 +252,7 @@ def _configure_microsoft():
         client_id=SSOConfig.MICROSOFT_CLIENT_ID,
         client_secret=SSOConfig.MICROSOFT_CLIENT_SECRET,
         server_metadata_url=f"https://login.microsoftonline.com/{tenant}/v2.0/.well-known/openid-configuration",
-        client_kwargs={"scope": "openid email profile"},
+        client_kwargs={"scope": "openid email profile", "timeout": 10},
     )
     return _oauth.microsoft
 
