@@ -19,7 +19,7 @@ class CaseRecord(Base):
     case_value = Column(String(255))
     outcome = Column(String(255))
     judgment_summary = Column(Text)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), index=True)
 
     outcome_data = relationship("db.models.analytics.CaseOutcome", back_populates="case_record", uselist=False, cascade="all, delete-orphan")
 
@@ -53,10 +53,10 @@ class CaseAnalytics(Base):
     __tablename__ = "case_analytics"
 
     id = Column(Integer, primary_key=True)
-    case_type = Column(String(255), nullable=False)
+    case_type = Column(String(255), nullable=False, index=True)
     jurisdiction = Column(String(255), nullable=False, index=True)
     court_name = Column(String(255), nullable=True)
-    judge_name = Column(String(255), nullable=True)
+    judge_name = Column(String(255), nullable=True, index=True)
     
     total_cases = Column(Integer, default=0)
     plaintiff_win_count = Column(Integer, default=0)
@@ -71,7 +71,7 @@ class CaseAnalytics(Base):
     avg_appeal_duration = Column(Integer, nullable=True)
     avg_appeal_cost = Column(Integer, nullable=True)
     
-    last_updated = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+    last_updated = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc), index=True)
 
     def __repr__(self):
         return f"<CaseAnalytics(jurisdiction={self.jurisdiction}, appeal_success_rate={self.appeal_success_rate})>"
@@ -89,7 +89,7 @@ class ModelFeedback(Base):
     is_accurate = Column(Boolean, nullable=True, index=True)
     corrected_text = Column(Text, nullable=True)
     feedback_notes = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
 
     case = relationship("db.models.analytics.CaseRecord")
 
