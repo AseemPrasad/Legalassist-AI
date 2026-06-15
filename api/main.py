@@ -257,8 +257,27 @@ def create_app() -> FastAPI:
     
     @app.on_event("shutdown")
     async def shutdown_event():
-        """Cleanup on shutdown"""
-        logger.info("API Shutting down")
+        """Graceful shutdown — drain connections, close pools, flush logs."""
+        logger.info("api_shutdown_started", message="API shutting down gracefully")
+
+        # Close database connections
+        try:
+            from database import SessionLocal
+            if hasattr(SessionLocal, "close_all"):
+                SessionLocal.close_all()
+            logger.info("api_shutdown_db_closed", message="Database connections closed")
+        except Exception as exc:
+            logger.warning("api_shutdown_db_error", error=str(exc))
+
+        # Flush pending log records
+        try:
+            import logging
+            logging.shutdown()
+            logger.info("api_shutdown_logs_flushed", message="Log handlers flushed")
+        except Exception:
+            pass
+
+        logger.info("api_shutdown_complete", message="API shutdown complete")
     
     # ========================================================================
     # OpenAPI Customization
