@@ -1,0 +1,37 @@
+name: PR Size Labeler
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  size-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply size label
+        uses: pascalgn/size-label-action@v0.5.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          sizes: >
+            {
+              "0": "XS",
+              "20": "S",
+              "100": "M",
+              "500": "L",
+              "1000": "XL"
+            }
+          # lock files and generated output should not count towards PR size
+          ignore: >
+            package-lock.json
+            poetry.lock
+            Pipfile.lock
+            yarn.lock
+            **/*.min.js
+            **/*.min.css
+            **/*.snap
