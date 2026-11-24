@@ -257,8 +257,11 @@ def create_app() -> FastAPI:
     
     @app.on_event("shutdown")
     async def shutdown_event():
-        """Cleanup on shutdown"""
+        """Release Redis clients, the DB pool and log handlers on shutdown"""
         logger.info("API Shutting down")
+        from api.shutdown import run_shutdown
+        completed = await run_shutdown()
+        logger.info("API shutdown complete", clean=completed)
     
     # ========================================================================
     # OpenAPI Customization
