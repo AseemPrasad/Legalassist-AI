@@ -38,6 +38,7 @@ import pytz
 import html
 from config import Config
 from pypdf import PdfReader
+from utils.upload_validation import validate_upload
 
 # Page config
 st.set_page_config(
@@ -301,6 +302,11 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
                     is_valid = False
                 elif file_size_mb > Config.WARN_FILE_SIZE_MB:
                     st.warning("⚠️ This file is quite large. Processing may take longer than usual.")
+
+                mime_error = validate_upload(uploaded_pdf.name, uploaded_pdf.getvalue()[:2048])
+                if mime_error:
+                    st.error(f"🛑 {mime_error}")
+                    is_valid = False
                 
                 if is_valid:
                     try:
@@ -377,6 +383,10 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
                 else:
                     try:
                         bytes_data = uploaded.read()
+                        mime_error = validate_upload(uploaded.name, bytes_data[:2048])
+                        if mime_error:
+                            st.error(mime_error)
+                            return
                         result = upload_case_attachment(
                             user_id=user_id,
                             case_id=case_id,
