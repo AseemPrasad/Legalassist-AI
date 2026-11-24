@@ -20,6 +20,7 @@ Environment Variables:
     # General
     SSO_ENABLED=true
     AUTO_PROVISION_USERS=true  # auto-create users from SSO if not exists
+    SSO_HTTP_TIMEOUT=10  # seconds allowed for outbound calls to the identity provider
 """
 
 import hashlib
@@ -46,6 +47,20 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/v1/auth/sso", tags=["sso"])
 
 
+DEFAULT_HTTP_TIMEOUT = 10.0
+
+
+def _parse_timeout(raw: Optional[str]) -> float:
+    """Parse SSO_HTTP_TIMEOUT, falling back to the default on missing or bad values."""
+    if not raw:
+        return DEFAULT_HTTP_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_HTTP_TIMEOUT
+    return value if value > 0 else DEFAULT_HTTP_TIMEOUT
+
+
 class SSOConfig:
     GOOGLE_CLIENT_ID: Optional[str] = None
     GOOGLE_CLIENT_SECRET: Optional[str] = None
@@ -54,6 +69,7 @@ class SSOConfig:
     MICROSOFT_TENANT_ID: str = "common"
     SSO_ENABLED: bool = False
     AUTO_PROVISION_USERS: bool = True
+    HTTP_TIMEOUT: float = 10.0
 
     @classmethod
     def from_env(cls) -> "SSOConfig":
@@ -65,6 +81,7 @@ class SSOConfig:
         cls.MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID", "common")
         cls.SSO_ENABLED = os.getenv("SSO_ENABLED", "false").lower() == "true"
         cls.AUTO_PROVISION_USERS = os.getenv("AUTO_PROVISION_USERS", "true").lower() == "true"
+        cls.HTTP_TIMEOUT = _parse_timeout(os.getenv("SSO_HTTP_TIMEOUT"))
         return cls
 
 
@@ -238,7 +255,7 @@ def _configure_google():
         client_id=SSOConfig.GOOGLE_CLIENT_ID,
         client_secret=SSOConfig.GOOGLE_CLIENT_SECRET,
         server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-        client_kwargs={"scope": "openid email profile"},
+        client_kwargs={"scope": "openid email profile", "timeout": SSOConfig.HTTP_TIMEOUT},
     )
     return _oauth.google
 
@@ -252,7 +269,7 @@ def _configure_microsoft():
         client_id=SSOConfig.MICROSOFT_CLIENT_ID,
         client_secret=SSOConfig.MICROSOFT_CLIENT_SECRET,
         server_metadata_url=f"https://login.microsoftonline.com/{tenant}/v2.0/.well-known/openid-configuration",
-        client_kwargs={"scope": "openid email profile"},
+        client_kwargs={"scope": "openid email profile", "timeout": SSOConfig.HTTP_TIMEOUT},
     )
     return _oauth.microsoft
 
