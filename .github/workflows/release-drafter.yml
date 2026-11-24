@@ -1,0 +1,26 @@
+name: Release Drafter
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  update-release-draft:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Update the draft release
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter.yml
+          # only publish the draft from main; PR runs just apply labels
+          disable-releaser: ${{ github.ref != 'refs/heads/main' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

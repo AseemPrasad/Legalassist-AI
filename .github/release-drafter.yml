@@ -1,0 +1,45 @@
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+
+categories:
+  - title: "Features"
+    labels: ["feature", "feat", "enhancement"]
+  - title: "Bug fixes"
+    labels: ["fix", "bug"]
+  - title: "Documentation"
+    labels: ["docs", "documentation"]
+  - title: "Maintenance"
+    labels: ["chore", "dependencies", "refactor", "ci", "test"]
+
+# Pick the label from a Conventional Commit style PR title.
+autolabeler:
+  - label: "feat"
+    title: ['/^feat(\(.+\))?:/i']
+  - label: "fix"
+    title: ['/^fix(\(.+\))?:/i']
+  - label: "docs"
+    title: ['/^docs(\(.+\))?:/i']
+  - label: "chore"
+    title: ['/^(chore|ci|build|refactor|test|perf)(\(.+\))?:/i']
+
+version-resolver:
+  major:
+    labels: ["major", "breaking"]
+  minor:
+    labels: ["feat", "feature", "enhancement"]
+  patch:
+    labels: ["fix", "bug", "docs", "chore", "dependencies"]
+  default: patch
+
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+change-title-escapes: '\<*_&'
+no-changes-template: "- No user-facing changes."
+
+template: |
+  ## What's changed
+
+  $CHANGES
+
+  ## Contributors
+
+  $CONTRIBUTORS
